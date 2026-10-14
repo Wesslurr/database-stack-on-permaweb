@@ -8,6 +8,13 @@
 [![Gleam](https://img.shields.io/badge/Device-Gleam%20%2B%20BEAM-pink.svg)](https://gleam.run/)
 [![Status](https://img.shields.io/badge/PoC-Verified%20100%25-brightgreen.svg)]()
 
+> [!NOTE]
+> **Catatan Lingkungan Pengujian (Disclaimer PoC Environment):**
+> Seluruh rangkaian pengujian PoC ini dijalankan dalam **lingkungan lokal 100% (Local Self-Contained Sandbox)** untuk memverifikasi fungsionalitas dan performa arsitektur tanpa biaya gas/token:
+> - **HyperBEAM Dual-Node:** Berjalan lokal di mesin (`:8734` Hot Node, `:8735` SU Node).
+> - **Ledger Arweave:** Menggunakan simulator lokal **ArLocal** (`:1984`) sehingga pencatatan blok dan transaksi tidak memerlukan biaya token $AR sesungguhnya.
+> - **AO Process (Wasit):** Menggunakan engine WebAssembly resmi **`@permaweb/ao-loader`** yang mengeksekusi binary proses resmi AO (`process.wasm`) dan skrip Wasit Lua (`arbitrator.lua`). Logika validasi dan audit rantai hash SHA-256 adalah 100% kode AO asli (bukan tiruan/mock), dievaluasi di dalam sandbox WASM lokal tanpa memanggil Compute Unit (CU) AO Mainnet/Testnet publik di cloud.
+
 ---
 
 ## 1. Visi & Problem Statement
@@ -28,31 +35,31 @@ Arsitektur ini menerapkan prinsip **Optimistic Execution dengan Wasit Kriptograf
 
 ```mermaid
 flowchart TD
-    Client["Client / Game Player"] -->|HTTP Put :8734| HotNode["Hot Node HyperBEAM (:8734)\nhb@DESKTOP-EDTU3OG\n(100% Pure RAM - Zero Local Disk)"]
+    Client["Client / Game Player"] -->|"HTTP Put :8734"| HotNode["Hot Node HyperBEAM (:8734)<br/>hb@DESKTOP-EDTU3OG<br/>(100% Pure RAM - Zero Local Disk)"]
     
     subgraph HotNode_Internal ["Hot Node Execution Lane"]
-        HotNode -->|Custom Device| Hymessage["hymessage@1.0 (Gleam + Erlang)\nMonotonic Sequencer & Hash Chain"]
-        Hymessage -->|wasm-64@1.0| HyDB["HyDB Engine (Rust no_std)\nIn-RAM Slot Table & Merkle-XOR Root"]
+        HotNode -->|"Custom Device"| Hymessage["hymessage@1.0 (Gleam + Erlang)<br/>Monotonic Sequencer & Hash Chain"]
+        Hymessage -->|"wasm-64@1.0"| HyDB["HyDB Engine (Rust no_std)<br/>In-RAM Slot Table & Merkle-XOR Root"]
     end
     
     subgraph BEAM_Replication ["Replikasi Semi-Sinkron Raw TCP (:8736)"]
-        Hymessage -->|Framing Packet 4-byte| SUNode["SU Node HyperBEAM (:8735)\nhb_su@DESKTOP-EDTU3OG\nNative device: scheduler@1.0"]
-        SUNode -->|Sub-0.1ms ACK| Hymessage
+        Hymessage -->|"Framing Packet 4-byte"| SUNode["SU Node HyperBEAM (:8735)<br/>hb_su@DESKTOP-EDTU3OG<br/>Native device: scheduler@1.0"]
+        SUNode -->|"Sub-0.1ms ACK"| Hymessage
     end
     
-    HotNode -->|200 OK setelah SU ACK (Avg ~8ms)| Client
+    HotNode -->|"200 OK setelah SU ACK (Avg ~8ms)"| Client
     
     subgraph SUNode_Store ["SU HyperBEAM Dual-Store"]
-        SUNode -->|O(1) Memory Read| SURAM["Pure RAM (ETS Table)\nLatest Tick, State Root, Live KV"]
-        SUNode -->|Sequential Append| SUWAL["Durability Anchor (Disk WAL)\npool_su/wal.log"]
+        SUNode -->|"O(1) Memory Read"| SURAM["Pure RAM (ETS Table)<br/>Latest Tick, State Root, Live KV"]
+        SUNode -->|"Sequential Append"| SUWAL["Durability Anchor (Disk WAL)<br/>pool_su/wal.log"]
     end
     
-    SUWAL -->|Batch Checkpoint Sync| AoEvaluator["Real AO Process (@permaweb/ao-loader)\nprocess.wasm + arbitrator.lua"]
-    AoEvaluator -->|Audit SHA-256 Hash Chain| Wasit{"Wasit Verdict"}
-    Wasit -->|Hash Cocok| CommitOK["PASSED_AND_COMMITTED\nSign RSA & Commit TX"]
-    Wasit -->|Hash Dimanipulasi| CutFraud["FRAUD_DETECTED_AND_CUT\nReject Checkpoint Batch"]
+    SUWAL -->|"Batch Checkpoint Sync"| AoEvaluator["Real AO Process (@permaweb/ao-loader)<br/>process.wasm + arbitrator.lua"]
+    AoEvaluator -->|"Audit SHA-256 Hash Chain"| Wasit{"Wasit Verdict"}
+    Wasit -->|"Hash Cocok"| CommitOK["PASSED_AND_COMMITTED<br/>Sign RSA & Commit TX"]
+    Wasit -->|"Hash Dimanipulasi"| CutFraud["FRAUD_DETECTED_AND_CUT<br/>Reject Checkpoint Batch"]
     
-    CommitOK -->|Mine Block Permanen| ArLocal["ArLocal (:1984)\nArweave Local Block Ledger"]
+    CommitOK -->|"Mine Block Permanen"| ArLocal["ArLocal (:1984)<br/>Arweave Local Block Ledger"]
 ```
 
 ---

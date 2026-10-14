@@ -11,3 +11,14 @@ ide.md
 # dump dokumentasi pihak ketiga, bukan bagian repo
 *.llms.txt
 WORKFLOW.md
+
+# Build artifacts
+target/
+**/target/
+_build/
+hymessage/build/
+*.beam
+
+# Dynamic test payload outputs
+ao_process/batch_checkpoint.json
+ao_process/fraud_batch.json
