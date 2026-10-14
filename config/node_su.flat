@@ -1,0 +1,7 @@
+% Config node HyperBEAM - SU Node
+port: 8735
+priv_key_location: /home/weslur/database/secrets/wallet_su.json
+mode: debug
+compute_mode: lazy
+scheduling_mode: local_confirmation
+store_all_signed: true

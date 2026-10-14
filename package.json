@@ -10,6 +10,8 @@
     "smoke": "bash tests/smoke.sh"
   },
   "devDependencies": {
+    "@permaweb/aoconnect": "^0.0.98",
+    "@permaweb/aos": "^2.0.16",
     "arlocal": "^1.1.66",
     "arweave": "^1.15.7"
   }
