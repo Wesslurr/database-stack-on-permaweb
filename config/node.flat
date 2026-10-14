@@ -1,0 +1,20 @@
+% Config node HyperBEAM - project database (dev lokal)
+% Port default untuk HyperBEAM
+port: 8734
+% Wallet operator node (project database)
+priv_key_location: /home/weslur/database/secrets/wallet.json
+% Mode debug untuk development lokal
+mode: debug
+% Eksekusi proses lokal
+compute_mode: lazy
+scheduling_mode: local_confirmation
+% Store semua pesan signed secara lokal
+store_all_signed: true
+% Larangan penting untuk file flat.
+% Pertama, jangan set rate_limit di sini. Flat codec menghasilkan binary
+% sedangkan device rate-limit butuh integer. Akibatnya badarith lalu request
+% hang. Pakai default saja.
+% Kedua, jangan pakai titik spasi di dalam komentar sama sekali. Parser flat
+% tidak skip komentar sehingga baris komentar yang mengandung pola key spasi
+% value akan jadi key node message palsu dan bikin info endpoint crash 500
+% di hb_escape.

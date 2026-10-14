@@ -1,0 +1,62 @@
+{
+    "store": [
+        {
+            "store-module": "hb_store_rocksdb",
+            "name": "cache-rocksdb",
+            "ao-types": "store-module=\"atom\""
+        },
+        {
+            "store-module": "hb_store_fs",
+            "name": "cache-mainnet",
+            "ao-types": "store-module=\"atom\""
+        },
+        {
+            "store-module": "hb_store_arweave",
+            "name": "cache-arweave",
+            "index-store": [
+                {
+                    "store-module": "hb_store_rocksdb",
+                    "name": "cache-rocksdb",
+                    "ao-types": "store-module=\"atom\""
+                }
+            ],
+            "local-store": [
+                {
+                    "store-module": "hb_store_rocksdb",
+                    "name": "cache-rocksdb",
+                    "ao-types": "store-module=\"atom\""
+                }
+            ],
+            "remote-index": false,
+            "ao-types": "store-module=\"atom\""
+        },
+        {
+            "store-module": "hb_store_gateway",
+            "subindex": [
+                {
+                    "name": "Data-Protocol",
+                    "value": "ao"
+                }
+            ],
+            "local-store": [
+                {
+                    "store-module": "hb_store_rocksdb",
+                    "name": "cache-rocksdb",
+                    "ao-types": "store-module=\"atom\""
+                }
+            ],
+            "ao-types": "store-module=\"atom\""
+        },
+        {
+            "store-module": "hb_store_gateway",
+            "local-store": [
+                {
+                    "store-module": "hb_store_rocksdb",
+                    "name": "cache-rocksdb",
+                    "ao-types": "store-module=\"atom\""
+                }
+            ],
+            "ao-types": "store-module=\"atom\""
+        }
+    ]
+}

@@ -1,0 +1,13 @@
+node_modules/
+vendor/
+secrets/
+data/
+.arlocal-db/
+logs
+*.log
+.env
+# ide = blueprint privat, jangan ikut publik
+ide.md
+# dump dokumentasi pihak ketiga, bukan bagian repo
+*.llms.txt
+WORKFLOW.md
