@@ -14,10 +14,10 @@ echo '=== 1. Building HyDB (Rust -> WASM) ==='
 cd "$DB_DIR/hydb"
 bash build.sh
 
-echo '=== 2. Compiling hymessage_runtime.erl ==='
+echo '=== 2. Compiling hydb_contract.erl & hymessage_runtime.erl ==='
 mkdir -p "$HB_REL/lib/hymessage_runtime-1.0.0/ebin"
-"$ERLC" -o "$HB_REL/lib/hymessage_runtime-1.0.0/ebin" "$HMD/src/hymessage_runtime.erl"
-echo "hymessage_runtime.beam deployed to lib."
+"$ERLC" -o "$HB_REL/lib/hymessage_runtime-1.0.0/ebin" "$HMD/src/hydb_contract.erl" "$HMD/src/hymessage_runtime.erl"
+echo "hydb_contract.beam & hymessage_runtime.beam deployed to lib."
 
 echo '=== 3. Building Gleam hymessage device ==='
 cd "$HMD"

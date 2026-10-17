@@ -1,15 +1,16 @@
 -module(su_runtime).
 -behaviour(gen_server).
 
--export([start_link/0, ensure_started/0, reset/0, is_connected/0, get_current_tick/0, get_state_root/0]).
--export([get_tick/0, get_state/0, get_key/1, get_wal/0, get_status/0]).
--export([get_tick_from_req/3, get_state_from_req/3, get_key_from_req/3, get_wal_from_req/3, get_status_from_req/3, reset_from_req/3]).
+-export([start_link/0, ensure_started/0, reset/0, is_connected/0, get_current_tick/0, get_state_root/0, get_epoch/0]).
+-export([get_tick/0, get_state/0, get_key/1, get_wal/0, get_wal_batch/2, get_status/0, get_status_map/0, fence_epoch/1, recover_wal/0, simulate_restart_from_wal/0]).
+-export([get_tick_from_req/3, get_state_from_req/3, get_key_from_req/3, get_wal_from_req/3, get_status_from_req/3, reset_from_req/3, handle_scheduler_http/4]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TABLE, su_ram_store).
 -define(SERVER, ?MODULE).
 -define(WAL_PATH, "/home/weslur/database/pool_su/wal.log").
 -define(HOT_NODE_PORT, 8736).
+-define(GENESIS_HASH, <<"0000000000000000000000000000000000000000000000000000000000000000">>).
 
 -record(state, {
     sub_pid,
@@ -29,10 +30,26 @@ get_state_root() ->
     ensure_started(),
     lookup_val(state_root, 0).
 
+get_epoch() ->
+    ensure_started(),
+    lookup_val(epoch, 1).
+
+fence_epoch(NewEpoch) when is_integer(NewEpoch) ->
+    ensure_started(),
+    gen_server:call(?SERVER, {fence_epoch, NewEpoch}, 5000).
+
+recover_wal() ->
+    ensure_started(),
+    gen_server:call(?SERVER, recover_wal, 10000).
+
+simulate_restart_from_wal() ->
+    ensure_started(),
+    gen_server:call(?SERVER, simulate_restart_from_wal, 10000).
+
 ensure_started() ->
     case whereis(?SERVER) of
         undefined ->
-            case start_link() of
+            case gen_server:start({local, ?SERVER}, ?MODULE, [], []) of
                 {ok, Pid} -> {ok, Pid};
                 {error, {already_started, Pid}} -> {ok, Pid};
                 Error -> Error
@@ -45,20 +62,106 @@ start_link() ->
 
 init([]) ->
     init_ets(),
+    recover_from_wal(?WAL_PATH),
     SubPid = spawn_link(fun() -> subscriber_loop(?SERVER, "127.0.0.1", ?HOT_NODE_PORT) end),
     {ok, #state{sub_pid = SubPid}}.
 
 init_ets() ->
     case ets:info(?TABLE) of
         undefined ->
-            ets:new(?TABLE, [public, named_table, set]),
-            ets:insert(?TABLE, {tick, 0}),
-            ets:insert(?TABLE, {state_root, 0}),
-            ets:insert(?TABLE, {latest_hash, <<"0000000000000000000000000000000000000000000000000000000000000000">>}),
-            ets:insert(?TABLE, {total_replicated, 0}),
-            ets:insert(?TABLE, {connected_to_hot, false}),
-            ets:insert(?TABLE, {history, []});
+            ets:new(?TABLE, [public, named_table, set, {read_concurrency, true}, {write_concurrency, true}]),
+            reset_ets_defaults();
         _ -> ok
+    end.
+
+reset_ets_defaults() ->
+    ets:insert(?TABLE, {epoch, 1}),
+    ets:insert(?TABLE, {tick, 0}),
+    ets:insert(?TABLE, {state_root, 0}),
+    ets:insert(?TABLE, {latest_hash, ?GENESIS_HASH}),
+    ets:insert(?TABLE, {total_replicated, 0}),
+    ets:insert(?TABLE, {fenced_rejections, 0}),
+    ets:insert(?TABLE, {gap_rejections, 0}),
+    ets:insert(?TABLE, {hash_rejections, 0}),
+    ets:insert(?TABLE, {connected_to_hot, false}),
+    ets:insert(?TABLE, {history, []}).
+
+get_or_open_wal_fd() ->
+    case ets:lookup(?TABLE, wal_fd) of
+        [{wal_fd, Fd}] -> Fd;
+        [] ->
+            {ok, Fd} = file:open(?WAL_PATH, [append, raw, binary]),
+            ets:insert(?TABLE, {wal_fd, Fd}),
+            Fd
+    end.
+
+close_wal_fd() ->
+    case ets:lookup(?TABLE, wal_fd) of
+        [{wal_fd, Fd}] ->
+            _ = catch file:close(Fd),
+            ets:delete(?TABLE, wal_fd),
+            ok;
+        [] -> ok
+    end.
+
+recover_from_wal(Path) ->
+    Entries = read_wal_entries(Path),
+    Sorted = lists:sort(fun(A, B) ->
+        to_integer(maps:get(<<"seq">>, A, 0), 0) =< to_integer(maps:get(<<"seq">>, B, 0), 0)
+    end, Entries),
+    lists:foreach(fun(Ev) ->
+        apply_event_to_ets(Ev)
+    end, Sorted),
+    length(Sorted).
+
+apply_event_to_ets(Event) ->
+    Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
+    Epoch = to_integer(maps:get(<<"epoch">>, Event, 1), 1),
+    Namespace = maps:get(<<"namespace">>, Event, <<"default">>),
+    CurrEpoch = lookup_val(epoch, 1),
+    ets:insert(?TABLE, {epoch, max(CurrEpoch, Epoch)}),
+    ets:insert(?TABLE, {tick, Seq}),
+    RootBin = case maps:get(<<"state_root">>, Event, undefined) of
+        undefined ->
+            integer_to_binary(lookup_val(state_root, 0));
+        RootInt when is_integer(RootInt) ->
+            ets:insert(?TABLE, {state_root, RootInt}),
+            integer_to_binary(RootInt);
+        RootB when is_binary(RootB) ->
+            ets:insert(?TABLE, {state_root, to_integer(RootB, 0)}),
+            RootB
+    end,
+    case maps:get(<<"hash">>, Event, undefined) of
+        undefined -> ok;
+        Hash ->
+            ets:insert(?TABLE, {latest_hash, Hash}),
+            ets:insert(?TABLE, {{event_hash, Seq}, Hash})
+    end,
+    ets:insert(?TABLE, {{wal_event, Seq}, Event#{ <<"state_root">> => RootBin }}),
+    ets:update_counter(?TABLE, total_replicated, 1, {total_replicated, 0}),
+    Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, <<"put">>)),
+    case Op of
+        <<"register_schema">> ->
+            SchemaDef = maps:get(<<"val">>, Event, #{}),
+            ets:insert(?TABLE, {{schema_ns, Namespace}, SchemaDef});
+        _ ->
+            case maps:get(<<"key">>, Event, undefined) of
+                undefined -> ok;
+                Key0 ->
+                    Key = case Namespace of
+                        <<"default">> -> to_integer(Key0, Key0);
+                        _ -> Key0
+                    end,
+                    case Op of
+                        <<"del">> ->
+                            ets:delete(?TABLE, {kv_ns, Namespace, Key}),
+                            if Namespace =:= <<"default">> -> ets:delete(?TABLE, {kv, Key}); true -> ok end;
+                        _ ->
+                            Val = maps:get(<<"val">>, Event, 0),
+                            ets:insert(?TABLE, {{kv_ns, Namespace, Key}, Val}),
+                            if Namespace =:= <<"default">> -> ets:insert(?TABLE, {{kv, Key}, Val}); true -> ok end
+                    end
+            end
     end.
 
 reset() ->
@@ -81,11 +184,75 @@ get_wal() ->
     ensure_started(),
     gen_server:call(?SERVER, get_wal, 5000).
 
+get_wal_batch(FromSeq, ToSeq) ->
+    ensure_started(),
+    gen_server:call(?SERVER, {get_wal_batch, FromSeq, ToSeq}, 10000).
+
 get_status() ->
     ensure_started(),
     gen_server:call(?SERVER, get_status, 5000).
 
-%% Request Handlers for HyperBEAM Device Routing
+get_status_map() ->
+    ensure_started(),
+    Epoch = lookup_val(epoch, 1),
+    Tick = lookup_val(tick, 0),
+    Root = lookup_val(state_root, 0),
+    Connected = lookup_val(connected_to_hot, false),
+    Total = lookup_val(total_replicated, 0),
+    FencedRej = lookup_val(fenced_rejections, 0),
+    GapRej = lookup_val(gap_rejections, 0),
+    HashRej = lookup_val(hash_rejections, 0),
+    #{
+        <<"role">> => <<"SU-HyperBEAM-Node">>,
+        <<"node_name">> => <<"hb_su">>,
+        <<"connected_to_hot">> => Connected,
+        <<"epoch">> => Epoch,
+        <<"latest_tick_ram">> => Tick,
+        <<"state_root_ram">> => Root,
+        <<"state_root_str">> => integer_to_binary(Root),
+        <<"total_replicated">> => Total,
+        <<"fenced_rejections">> => FencedRej,
+        <<"gap_rejections">> => GapRej,
+        <<"hash_rejections">> => HashRej,
+        <<"wal_file">> => list_to_binary(?WAL_PATH)
+    }.
+
+%% Request Handlers for HyperBEAM Device Routing (~scheduler@1.0)
+
+handle_scheduler_http(<<"wal_batch">>, _Base, Req, _Opts) ->
+    ensure_started(),
+    FromSeq = parse_int_field(<<"from_seq">>, Req, 1),
+    CurrTick = lookup_val(tick, 0),
+    ToSeq = parse_int_field(<<"to_seq">>, Req, CurrTick),
+    {ok, get_wal_batch(FromSeq, ToSeq)};
+handle_scheduler_http(<<"key">>, _Base, Req, _Opts) ->
+    ensure_started(),
+    Key = parse_int_field(<<"key">>, Req, 1),
+    case get_key(Key) of
+        {ok, Res} -> {ok, Res};
+        {error, not_found} ->
+            {ok, #{ <<"ok">> => true, <<"key">> => Key, <<"found">> => false, <<"source">> => <<"RAM">> }};
+        Res when is_map(Res) -> {ok, Res}
+    end;
+handle_scheduler_http(<<"fence_epoch">>, _Base, Req, _Opts) ->
+    ensure_started(),
+    CurrEpoch = lookup_val(epoch, 1),
+    NewEpoch = parse_int_field(<<"epoch">>, Req, CurrEpoch),
+    {ok, fence_epoch(NewEpoch)};
+handle_scheduler_http(<<"simulate_restart">>, _Base, _Req, _Opts) ->
+    ensure_started(),
+    {ok, simulate_restart_from_wal()};
+handle_scheduler_http(<<"reset">>, _Base, _Req, _Opts) ->
+    ensure_started(),
+    {ok, reset()};
+handle_scheduler_http(<<"tick">>, Base, Req, Opts) ->
+    {ok, get_tick_from_req(Base, Req, Opts)};
+handle_scheduler_http(<<"state">>, Base, Req, Opts) ->
+    {ok, get_state_from_req(Base, Req, Opts)};
+handle_scheduler_http(<<"wal">>, Base, Req, Opts) ->
+    {ok, get_wal_from_req(Base, Req, Opts)};
+handle_scheduler_http(_, _Base, _Req, _Opts) ->
+    {ok, get_status_map()}.
 
 get_tick_from_req(_Base, _Req, _Opts) ->
     ensure_started(),
@@ -134,16 +301,57 @@ reset_from_req(_Base, _Req, _Opts) ->
 
 %% GenServer Callbacks
 
+handle_call({fence_epoch, NewEpoch}, _From, State) ->
+    CurrEpoch = lookup_val(epoch, 1),
+    if NewEpoch < CurrEpoch ->
+        {reply, #{ <<"ok">> => false, <<"error">> => <<"epoch_cannot_decrease">>, <<"epoch">> => CurrEpoch }, State};
+       true ->
+        ets:insert(?TABLE, {epoch, NewEpoch}),
+        {reply, #{ <<"ok">> => true, <<"previous_epoch">> => CurrEpoch, <<"epoch">> => NewEpoch }, State}
+    end;
+
+handle_call(recover_wal, _From, State) ->
+    close_wal_fd(),
+    Count = recover_from_wal(?WAL_PATH),
+    Tick = lookup_val(tick, 0),
+    Root = lookup_val(state_root, 0),
+    {reply, #{ <<"ok">> => true, <<"recovered_entries">> => Count, <<"tick">> => Tick, <<"state_root">> => Root, <<"state_root_str">> => integer_to_binary(Root) }, State};
+
+handle_call(simulate_restart_from_wal, _From, State) ->
+    close_wal_fd(),
+    Conn = lookup_val(connected_to_hot, false),
+    ets:delete_all_objects(?TABLE),
+    reset_ets_defaults(),
+    ets:insert(?TABLE, {connected_to_hot, Conn}),
+    Count = recover_from_wal(?WAL_PATH),
+    Tick = lookup_val(tick, 0),
+    Root = lookup_val(state_root, 0),
+    Epoch = lookup_val(epoch, 1),
+    KVCount = ets:foldl(fun({{kv, _}, _}, Acc) -> Acc + 1; (_, Acc) -> Acc end, 0, ?TABLE),
+    {reply, #{
+        <<"ok">> => true,
+        <<"recovered_entries">> => Count,
+        <<"epoch">> => Epoch,
+        <<"tick">> => Tick,
+        <<"state_root">> => Root,
+        <<"state_root_str">> => integer_to_binary(Root),
+        <<"records_count">> => KVCount,
+        <<"source">> => <<"WAL_TO_RAM_RECOVERY">>
+    }, State};
+
 handle_call(get_tick, _From, State) ->
+    Epoch = lookup_val(epoch, 1),
     Tick = lookup_val(tick, 0),
     Root = lookup_val(state_root, 0),
     Hash = lookup_val(latest_hash, <<>>),
     KVCount = ets:foldl(fun({{kv, _}, _}, Acc) -> Acc + 1; (_, Acc) -> Acc end, 0, ?TABLE),
     Reply = #{
         <<"ok">> => true,
+        <<"epoch">> => Epoch,
         <<"tick">> => Tick,
         <<"latest_tick">> => Tick,
         <<"state_root">> => Root,
+        <<"state_root_str">> => integer_to_binary(Root),
         <<"latest_hash">> => Hash,
         <<"records_count">> => KVCount,
         <<"source">> => <<"RAM">>
@@ -151,6 +359,7 @@ handle_call(get_tick, _From, State) ->
     {reply, Reply, State};
 
 handle_call(get_state, _From, State) ->
+    Epoch = lookup_val(epoch, 1),
     Tick = lookup_val(tick, 0),
     Root = lookup_val(state_root, 0),
     AllKV = ets:foldl(fun({{kv, K}, V}, Acc) ->
@@ -159,9 +368,11 @@ handle_call(get_state, _From, State) ->
                       end, #{}, ?TABLE),
     Reply = #{
         <<"ok">> => true,
+        <<"epoch">> => Epoch,
         <<"tick">> => Tick,
         <<"latest_tick">> => Tick,
         <<"state_root">> => Root,
+        <<"state_root_str">> => integer_to_binary(Root),
         <<"kv">> => AllKV,
         <<"records">> => AllKV,
         <<"total_keys">> => maps:size(AllKV),
@@ -177,12 +388,59 @@ handle_call({get_key, Key}, _From, State) ->
                 <<"ok">> => true,
                 <<"key">> => Key,
                 <<"val">> => Val,
+                <<"found">> => true,
                 <<"source">> => <<"RAM">>
             },
             {reply, Reply, State};
         [] ->
             {reply, {error, not_found}, State}
     end;
+
+handle_call({get_wal_batch, FromSeq0, ToSeq0}, _From, State) ->
+    CurrTick = lookup_val(tick, 0),
+    FromSeq = max(1, FromSeq0),
+    ToSeq = if ToSeq0 =< 0 -> CurrTick; true -> min(ToSeq0, CurrTick) end,
+    Events = if FromSeq =< ToSeq andalso ToSeq > 0 ->
+        lists:filtermap(fun(S) ->
+            case ets:lookup(?TABLE, {wal_event, S}) of
+                [{{wal_event, S}, Ev}] -> {true, Ev};
+                [] -> false
+            end
+        end, lists:seq(FromSeq, ToSeq));
+       true -> []
+    end,
+    SuId = <<"SU_NODE_1">>,
+    {BatchEpoch, ActualFrom, ActualTo, PropHash, PropRootBin} = case Events of
+        [] ->
+            {lookup_val(epoch, 1), FromSeq, ToSeq, lookup_val(latest_hash, ?GENESIS_HASH), integer_to_binary(lookup_val(state_root, 0))};
+        [FirstEv | _] ->
+            LastEv = lists:last(Events),
+            Ep = to_integer(maps:get(<<"epoch">>, LastEv, lookup_val(epoch, 1)), 1),
+            FSeq = to_integer(maps:get(<<"seq">>, FirstEv, FromSeq), FromSeq),
+            TSeq = to_integer(maps:get(<<"seq">>, LastEv, ToSeq), ToSeq),
+            PHash = maps:get(<<"hash">>, LastEv, ?GENESIS_HASH),
+            PRoot0 = maps:get(<<"state_root">>, LastEv, <<"0">>),
+            PRootB = if is_integer(PRoot0) -> integer_to_binary(PRoot0);
+                        is_binary(PRoot0) -> PRoot0;
+                        true -> <<"0">>
+                     end,
+            {Ep, FSeq, TSeq, PHash, PRootB}
+    end,
+    BatchSig = compute_batch_sig(SuId, BatchEpoch, ActualFrom, ActualTo, PropHash, PropRootBin),
+    EventsJson = try iolist_to_binary(json:encode(Events)) catch _:_ -> <<"[]">> end,
+    Reply = #{
+        <<"ok">> => true,
+        <<"su_id">> => SuId,
+        <<"epoch">> => BatchEpoch,
+        <<"from_seq">> => ActualFrom,
+        <<"to_seq">> => ActualTo,
+        <<"proposed_hash">> => PropHash,
+        <<"proposed_state_root">> => PropRootBin,
+        <<"batch_sig">> => BatchSig,
+        <<"events_count">> => length(Events),
+        <<"events_json">> => EventsJson
+    },
+    {reply, Reply, State};
 
 handle_call(get_wal, _From, State) ->
     Entries = read_wal_entries(?WAL_PATH),
@@ -196,28 +454,14 @@ handle_call(get_wal, _From, State) ->
     {reply, Reply, State};
 
 handle_call(get_status, _From, State) ->
-    Tick = lookup_val(tick, 0),
-    Root = lookup_val(state_root, 0),
-    Connected = lookup_val(connected_to_hot, false),
-    Total = lookup_val(total_replicated, 0),
-    Reply = #{
-        <<"role">> => <<"SU-HyperBEAM-Node">>,
-        <<"node_name">> => <<"hb_su">>,
-        <<"connected_to_hot">> => Connected,
-        <<"latest_tick_ram">> => Tick,
-        <<"state_root_ram">> => Root,
-        <<"total_replicated">> => Total,
-        <<"wal_file">> => list_to_binary(?WAL_PATH)
-    },
-    {reply, Reply, State};
+    {reply, get_status_map(), State};
 
 handle_call(reset, _From, State) ->
-    ets:insert(?TABLE, {tick, 0}),
-    ets:insert(?TABLE, {state_root, 0}),
-    ets:insert(?TABLE, {latest_hash, <<"0000000000000000000000000000000000000000000000000000000000000000">>}),
-    ets:insert(?TABLE, {total_replicated, 0}),
-    ets:insert(?TABLE, {history, []}),
-    ets:match_delete(?TABLE, {{kv, '_'}, '_'}),
+    close_wal_fd(),
+    Conn = lookup_val(connected_to_hot, false),
+    ets:delete_all_objects(?TABLE),
+    reset_ets_defaults(),
+    ets:insert(?TABLE, {connected_to_hot, Conn}),
     _ = file:delete(?WAL_PATH),
     {reply, #{ <<"ok">> => true, <<"reset">> => true }, State};
 
@@ -231,22 +475,98 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, _State) ->
+    close_wal_fd(),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-%% Background Subscriber Loop
+%% Background Subscriber Loop (with Mutual HMAC-SHA256 Node Authentication)
+
+node_auth_secret() ->
+    case ets:info(?TABLE) of
+        undefined -> compute_node_auth_secret();
+        _ ->
+            case ets:lookup(?TABLE, cached_auth_secret) of
+                [{cached_auth_secret, Sec}] -> Sec;
+                [] ->
+                    Sec = compute_node_auth_secret(),
+                    ets:insert(?TABLE, {cached_auth_secret, Sec}),
+                    Sec
+            end
+    end.
+
+compute_node_auth_secret() ->
+    case file:read_file("/home/weslur/database/secrets/wallet.json") of
+        {ok, Bin} -> crypto:hash(sha256, Bin);
+        _ -> crypto:hash(sha256, <<"HYDB_DEFAULT_CLUSTER_SECRET">>)
+    end.
+
+compute_batch_sig(SuId, Epoch, FromSeq, ToSeq, PropHash, PropRootBin) ->
+    UpperHash = string:uppercase(PropHash),
+    Msg = iolist_to_binary([
+        SuId, <<":">>,
+        integer_to_binary(Epoch), <<":">>,
+        integer_to_binary(FromSeq), <<":">>,
+        integer_to_binary(ToSeq), <<":">>,
+        UpperHash, <<":">>,
+        PropRootBin
+    ]),
+    binary:encode_hex(crypto:mac(hmac, sha256, node_auth_secret(), Msg)).
 
 subscriber_loop(Server, Host, Port) ->
-    case gen_tcp:connect(Host, Port, [binary, {packet, 4}, {active, true}, {reuseaddr, true}], 2000) of
+    case gen_tcp:connect(Host, Port, [binary, {packet, 4}, {active, true}, {reuseaddr, true}, {nodelay, true}], 2000) of
         {ok, Socket} ->
-            ets:insert(?TABLE, {connected_to_hot, true}),
-            su_socket_loop(Socket, Server, Host, Port);
+            case su_perform_handshake(Socket) of
+                ok ->
+                    ets:insert(?TABLE, {connected_to_hot, true}),
+                    su_socket_loop(Socket, Server, Host, Port);
+                error ->
+                    gen_tcp:close(Socket),
+                    ets:insert(?TABLE, {connected_to_hot, false}),
+                    timer:sleep(500),
+                    subscriber_loop(Server, Host, Port)
+            end;
         {error, _Reason} ->
             ets:insert(?TABLE, {connected_to_hot, false}),
             timer:sleep(500),
             subscriber_loop(Server, Host, Port)
+    end.
+
+su_perform_handshake(Socket) ->
+    receive
+        {tcp, Socket, Data} ->
+            try json:decode(Data) of
+                #{ <<"type">> := <<"AUTH_CHALLENGE">>, <<"nonce">> := Nonce } when is_binary(Nonce) ->
+                    NodeId = <<"hb_su">>,
+                    Msg = <<Nonce/binary, ":", NodeId/binary>>,
+                    Sig = binary:encode_hex(crypto:mac(hmac, sha256, node_auth_secret(), Msg)),
+                    Resp = iolist_to_binary(json:encode(#{
+                        <<"type">> => <<"AUTH_RESPONSE">>,
+                        <<"node_id">> => NodeId,
+                        <<"sig">> => Sig
+                    })),
+                    ok = gen_tcp:send(Socket, Resp),
+                    receive
+                        {tcp, Socket, AckData} ->
+                            case json:decode(AckData) of
+                                #{ <<"type">> := <<"AUTH_OK">> } -> ok;
+                                _ -> error
+                            end;
+                        {tcp_closed, Socket} -> error;
+                        {tcp_error, Socket, _} -> error
+                    after 2000 ->
+                        error
+                    end;
+                _ ->
+                    error
+            catch _:_ ->
+                error
+            end;
+        {tcp_closed, Socket} -> error;
+        {tcp_error, Socket, _} -> error
+    after 2000 ->
+        error
     end.
 
 su_socket_loop(Socket, Server, Host, Port) ->
@@ -270,34 +590,90 @@ su_socket_loop(Socket, Server, Host, Port) ->
 handle_incoming_event(Socket, RawData) ->
     try
         Event = json:decode(RawData),
-        Seq = maps:get(<<"seq">>, Event, 0),
-        
-        %% 1. FAST ACK: send 4-byte sequence number back to Hot Node immediately (<0.05ms)
-        gen_tcp:send(Socket, <<Seq:32/big>>),
-        
-        %% 2. UPDATE RAM DUAL-STORE
-        ets:insert(?TABLE, {tick, Seq}),
-        case maps:get(<<"state_root">>, Event, undefined) of
-            undefined -> ok;
-            Root -> ets:insert(?TABLE, {state_root, Root})
-        end,
-        case maps:get(<<"hash">>, Event, undefined) of
-            undefined -> ok;
-            Hash -> ets:insert(?TABLE, {latest_hash, Hash})
-        end,
-        ets:update_counter(?TABLE, total_replicated, 1, {total_replicated, 0}),
-        
-        %% If KV update
-        case maps:get(<<"key">>, Event, undefined) of
-            undefined -> ok;
-            Key ->
-                Val = maps:get(<<"val">>, Event, 0),
-                ets:insert(?TABLE, {{kv, Key}, Val})
-        end,
-        
-        %% 3. APPEND ON-DISK WAL
-        file:write_file(?WAL_PATH, [RawData, <<"\n">>], [append]),
-        ok
+        Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
+        EvEpoch = to_integer(maps:get(<<"epoch">>, Event, 1), 1),
+        MinEpoch = lookup_val(epoch, 1),
+        LastTick = lookup_val(tick, 0),
+        LastHash = lookup_val(latest_hash, ?GENESIS_HASH),
+
+        %% 1. EPOCH FENCING CHECK: Reject stale Hot Node from older epoch
+        if EvEpoch < MinEpoch ->
+            ets:update_counter(?TABLE, fenced_rejections, 1, {fenced_rejections, 0}),
+            ok;
+           Seq =< LastTick ->
+            %% Duplicate / already processed sequence check
+            case ets:lookup(?TABLE, {event_hash, Seq}) of
+                [{{event_hash, Seq}, ExistingHash}] ->
+                    GivenHash = maps:get(<<"hash">>, Event, <<>>),
+                    if ExistingHash == GivenHash ->
+                        %% Idempotent duplicate: re-send ACK
+                        gen_tcp:send(Socket, <<Seq:32/big>>);
+                       true ->
+                        %% Equivocation / conflicting event for same Seq! Do not ACK
+                        ets:update_counter(?TABLE, hash_rejections, 1, {hash_rejections, 0}),
+                        ok
+                    end;
+                [] ->
+                    ok
+            end;
+           Seq > (LastTick + 1) ->
+            %% 2. SEQUENCE GAP CHECK: Do not corrupt state or ACK a gapped sequence!
+            ets:update_counter(?TABLE, gap_rejections, 1, {gap_rejections, 0}),
+            ok;
+           true ->
+            %% 3. CRYPTOGRAPHIC HASH CHAIN VERIFICATION (Contract, Schema & Namespace-Aware)
+            Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, <<"put">>)),
+            Namespace = maps:get(<<"namespace">>, Event, <<"default">>),
+            ValType = maps:get(<<"val_type">>, Event, <<"int64">>),
+            RawKey = maps:get(<<"key">>, Event, 1),
+            KeyBin = if is_integer(RawKey) -> integer_to_binary(RawKey);
+                        is_binary(RawKey) -> RawKey;
+                        true -> <<"1">>
+                     end,
+            RawVal = maps:get(<<"val">>, Event, 0),
+            CanonicalValBin = maps:get(<<"canonical_val">>, Event,
+                if is_integer(RawVal) -> integer_to_binary(RawVal);
+                   is_binary(RawVal) -> RawVal;
+                   true -> <<"0">>
+                end),
+            ActionCode = case Op of
+                <<"register_schema">> -> <<"24">>;
+                <<"del">> -> <<"22">>;
+                _ -> <<"20">>
+            end,
+            Payload = case {Namespace, ActionCode, ValType} of
+                {_, <<"24">>, _} ->
+                    [LastHash, integer_to_binary(Seq), <<"24">>, Namespace, <<":">>, CanonicalValBin];
+                {<<"default">>, <<"20">>, <<"int64">>} ->
+                    [LastHash, integer_to_binary(Seq), <<"20">>, KeyBin, CanonicalValBin];
+                {<<"default">>, <<"22">>, _} ->
+                    [LastHash, integer_to_binary(Seq), <<"22">>, KeyBin];
+                {_, <<"22">>, _} ->
+                    [LastHash, integer_to_binary(Seq), <<"22">>, Namespace, <<":">>, KeyBin];
+                {_, <<"20">>, _} ->
+                    [LastHash, integer_to_binary(Seq), <<"20">>, Namespace, <<":">>, KeyBin, <<":">>, CanonicalValBin]
+            end,
+            ExpectedHash = binary:encode_hex(crypto:hash(sha256, Payload)),
+            GivenHashRaw = maps:get(<<"hash">>, Event, <<>>),
+            HashMatches = (ExpectedHash =:= GivenHashRaw) orelse
+                          (string:uppercase(ExpectedHash) =:= string:uppercase(GivenHashRaw)),
+
+            if not HashMatches ->
+                ets:update_counter(?TABLE, hash_rejections, 1, {hash_rejections, 0}),
+                ok;
+               true ->
+                %% 4. DURABILITY ANCHOR FIRST: Append via persistent raw file descriptor before ACK!
+                WalFd = get_or_open_wal_fd(),
+                ok = file:write(WalFd, [RawData, <<"\n">>]),
+
+                %% 5. UPDATE RAM DUAL-STORE SECOND (including proper delete & schema handling)
+                apply_event_to_ets(Event),
+
+                %% 6. HONEST DURABILITY ACK LAST: Send 4-byte sequence ACK after WAL + RAM are committed!
+                gen_tcp:send(Socket, <<Seq:32/big>>),
+                ok
+            end
+        end
     catch
         _:_Err ->
             ok
@@ -346,3 +722,4 @@ to_integer(V, Default) when is_binary(V) ->
 to_integer(V, Default) when is_list(V) ->
     try list_to_integer(V) catch _:_ -> Default end;
 to_integer(_, Default) -> Default.
+

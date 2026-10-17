@@ -1,316 +1,290 @@
-# Real-Time Optimistic Database Stack (AO + HyperBEAM)
+# Universal Distributed Real-Time Database & Fault-Tolerant Compute Stack (AO + HyperBEAM)
 
-> **Sub-15ms In-Memory Living Database with Dual HyperBEAM Nodes, Semi-Synchronous Quorum, and Cryptographic AO WASM Wasit**
+> **Sub-15ms Universal Database & Compute Stack with HyDB Core Contract (`hydb.core@1.0`), Pluggable Storage Backends, Honest Durability SU Pool, and Logical Security Domain AO Arbitrator**
 
 [![HyperBEAM](https://img.shields.io/badge/HyperBEAM-v0.10-blue.svg)](https://github.com/permaweb/HyperBEAM)
-[![AO](https://img.shields.io/badge/AO-Protocol-orange.svg)](https://ao.g8way.io/)
+[![HyDB Contract](https://img.shields.io/badge/Contract-hydb.core%401.0-purple.svg)]()
+[![AO](https://img.shields.io/badge/AO-Logical%20Security%20Domain-orange.svg)](https://ao.g8way.io/)
 [![Rust](https://img.shields.io/badge/Engine-Rust%20WASM%20(no__std)-red.svg)](https://www.rust-lang.org/)
 [![Gleam](https://img.shields.io/badge/Device-Gleam%20%2B%20BEAM-pink.svg)](https://gleam.run/)
-[![Status](https://img.shields.io/badge/PoC-Verified%20100%25-brightgreen.svg)]()
+[![Status](https://img.shields.io/badge/14%20Phases%20%2B%20G.1--G.8-Verified%20100%25-brightgreen.svg)]()
 
 > [!NOTE]
 > **Catatan Lingkungan Pengujian (Disclaimer PoC Environment):**
-> Seluruh rangkaian pengujian PoC ini dijalankan dalam **lingkungan lokal 100% (Local Self-Contained Sandbox)** untuk memverifikasi fungsionalitas dan performa arsitektur tanpa biaya gas/token:
+> Seluruh rangkaian pengujian dijalankan dalam **lingkungan lokal 100% (Local Self-Contained Sandbox)** untuk memverifikasi ketahanan kegagalan (*fault-tolerance*), keamanan kriptografis, dan performa tanpa biaya gas/token:
 > - **HyperBEAM Dual-Node:** Berjalan lokal di mesin (`:8734` Hot Node, `:8735` SU Node).
 > - **Ledger Arweave:** Menggunakan simulator lokal **ArLocal** (`:1984`) sehingga pencatatan blok dan transaksi tidak memerlukan biaya token $AR sesungguhnya.
-> - **AO Process (Wasit):** Menggunakan engine WebAssembly resmi **`@permaweb/ao-loader`** yang mengeksekusi binary proses resmi AO (`process.wasm`) dan skrip Wasit Lua (`arbitrator.lua`). Logika validasi dan audit rantai hash SHA-256 adalah 100% kode AO asli (bukan tiruan/mock), dievaluasi di dalam sandbox WASM lokal tanpa memanggil Compute Unit (CU) AO Mainnet/Testnet publik di cloud.
+> - **AO Process Arbitrator:** Menggunakan engine WebAssembly resmi **`@permaweb/ao-loader`** yang mengeksekusi binary proses resmi AO (`process.wasm`) dan skrip Arbitrator Lua (`arbitrator.lua`) + verifier domain keamanan (`real_ao_evaluator.mjs`).
 
 ---
 
-## 1. Visi & Problem Statement
+## 1. Visi Utama & Pemisahan 6 Lapisan Tanggung Jawab
 
-Database aplikasi terdesentralisasi (Web3) menghadapi dilema mendasar:
-1. **Kebutuhan Real-Time:** Aplikasi interaktif (game multiplayer, live orderbook, kolaborasi real-time) membutuhkan latensi respon **di bawah 15 milidetik (<15ms)**.
-2. **Keterbatasan Blockchain:** Konsensus on-chain membutuhkan waktu detik hingga menit untuk finalitas, sehingga mustahil merespon mutasi per-milidetik secara langsung di blockchain.
-3. **Risiko Node Disposable:** Jika server depan (Hot Node) memegang data tunggal tanpa replikasi cepat, kematian server akan menyebabkan *data loss*. Sebaliknya, jika harus menunggu blok ditambang, latensi hancur.
-
-### Solusi: Pemisahan Dua Tingkat Kebenaran
-Arsitektur ini menerapkan prinsip **Optimistic Execution dengan Wasit Kriptografis**:
-- **Kebenaran Sementara (Fast Lane):** Dijalankan di memori RAM Hot Node dengan replikasi semi-sinkron ke SU Node, menghasilkan respon `<15ms` yang aman.
-- **Kebenaran Final (Audit Wasit):** Dievaluasi ulang secara deterministik di dalam **AO Process** (Lua sandbox WebAssembly) yang bertindak sebagai **Wasit**, menolak manipulasi data (*anti-fraud*), dan meng-commit checkpoint permanen ke Arweave ledger.
-
----
-
-## 2. Diagram Arsitektur Sistem
+Stack ini dirancang sebagai **Universal Distributed Real-Time Database dan Compute Stack** yang menggabungkan pemrosesan cepat (`<15ms`), kontrak data universal, replikasi jujur (*honest durability*), verifikasi deterministik, dan pemulihan otomatis ketika node gagal.
 
 ```mermaid
 flowchart TD
-    Client["Client / Game Player"] -->|"HTTP Put :8734"| HotNode["Hot Node HyperBEAM (:8734)<br/>hb@DESKTOP-EDTU3OG<br/>(100% Pure RAM - Zero Local Disk)"]
-    
-    subgraph HotNode_Internal ["Hot Node Execution Lane"]
-        HotNode -->|"Custom Device"| Hymessage["hymessage@1.0 (Gleam + Erlang)<br/>Monotonic Sequencer & Hash Chain"]
-        Hymessage -->|"wasm-64@1.0"| HyDB["HyDB Engine (Rust no_std)<br/>In-RAM Slot Table & Merkle-XOR Root"]
+    subgraph L1 ["1. Application / Developer Layer"]
+        App["Model Data · Aturan Bisnis · Pilihan Database · Konfigurasi Policy"]
     end
-    
-    subgraph BEAM_Replication ["Replikasi Semi-Sinkron Raw TCP (:8736)"]
-        Hymessage -->|"Framing Packet 4-byte"| SUNode["SU Node HyperBEAM (:8735)<br/>hb_su@DESKTOP-EDTU3OG<br/>Native device: scheduler@1.0"]
-        SUNode -->|"Sub-0.1ms ACK"| Hymessage
+
+    subgraph L2 ["2. HyDB Contract Library (hydb.core@1.0)"]
+        Contract["Core Operations: get, put, delete, exists<br/>Data Model: KV Foundation + Structured Document<br/>Namespace · Versioned Schema · Error Semantics · Canonical Encoding<br/>Capability Declarations: cas, prefix_scan, structured_doc, fast_fingerprint_64, snapshot"]
     end
-    
-    HotNode -->|"200 OK setelah SU ACK (Avg ~8ms)"| Client
-    
-    subgraph SUNode_Store ["SU HyperBEAM Dual-Store"]
-        SUNode -->|"O(1) Memory Read"| SURAM["Pure RAM (ETS Table)<br/>Latest Tick, State Root, Live KV"]
-        SUNode -->|"Sequential Append"| SUWAL["Durability Anchor (Disk WAL)<br/>pool_su/wal.log"]
+
+    subgraph L3 ["3. Hymessage (hymessage@1.0) + Storage Integration"]
+        Gate["Pre-Sequence Contract Gate (Guardrail A: Validate BEFORE Seq Allocation)"]
+        Sequencer["Monotonic Sequencer · Epoch Fencing · SHA-256 Hash Chain"]
+        WasmBackend["Backend Adapter: wasm_slot (Rust no_std Namespace-Isolated Slot Table)"]
+        DocBackend["Backend Adapter: ets_doc (BEAM Ordered Document Store)"]
     end
-    
-    SUWAL -->|"Batch Checkpoint Sync"| AoEvaluator["Real AO Process (@permaweb/ao-loader)<br/>process.wasm + arbitrator.lua"]
-    AoEvaluator -->|"Audit SHA-256 Hash Chain"| Wasit{"Wasit Verdict"}
-    Wasit -->|"Hash Cocok"| CommitOK["PASSED_AND_COMMITTED<br/>Sign RSA & Commit TX"]
-    Wasit -->|"Hash Dimanipulasi"| CutFraud["FRAUD_DETECTED_AND_CUT<br/>Reject Checkpoint Batch"]
-    
-    CommitOK -->|"Mine Block Permanen"| ArLocal["ArLocal (:1984)<br/>Arweave Local Block Ledger"]
+
+    subgraph L4 ["4. SU Pool (su_runtime.erl on scheduler@1.0)"]
+        SU["Inbound TCP Stream (:8736) with HMAC-SHA256 Mutual Handshake<br/>Epoch Fencing · Gap Check · Hash Verification<br/>1. Disk WAL Append -> 2. RAM ETS Update -> 3. Honest TCP ACK<br/>Cold-Boot Auto-Recovery from wal.log"]
+    end
+
+    subgraph L5 ["5. AO Arbitrator (Satu Domain Keamanan Logis)"]
+        Arbitrator["Atomic Staging Area (All-or-Nothing Commit)<br/>Independent Schema & Contract Enforcement (Guardrail B)<br/>64-bit Merkle-XOR Fast Fingerprint + 256-bit SHA-256 Canonical Commitment<br/>Multi-SU Deduplication & Cryptographic Equivocation Proof"]
+    end
+
+    subgraph L6 ["6. Policy Circuit (Developer Operational Response)"]
+        Policy["Maps Verdict -> Operational Action<br/>Guardrail C: Policy Circuit NEVER overrides an invalid Verdict into a valid commit"]
+    end
+
+    L1 --> L2 --> Gate --> Sequencer
+    Sequencer --> WasmBackend & DocBackend
+    Sequencer -->|"HMAC-Auth 4-byte Framed TCP"| SU
+    SU -->|"Batch / Multi-SU Sync"| Arbitrator --> Policy
 ```
 
 ---
 
-## 3. Tujuh Pilar Utama Arsitektur
+## 2. HyDB Core Contract Library (`hydb.core@1.0`)
 
-1. **Tepat SATU Custom Device (`hymessage@1.0`):**
-   Tidak perlu mengotori HyperBEAM dengan banyak custom device. Hanya Hot Node yang menggunakan custom device inovasi kita (`hymessage@1.0`) sebagai pintu gerbang *fast lane*.
-2. **SU Node Memakai Device Native (`scheduler@1.0`):**
-   SU Node (`hb_su`) berjalan murni menggunakan device native resmi AO bawaan HyperBEAM: `~scheduler@1.0` pada port `:8735`.
-3. **Hot Node 100% Pure RAM (Stateless & Disposable):**
-   Hot Node **sama sekali tidak menyentuh disk lokal** untuk write data. Hot Node boleh mati permanen sewaktu-waktu tanpa risiko kehilangan data.
-4. **Inbound SU Subscriber Model:**
-   SU Node bertindak sebagai *inbound subscriber* yang menancap ke Hot Node melalui port streaming TCP `:8736`. Hot Node tidak perlu repot mengelola jaringan subscriber luar.
-5. **Semi-Synchronous Quorum (<15ms SLO Budget):**
-   Client baru menerima status `200 OK` **SETELAH** minimal 1 SU Node mengonfirmasi penerimaan data lewat ACK raw TCP. Pengujian live membuktikan replikasi Hot $\leftrightarrow$ SU hanya memakan waktu **$\sim$0.2 ms**, sehingga total respon client tetap sangat kencang di angka **$\sim$8.05 ms** (jauh di bawah batas 15ms).
-6. **SU Dual-Store (RAM Cache + On-Disk WAL):**
-   SU Node memegang *latest tick* dan *state table* terbaru langsung di **RAM (ETS)** untuk query instan ($O(1)$ zero disk read), sekaligus menulis *append-only* ke **Disk WAL** (`pool_su/wal.log`) untuk ketahanan terhadap kegagalan total (*crash durability*).
-7. **AO Process "Satu Kepala" Sebagai Wasit Absolut:**
-   AO Process dievaluasi via official `@permaweb/ao-loader` WebAssembly Lua sandbox. Wasit mengaudit kesinambungan rantai hash SHA-256. Jika data dimanipulasi, Wasit langsung memotongnya (`FRAUD_DETECTED_AND_CUT`).
+Diimplementasikan pada [`hymessage/src/hydb_contract.erl`](hymessage/src/hydb_contract.erl) dan [`hydb/src/lib.rs`](hydb/src/lib.rs), **HyDB** mendefinisikan arti semantik operasi data secara universal tanpa mencampuradukkan urusan jaringan/konsensus:
+
+### A. Core Contract (Wajib Tersedia)
+- **Operasi Dasar:** `get`, `put`, `delete` (`del`), `exists`.
+- **Tipe Data:** `int64`, `string`, `bytes`, `bool`, `json`.
+- **Namespace & Versioned Schema:** Ruang data terisolasi penuh (termasuk isolasi `ns: u64` di dalam tabel slot Rust WASM `hydb/src/lib.rs` melalui `db_put_ns`/`db_get_ns`/`db_has_ns`/`db_del_ns`/`db_version_ns`), disertai registrasi skema dinamis yang ikut masuk ke urutan sequence WAL (`action = "register_schema"`, opcode `"24"`) sehingga direplikasi ke SU dan ditegakkan secara deterministik oleh Arbitrator AO.
+- **Explicit Error Semantics (`error_code`):**
+  - `OK` (`200`)
+  - `ERR_KEY_NOT_FOUND` (`404`)
+  - `ERR_INVALID_INPUT` (`400`)
+  - `ERR_SCHEMA_VIOLATION` (`422`)
+  - `ERR_VERSION_CONFLICT` (`409` — kegagalan Compare-And-Swap `expected_ver`)
+  - `ERR_CAPABILITY_UNSUPPORTED` (`501` — fitur tidak didukung oleh backend namespace terkait)
+  - `ERR_NODE_AUTH_FAILED` (penolakan koneksi TCP `:8736` tanpa tanda tangan HMAC-SHA256 yang sah)
+- **Canonical Encoding Contract:** Encoding deterministik untuk perhitungan hash chain dan state commitment lintas bahasa (Rust, Erlang, Lua, JavaScript).
+
+### B. Capability & Extension (Deklaratif per Backend)
+| Capability | `wasm_slot` (Rust WASM `no_std`) | `ets_doc` (BEAM Ordered Document Store) |
+| :--- | :---: | :---: |
+| `kv_core` (`get`, `put`, `del`) | ✅ | ✅ |
+| `exists` | ✅ | ✅ |
+| `cas` (`expected_ver`) | ✅ | ✅ |
+| `fast_fingerprint_64` | ✅ | ✅ |
+| `snapshot` (WASM linear memory) | ✅ | ❌ (`ERR_CAPABILITY_UNSUPPORTED`) |
+| `structured_doc` (String/JSON) | ❌ (`ERR_CAPABILITY_UNSUPPORTED`) | ✅ |
+| `prefix_scan` (`GET /scan`) | ❌ (`ERR_CAPABILITY_UNSUPPORTED`) | ✅ |
 
 ---
 
-## 4. Showcase Kode & Komponen Inti
+## 3. Tiga Guardrail Keamanan Konstitusional
 
-### A. The Custom Device: `hymessage@1.0` (Gleam + Erlang Runtime)
-Terletak di [`hymessage/src/hymessage.gleam`](hymessage/src/hymessage.gleam) dan [`hymessage/src/hymessage_runtime.erl`](hymessage/src/hymessage_runtime.erl).
+1. **Guardrail A — Pre-Sequence Contract Gate:**
+   Validasi skema, tipe data, kapabilitas backend, dan versi CAS (`expected_ver`) dilakukan **SEBELUM** `Hymessage` mengalokasikan nomor urut `Seq`. Request yang gagal validasi (`400`/`409`/`422`/`501`) ditolak secara bersih tanpa melompati `Seq`, tanpa mengubah rantai hash, dan tanpa mengirim paket sampah ke SU Pool.
+2. **Guardrail B — Independent Arbitrator Schema & Commitment Verification:**
+   Arbitrator AO tidak percaya buta pada klaim Hot Node maupun SU Node. Arbitrator memvalidasi ulang rantai hash SHA-256, aturan skema bisnis per namespace (termasuk skema dinamis dari event `register_schema`), serta menghitung ulang **64-bit Fast Fingerprint (Merkle-XOR)** dan **256-bit Cryptographic State Commitment (Canonical SHA-256)** di dalam *Atomic Staging Area* (*all-or-nothing*).
+3. **Guardrail C — Batas Konstitusional Policy Circuit:**
+   Arbitrator menentukan **fakta kriptografis (Verdict)**; `PolicyCircuit` milik developer menentukan tindakan operasional (seperti `REQUEST_CATCHUP_FROM_SU_POOL` atau `FREEZE_EPOCH_AND_PROMOTE_STANDBY_HOT`). Jika konfigurasi `PolicyCircuit` mencoba memaksa menerima batch yang tidak sah (`FORCE_ACCEPT`), guardrail otomatis memblokir override tersebut (`policy_guardrail_enforced: true`) dan menjaga state resmi tetap utuh.
 
-Menangani otentikasi user, monotonic sequencer, TCP stream hub, dan semi-synchronous quorum:
+---
 
-```erlang
-% Cuplikan hymessage_runtime.erl (Semi-Synchronous Quorum)
-broadcast_and_await_su(Event, Seq) ->
-    Subs = get_active_subscribers(),
-    case Subs of
-        [] -> {false, 0};
-        _ ->
-            Data = json:encode(Event),
-            % Broadcast raw TCP stream dengan 4-byte framing ke semua SU
-            lists:foreach(fun(Sock) -> gen_tcp:send(Sock, Data) end, Subs),
-            % Tahan eksekusi hingga minimal 1 SU mengirimkan ACK (timeout 25ms)
-            case await_su_quorum(Seq, length(Subs), 25) of
-                {ok, Count} -> {true, Count};
-                {timeout, Count} -> {false, Count}
-            end
-    end.
-```
+## 4. Matriks Verifikasi 14 Fase (`tests/test_maximal_poc.mjs`)
 
-### B. The Living Database Engine: `hydb` (Rust WASM `no_std`)
-Terletak di [`hydb/src/lib.rs`](hydb/src/lib.rs).
+| Fase | Skenario Uji | Jaminan Keamanan & Ketahanan | Status |
+| :--- | :--- | :--- | :---: |
+| **Phase 1** | **Topology & Native SU Scheduler** | Tepat 1 custom device (`hymessage@1.0`); SU memakai native `scheduler@1.0`. | **PASSED** |
+| **Phase 2** | **Honest Durability ACK & `<15ms` Writes** | SU mengirim TCP ACK **setelah** validasi + tulis Disk WAL + update RAM ETS; nilai `-1` tersimpan utuh (`db_has`). | **PASSED** |
+| **Phase 3** | **Hash Collision & Tombstone (`SLOT_TOMBSTONE`)** | Linear probing tahan delete (`key=100` & `key=1124`); re-aktivasi tombstone melanjutkan versi (`ver + 1`). | **PASSED** |
+| **Phase 4** | **SU Cold-Boot Auto-Recovery dari WAL** | Saat SU restart, RAM ETS otomatis direkonstruksi 100% dari `pool_su/wal.log` (termasuk operasi `del`). | **PASSED** |
+| **Phase 5** | **Hot Node Catastrophic Wipe & Replay** | Hot Node kehilangan seluruh RAM $\rightarrow$ replay dari SU WAL memulihkan `Seq`, `Hash`, dan `StateRoot` 100% identik. | **PASSED** |
+| **Phase 6** | **Real AO Arbitrator & Dual Commitment** | Rekonstruksi deterministik 64-bit Fast Root + 256-bit Canonical SHA-256 Commitment & mining ke ArLocal. | **PASSED** |
+| **Phase 7** | **Multi-SU Deduplication, Out-of-Order, & Gap** | Batch tumpang-tindih diterima idempoten (`DUPLICATE_BATCH_IDEMPOTENT`); urutan acak & gap ditolak. | **PASSED** |
+| **Phase 8** | **Multi-SU Equivocation Detection** | Dua SU mengirim data berbeda pada `seq` yang sama $\rightarrow$ terbukti secara kriptografis (`EQUIVOCATION_PROVEN`). | **PASSED** |
+| **Phase 9** | **Tampered State Root & Atomic Rollback** | Hash chain valid tetapi `state_root` dipalsukan $\rightarrow$ terdeteksi (`REJECTED_STATE_ROOT_MISMATCH`) & batal atomik. | **PASSED** |
+| **Phase 10** | **Split-Brain Prevention & Epoch Fencing** | Promosi ke `Epoch 2` memagari Hot Node zombie (`Epoch 1`) dengan `FENCED_STALE_EPOCH` di Hot, SU, dan Arbitrator. | **PASSED** |
+| **Phase 11** | **HyDB Core Contract (`hydb.core@1.0`)** | Pre-sequence schema gate, CAS `expected_ver`, `exists`, multi-backend `wasm_slot` + `ets_doc` `prefix_scan`, & Policy Guardrail. | **PASSED** |
+| **Phase 12** | **WASM NS Isolation, Sequenced Schema, & TCP Auth** | Isolasi `ns` di `hydb.wasm` (`default[100]` vs `finance.balances[100]`), event `register_schema` di WAL & Arbitrator, serta Mutual HMAC-SHA256 Auth di TCP `:8736`. | **PASSED** |
+| **Phase 13** | **HyDB Contract SDK, Pre-Flight Sandbox & Arweave TX Pull** | `sdk/hydb_sdk.mjs` menjalankan **Pre-Flight Sandbox Simulator** (memvalidasi ekspor WASM, canary execution, non-hanging Lua loop, dan schema invariants) sebelum publish ke Arweave (`Contract_TxID` & `Wasm_TxID`) tanpa URL node. Mendukung custom Lua Policy Handlers ($Y$) berbasis incident context ($X$) dengan proteksi Guardrail C. | **PASSED** |
+| **Phase 14** | **Adversarial Security Hardening (5 Lapis Pertahanan)** | Kunci otorisasi admin (`ERR_ADMIN_UNAUTHORIZED`), anti-SSRF gateway (`ERR_UNTRUSTED_GATEWAY`), penegakan `require_auth` kontrak (`ERR_UNAUTHORIZED`), batas kapasitas slot WASM (`ERR_WASM_CAPACITY_EXCEEDED`), dan verifikasi tanda tangan kriptografis batch HMAC SU di Arbitrator AO. | **PASSED** |
 
-Engine database in-memory berkecepatan mikrodetik yang dikompilasi ke `wasm32-unknown-unknown` dan dieksekusi oleh native device HyperBEAM `wasm-64@1.0`:
+---
+
+## 5. Panduan Workflow: Kontrak Murni & Pembuatan Custom WASM Database Engine
+
+### A. Filosofi Desain: SDK adalah "Surat Kontrak Murni", WASM adalah "Mesin Database Fisik"
+
+Di dalam arsitektur HyDB:
+- **SDK (`sdk/hydb_sdk.mjs`)** bertindak **murni sebagai pembuat surat kontrak, manifes aturan, dan orkestrator verifikasi**. SDK **tidak** menentukan bagaimana data disimpan di memori.
+- **WASM Engine (buatan developer)** adalah **pelaksana fisik database**. Developer bebas mengimplementasikan struktur data apa pun (B-Tree, Hash Slot O(1), LSM-Tree, Vector Index) asalkan mematuhi **Hukum Antarmuka (ABI)** yang disepakati bersama.
+- **AO Arbitrator** bertindak sebagai **hakim otonom** yang menjalankan Policy Handler Lua kustom ($Y$) saat terjadi insiden pelanggaran ($X$) di jaringan.
+
+---
+
+### B. Hukum Baku Antarmuka Mesin Database (WASM Storage Engine ABI)
+
+Jika Anda membangun mesin database WASM sendiri (misal dengan Rust, C, atau Zig), biner WASM Anda **wajib mengekspor 5 fungsi primitif dasar** dengan tanda tangan variabel `i64` berikut:
 
 ```rust
-// Cuplikan hydb/src/lib.rs (Merkle-XOR Incremental State Root Accumulator)
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Record {
-    pub active: u8,
-    pub key: u64,
-    pub val: u64,
-    pub ver: u32,
-    pub last_seq: u64,
+// Contoh: my_custom_engine/src/lib.rs (Rust no_std / std)
+
+/// 1. TULIS DATA KE STORAGE ENGINE
+/// Input:
+///   - ns:   ID Namespace unik (i64 hash dari nama namespace)
+///   - key:  Kunci record (i64)
+///   - val:  Nilai data yang disimpan (i64)
+///   - ver:  Nomor versi berurutan (i64)
+/// Output: State Root Hash terbaru (i64) hasil kalkulasi mesin Anda.
+#[no_mangle]
+pub extern "C" fn db_put_ns(ns: i64, key: i64, val: i64, ver: i64) -> i64 {
+    // Logika simpan data custom Anda di sini...
+    calculate_state_root()
 }
 
-#[inline]
-pub fn record_hash(key: u64, val: u64, ver: u32) -> u64 {
-    let mut h = 0xcbf29ce484222325u64;
-    h ^= key; h = h.wrapping_mul(0x100000001b3);
-    h ^= val; h = h.wrapping_mul(0x100000001b3);
-    h ^= ver as u64; h = h.wrapping_mul(0x100000001b3);
-    h
+/// 2. BACA DATA DARI STORAGE ENGINE
+/// Output: Nilai data (i64) yang tersimpan, atau -404 jika tidak ditemukan.
+#[no_mangle]
+pub extern "C" fn db_get_ns(ns: i64, key: i64) -> i64 {
+    // Logika pencarian data custom Anda di sini...
 }
 
-// O(1) State Root Update via XOR:
-// Old hash di-XOR keluar, New hash di-XOR masuk secara atomik
-DB.state_root ^= old_hash;
-DB.state_root ^= new_hash;
+/// 3. HAPUS DATA DARI STORAGE ENGINE (Tombstone)
+/// Output: State Root Hash terbaru (i64) setelah penghapusan.
+#[no_mangle]
+pub extern "C" fn db_del_ns(ns: i64, key: i64) -> i64 {
+    // Logika penghapusan/tombstone custom Anda di sini...
+}
+
+/// 4. CEK KEBERADAAN DATA
+/// Output: 1 jika ada (aktif), 0 jika tidak ada atau sudah dihapus.
+#[no_mangle]
+pub extern "C" fn db_has_ns(ns: i64, key: i64) -> i64 {
+    // Return 1 atau 0
+}
+
+/// 5. CEK VERSI RECORD SAAT INI (Untuk Optimistic Locking / CAS)
+/// Output: Versi data saat ini (i64).
+#[no_mangle]
+pub extern "C" fn db_version_ns(ns: i64, key: i64) -> i64 {
+    // Return nomor versi record
+}
+
+/// [OPSIONAL TAPI DIREKOMENDASIKAN] VALIDASI INVARIAN DALAM WASM
+/// Output: 0 jika valid, atau kode error negatif (misal -422) jika melanggar invarian internal.
+#[no_mangle]
+pub extern "C" fn db_check_put_ns(ns: i64, key: i64, val: i64) -> i64 {
+    if val < 0 { return -422; } // Tolak nilai negatif langsung di memory WASM!
+    0
+}
 ```
 
-### C. The Official AO Wasit Process: `arbitrator.lua`
-Terletak di [`ao_process/arbitrator.lua`](ao_process/arbitrator.lua).
-
-Berjalan di dalam sandbox WebAssembly AO Process resmi (`@permaweb/ao-loader`), memvalidasi integritas rantai hash kriptografis sebelum menorehkan blok ke ledger:
-
-```lua
--- Cuplikan ao_process/arbitrator.lua (Audit Determinisme & Anti-Fraud)
-local running_hash = OfficialHash
-for _, ev in ipairs(events) do
-    local seq = tonumber(ev.seq)
-    local action_code = (ev.action == "del") and "22" or "20"
-    
-    -- Rekonstruksi SHA-256 payload rantai hash
-    local payload = string.format("%s%d%s%d%d", running_hash, seq, action_code, ev.key, ev.val)
-    local expected_hash = string.upper(crypto.digest("sha256", payload))
-    local given_hash = string.upper(ev.hash)
-
-    -- Deteksi manipulasi: jika rantai terputus, tolak dan potong!
-    if expected_hash ~= given_hash then
-        ao.send({
-            Target = msg.From,
-            Action = "Audit-Rejected",
-            Status = "FRAUD_DETECTED_AND_CUT",
-            Reason = string.format("Hash chain broken at seq %d!", seq)
-        })
-        return
-    end
-    running_hash = expected_hash
-end
-```
-
-### D. The SU Node BEAM Worker: `su_runtime.erl`
-Terletak di [`pool_su/src/su_runtime.erl`](pool_su/src/su_runtime.erl).
-
-Berjalan sebagai proses Erlang berdaya tahan tinggi di dalam instance HyperBEAM `hb_su`:
-
-```erlang
-% Cuplikan pool_su/src/su_runtime.erl (Fast ACK & Dual-Store)
-handle_incoming_event(Socket, RawData) ->
-    Event = json:decode(RawData),
-    Seq = maps:get(<<"seq">>, Event, 0),
-    
-    % 1. FAST ACK: Kirim sequence number balik ke Hot Node instan (<0.05ms)
-    gen_tcp:send(Socket, <<Seq:32/big>>),
-    
-    % 2. DUAL-STORE RAM: Simpan latest tick & state root di ETS table
-    ets:insert(?TABLE, {tick, Seq}),
-    ets:insert(?TABLE, {state_root, maps:get(<<"state_root">>, Event, 0)}),
-    
-    % 3. DURABILITY ANCHOR: Tulis baris event ke Disk WAL
-    file:write_file(?WAL_PATH, [RawData, <<"\n">>], [append]).
-```
-
----
-
-## 5. Hasil Pengujian PoC & Benchmark Live
-
-Pengujian menyeluruh dijalankan menggunakan test suite modern tanpa mock Python: [`tests/test_maximal_poc.mjs`](tests/test_maximal_poc.mjs).
-
-```text
-================================================================================
->>> RUNNING PURE MAXIMAL PoC (AO + HYPERBEAM PURE STACK) <<<
-================================================================================
-
-[PHASE 1] Memverifikasi Endpoint Resmi & Koneksi SU Inbound Subscriber...
-  * SU Native Device:   scheduler@1.0 (Official AO Scheduler)
-  * SU Operator Wallet: yWLs9VNxqM1R3tUQpVNtu0_1J-Z3zWt371kIUrsTMOg
-  * SU Node Role:       SU-HyperBEAM-Node (Node: hb_su)
-  * SU Node Connected:  true
-  * Hot Node Active SU: 1 subscriber(s) connected
-
-[PHASE 2] Eksekusi 25 Semi-Synchronous In-Memory Writes (<15ms SLO)...
-  * ATURAN: Client baru menerima 200 OK SETELAH data di-ACK oleh SU Node!
-  * Total Writes:       25 records
-  * Quorum Replicated:  100% (Confirmed by SU before user reply)
-  * Avg Latency:        8.05 ms   (Min: 5.69ms, Max: 14.70ms, P95: 12.71ms)
-  * [SLO PASSED] Semi-Synchronous Quorum < 15ms Budget Satisfied!
-
-[PHASE 3] Memeriksa Tick SU di RAM & File WAL Persisten...
-  * SU Source:          RAM (Zero Disk Read via BEAM RPC)
-  * SU Latest Tick:     25
-  * SU State Root:      -239217635977744180
-  * [VERIFIED] SU is serving the latest tick & state directly from RAM!
-  * SU Persistent WAL:  25 entries recorded on disk.
-  * [VERIFIED] Durability Anchor: All entries written to disk WAL!
-
-[PHASE 4] Simulasi Catastrophic Hot Node RAM Wipe & Replay Failover...
-  * Hot Node volatile memory wiped (Seq=0, Root=0)
-  * Reconstructing state from SU WAL into new Hot instance...
-  * Replay Status: Replayed 25 events in 1700.42 ms
-  * [ZERO DATA LOSS CONFIRMED] All 25 records recovered with 100% fidelity!
-
-[PHASE 5] Real AO WebAssembly Sandbox Evaluation & ArLocal Commitment...
-  * AO WASM Execution & Mining: 1484.81 ms
-  * AO Process Verdict:         PASSED_AND_COMMITTED
-  * AO WASM Evaluated:          true
-  * ArLocal Block:              12
-  * ArLocal TX ID:              p5nbs8aY1zdot8kpD_MrkDhgQp7SaMoVXQOFq93NBAo
-  * [AO COMMITTED] Checkpoint officially committed to ArLocal ledger!
-
-[PHASE 6] Pengujian Wasit Anti-Fraud di Real AO Sandbox...
-  * Wasit Verdict:    FRAUD_DETECTED_AND_CUT
-  * Rejection Reason: Hash chain broken
-  * [WASIT VERIFIED] Fraudulent attempt detected and REJECTED!
-
-================================================================================
->>> PURE PoC VERIFICATION COMPLETE: 100% SATISFIED <<<
-```
-
-### Tabel Matriks Performa & Verifikasi
-
-| Kriteria Uji | Target Budget | Hasil Terukur Live | Status |
-| :--- | :--- | :--- | :--- |
-| **Write Latency (Semi-Sync)** | `< 15.00 ms` | **`8.05 ms`** (P95: `12.71 ms`) | **PASSED** |
-| **Hot $\leftrightarrow$ SU TCP Replikasi** | `< 2.00 ms` | **`0.20 ms`** | **PASSED** |
-| **SU In-Memory Query** | Zero-Disk Read | $O(1)$ Pure RAM ETS Table | **PASSED** |
-| **Catastrophic Failover** | 0% Data Loss | 25/25 records replayed 100% utuh | **PASSED** |
-| **Wasit Anti-Fraud** | Tamper Detection | Fraud dipotong (`FRAUD_DETECTED_AND_CUT`) | **PASSED** |
-| **ArLocal Finality** | Zero Financial Cost | Block 12 mined permanently | **PASSED** |
-
----
-
-## 6. Panduan Menjalankan Sistem (Quick Start)
-
-Semua langkah dijalankan di **WSL Ubuntu** dalam folder contohnya `/home/weslur/database`:
-
-### 1. Menyalakan Seluruh Stack (Hot Node + SU Node + ArLocal)
+Kompilasi engine Anda ke target WebAssembly:
 ```bash
-cd /home/weslur/database
-bash scripts/dev-up.sh
+cargo build --release --target wasm32-unknown-unknown
 ```
-*Output:*
-```text
-[node] UP on :8734
-[su-node] UP on :8735
-[arlocal] already running on :1984
-[dev-up] hot :8734 + su :8735 + arlocal :1984 ready
-```
-
-### 2. Menjalankan Master Integration Test PoC
-```bash
-node tests/test_maximal_poc.mjs
-```
-
-### 3. Inspeksi Manual
-
-- **Cek Endpoint Native SU Scheduler:**
-  ```bash
-  curl -s -H 'Accept: application/json' http://127.0.0.1:8735/~scheduler@1.0/status
-  ```
-- **Inspeksi Langsung RAM SU via BEAM RPC:**
-  ```bash
-  scripts/hb-su-eval.sh 'su_runtime:get_current_tick().'
-  scripts/hb-su-eval.sh 'su_runtime:get_state_root().'
-  ```
-- **Kirim Mutasi ke Hot Node:**
-  ```bash
-  curl -s -H 'Accept: application/json' 'http://127.0.0.1:8734/~hymessage@1.0/put?key=101&val=8888'
-  ```
-- **Cek Status Replikasi Hot Node:**
-  ```bash
-  curl -s -H 'Accept: application/json' http://127.0.0.1:8734/~hymessage@1.0/state
-  ```
 
 ---
 
-## 7. Status & Tahap Selanjutnya
+### C. Alur Kerja Kontrak: Mengikat Mesin WASM & Kebijakan Lua ($Y$)
 
-Proof of Concept (PoC) ini telah membuktikan secara nyata dan tanpa tiruan bahwa arsitektur database in-memory semi-sinkron di atas HyperBEAM dan AO berhasil mencapai batas latensi di bawah 15ms dengan jaminan nol kehilangan data dan verifikasi Wasit anti-kecurangan.
+Setelah binary `.wasm` Anda selesai dibuat, gunakan SDK untuk memformulasikan kontrak data dan kebijakan darurat:
 
-Tahap berikutnya yang siap dieksplorasi:
-1. **Multi-SU Quorum Mesh:** Menjalankan $\ge 2$ node SU secara paralel dengan kebijakan kourum mayoritas ($N/2 + 1$).
-2. **Causal Read Routing (`min_seq`):** Client membaca langsung dari RAM SU terdekat dengan jaminan urutan sekuens kausal.
-3. **Adaptive Backpressure:** Throttling dinamis pada Hot Node jika I/O disk WAL pada SU Node mengalami lonjakan beban.
+```javascript
+import { defineContract, HYDB_EVENTS } from './sdk/hydb_sdk.mjs';
+
+// 1. Rumuskan Surat Kontrak (Surat Wasiat / Manifes Data)
+const myCustomContract = defineContract({
+  namespace: 'orderbook.solana',
+  backend: 'wasm_slot',
+  schema: {
+    keyType: 'int64',
+    valueType: 'int64',
+    minValue: 1,
+    maxValue: 1000000000
+  },
+  // Hubungkan File WASM Custom & Deklarasikan Pemetaan Fungsinya:
+  wasm: {
+    file: './target/wasm32-unknown-unknown/release/my_engine.wasm',
+    exports: {
+      put: 'db_put_ns',
+      get: 'db_get_ns',
+      del: 'db_del_ns',
+      has: 'db_has_ns',
+      version: 'db_version_ns'
+    }
+  },
+  // Tulis Policy Handler Lua ($Y$) saat terjadi insiden ($X$) di Arbitrator AO:
+  policy: {
+    [HYDB_EVENTS.ON_SCHEMA_VIOLATION]: `
+      return function(event)
+        -- event: { verdict, seq, epoch, namespace, sub_verdict, timestamp }
+        return "FREEZE_ORDERBOOK_AND_ALERT_ENGINEER"
+      end
+    `
+  }
+});
+
+// 2. Pre-Flight Sandbox Simulator & Publish ke Arweave
+// Pre-flight secara lokal mengecek:
+// - Apakah semua fungsi export di atas beneran ada di binary WASM Anda?
+// - Menjalankan canary probe memory execution tanpa panic.
+// - Menjalankan simulasi mock event ke fungsi Lua Anda (memastikan bebas hang/infinite loop).
+// Jika ada cacat, publish langsung DIBATALKAN seketika (Zero wasted gas/TX)!
+const { contractTxId, wasmTxId } = await myCustomContract.publishToArweave({
+  gatewayUrl: 'http://127.0.0.1:1984'
+});
+
+// 3. Pasang (Mount) Kontrak pada Node Hot Worker
+await myCustomContract.mountOnNode('http://127.0.0.1:8734');
+
+// 4. Operasi Database Melalui Bound Client
+const db = myCustomContract.bindClient('http://127.0.0.1:8734');
+await db.put(1001, 75000); // Mengeksekusi 'db_put_ns' di dalam mesin WASM custom Anda!
+const res = await db.get(1001); // { val: 75000, ver: 1 }
+```
+
+---
+
+## 6. Protokol Jaringan & Karakteristik Latensi
+
+Stack ini mendukung dua moda interaksi tergantung pada kebutuhan performa aplikasi Anda:
+
+| Moda Transport | Jalur & Port | Karakteristik & Rekomendasi |
+| :--- | :--- | :--- |
+| **HTTP/1.1 Persistent Keep-Alive** | `http://127.0.0.1:8734/~hymessage@1.0` | **Rekomendasi untuk Web, dApp, & Backend API.** Menggunakan `http.Agent({ keepAlive: true })` untuk menghindari handshake ulang. Menghasilkan latensi RTT klien **~6–8 ms** stabil dengan kompatibilitas HTTP penuh. |
+| **Direct Binary TCP Streaming** | `tcp://127.0.0.1:8736` | **Rekomendasi untuk Sinkronisasi Node / Ultra-Low Latency.** Menggunakan protokol biner ber-framing 4-byte dengan otentikasi timbal-balik HMAC. Melewati lapisan HTTP Cowboy secara penuh sehingga latensi penulisan setara dengan durasi engine murni (**~2–3 ms**). |
+
+> [!TIP]
+> **Profil Internal Engine:** Mesin internal Hot Node mengeksekusi validasi skema (~16 µs), hashing SHA-256 & state root (~48 µs), replikasi jaringan kuorum ke SU + append ke disk fisik WAL (`file:write`) (~1.1 ms), dan eksekusi slot WASM (~2.6 ms) dengan total durasi internal **p50 = ~3.35 ms**.
+
+---
+
+## 7. Struktur & Klasifikasi Berkas Proyek
+
+Untuk mempermudah pemeliharaan, repositori ini dikelompokkan secara terstruktur:
+
+- **Core Production Engines:**
+  - [`hymessage/src/hymessage_runtime.erl`](hymessage/src/hymessage_runtime.erl): GenServer sequencer Hot Node, epoch fencing, dan manajemen TCP stream `:8736`.
+  - [`hymessage/src/hydb_contract.erl`](hymessage/src/hydb_contract.erl): Engine deklarasi kapabilitas, pre-sequence gate, CAS, dan isolasi multi-namespace (`hydb.core@1.0`).
+  - [`pool_su/src/su_runtime.erl`](pool_su/src/su_runtime.erl): Node SU pemegang otoritas durabilitas WAL fisik, verifikasi hash chain independen, dan auto-recovery RAM dari disk.
+  - [`hydb/src/lib.rs`](hydb/src/lib.rs): Engine tabel slot O(1) WebAssembly Rust (`no_std`).
+  - [`ao_process/arbitrator.lua`](ao_process/arbitrator.lua): Logika evaluasi AO Arbitrator pada proses WASM resmi AO.
+- **Developer SDK:**
+  - [`sdk/hydb_sdk.mjs`](sdk/hydb_sdk.mjs): SDK klien JavaScript untuk mendefinisikan kontrak, publish ke Arweave TX, dan berinteraksi dengan database.
+- **Official Test Suite (14 Fase):**
+  - [`tests/test_maximal_poc.mjs`](tests/test_maximal_poc.mjs): Rangkaian pengujian terpadu mencakup ketahanan kegagalan, multi-SU, Arweave SDK pull, dan 5 lapis pengerasan keamanan adversarial.
+- **Internal Benchmarking / Profiling Tools:**
+  - `scratch/` (*diabaikan oleh git*): Skrip pengujian latensi internal (`bench.mjs`), pemantau kesehatan cluster (`health.sh`), dan simulasi beban (`traffic.mjs`).
+

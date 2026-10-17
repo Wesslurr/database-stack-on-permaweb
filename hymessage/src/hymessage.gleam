@@ -1,17 +1,9 @@
-//// hymessage — custom communication device (fast lane) for the
-//// real-time optimistic database stack.
+//// hymessage — custom communication & sequencing device (fast lane)
+//// consuming the HyDB Core Contract Library.
 ////
 //// Addressed as `hymessage@1.0`. Packaged as a Forge-format device
 //// archive (generated module name `_hb_device_*`, zip body of beams),
 //// registered via the operator `trusted-devices` map. No fork.
-////
-//// HyDB Real-Time Living Database:
-//// 1. In-RAM atomic sequencer (monotonic sequence counter)
-//// 2. SHA-256 hash chain
-//// 3. HyDB In-Memory Slot Table Engine (Rust WASM via wasm-64@1.0)
-//// 4. Incremental Merkle-XOR State Root Accumulator
-//// 5. Sub-15ms optimistic response
-//// 6. Snapshot Export / Restore for Pool SU & AO Process
 
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
@@ -44,6 +36,15 @@ fn erl_get_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
 @external(erlang, "hymessage_runtime", "del_from_req")
 fn erl_del_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
 
+@external(erlang, "hymessage_runtime", "exists_from_req")
+fn erl_exists_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
+
+@external(erlang, "hymessage_runtime", "schema_from_req")
+fn erl_schema_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
+
+@external(erlang, "hymessage_runtime", "scan_from_req")
+fn erl_scan_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
+
 @external(erlang, "hymessage_runtime", "snapshot_from_req")
 fn erl_snapshot_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
 
@@ -53,12 +54,16 @@ fn erl_restore_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
 @external(erlang, "hymessage_runtime", "replay_from_req")
 fn erl_replay_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
 
+@external(erlang, "hymessage_runtime", "promote_from_req")
+fn erl_promote_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
+
 /// Device metadata. HyperBEAM calls this during key resolution.
 pub fn info(_base: Dynamic, _opts: Dynamic) -> Dict(String, String) {
   dict.new()
   |> dict.insert("name", "hymessage@1.0")
-  |> dict.insert("phase", "hydb-living-database")
-  |> dict.insert("description", "real-time optimistic living database engine")
+  |> dict.insert("contract", "hydb.core@1.0")
+  |> dict.insert("phase", "hydb-contract-universal-stack")
+  |> dict.insert("description", "universal real-time optimistic database & compute engine")
 }
 
 /// Liveness check: GET /~hymessage@1.0/ping
@@ -70,6 +75,7 @@ pub fn ping(
   dict.new()
   |> dict.insert("ok", "pong")
   |> dict.insert("device", "hymessage@1.0")
+  |> dict.insert("contract_version", "hydb.core@1.0")
   |> dict.insert("time-native", int.to_string(system_time_native()))
 }
 
@@ -83,19 +89,34 @@ pub fn submit(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
   erl_submit_from_req(base, req, opts)
 }
 
-/// HyDB Put Record (O(1)): POST/GET /~hymessage@1.0/put?key=101&val=555
+/// HyDB Core Contract — Put Record: POST/GET /~hymessage@1.0/put
 pub fn put(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
   erl_put_from_req(base, req, opts)
 }
 
-/// HyDB Get Record (O(1)): GET /~hymessage@1.0/get?key=101
+/// HyDB Core Contract — Get Record: GET /~hymessage@1.0/get
 pub fn get(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
   erl_get_from_req(base, req, opts)
 }
 
-/// HyDB Del Record (O(1)): POST/GET /~hymessage@1.0/del?key=101
+/// HyDB Core Contract — Delete Record: POST/GET /~hymessage@1.0/del
 pub fn del(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
   erl_del_from_req(base, req, opts)
+}
+
+/// HyDB Core Contract — Exists Check: GET /~hymessage@1.0/exists
+pub fn exists(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
+  erl_exists_from_req(base, req, opts)
+}
+
+/// HyDB Contract Schema & Capability Registry: POST/GET /~hymessage@1.0/schema
+pub fn schema(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
+  erl_schema_from_req(base, req, opts)
+}
+
+/// HyDB Capability Extension — Prefix Scan: GET /~hymessage@1.0/scan
+pub fn scan(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
+  erl_scan_from_req(base, req, opts)
 }
 
 /// HyDB Snapshot Export: GET /~hymessage@1.0/snapshot
@@ -126,4 +147,9 @@ pub fn reset(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
 /// Replay sliding window events: POST /~hymessage@1.0/replay
 pub fn replay(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
   erl_replay_from_req(base, req, opts)
+}
+
+/// Promote Epoch (Fencing Token for Failover): POST/GET /~hymessage@1.0/promote?epoch=2
+pub fn promote(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
+  erl_promote_from_req(base, req, opts)
 }
