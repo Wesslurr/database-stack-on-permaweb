@@ -113,20 +113,76 @@ if not ao then
     }
 end
 
--- Pluggable Developer Policy Circuit (Configurable per Application Use-Case)
--- Guardrail C: Policy Circuit can NEVER turn an invalid Arbitrator Verdict into a valid commit.
-PolicyCircuit = PolicyCircuit or {
-    on_valid_commit = "COMMIT_CHECKPOINT_TO_LEDGER",
-    on_duplicate_overlap = "RECORD_SU_ATTESTATION_IDEMPOTENT",
-    on_sequence_gap = "REQUEST_CATCHUP_FROM_SU_POOL",
-    on_out_of_order = "REJECT_MALFORMED_BATCH",
-    on_schema_violation = "CUT_BRANCH_AND_REJECT_INVALID_SCHEMA",
-    on_hash_chain_broken = "CUT_BRANCH_AND_FREEZE_EPOCH",
-    on_state_root_mismatch = "CUT_BRANCH_AND_SLASH_PROPOSER",
-    on_equivocation = "FREEZE_EPOCH_AND_PROMOTE_STANDBY_HOT",
-    on_stale_epoch = "FENCE_AND_DROP_ZOMBIE_HOT",
-    on_unauthorized_sender = "DROP_UNAUTHORIZED_PACKET"
+-- Canonical Policy Catalog and Allowlist matching spec/hydb_contract_spec.mjs
+POLICY_ALLOWLIST = {
+    ["COMMITTED"] = { "COMMIT_CHECKPOINT_TO_LEDGER" },
+    ["DUPLICATE_BATCH_IDEMPOTENT"] = { "RECORD_SU_ATTESTATION_IDEMPOTENT", "IGNORE_DUPLICATE" },
+    ["REJECTED_SEQUENCE_GAP"] = { "REQUEST_CATCHUP_FROM_SU_POOL", "HALT_PROCESSING", "ALERT_OPERATOR" },
+    ["REJECTED_OUT_OF_ORDER_BATCH"] = { "REJECT_MALFORMED_BATCH", "HALT_PROCESSING", "ALERT_OPERATOR" },
+    ["REJECTED_SCHEMA_VIOLATION"] = { "CUT_BRANCH_AND_REJECT_INVALID_SCHEMA", "FREEZE_NAMESPACE", "HALT_PROCESSING", "ALERT_OPERATOR" },
+    ["REJECTED_CONTRACT_MISMATCH"] = { "REJECT_INCOMPATIBLE_CONTRACT_VERSION", "FREEZE_NAMESPACE", "HALT_PROCESSING" },
+    ["REJECTED_HASH_CHAIN_BROKEN"] = { "CUT_BRANCH_AND_FREEZE_EPOCH", "HALT_PROCESSING" },
+    ["REJECTED_EVENT_HASH_MISMATCH"] = { "CUT_BRANCH_AND_FREEZE_EPOCH", "HALT_PROCESSING" },
+    ["REJECTED_STATE_ROOT_MISMATCH"] = { "CUT_BRANCH_AND_SLASH_PROPOSER", "CUT_BRANCH_AND_FREEZE_EPOCH", "HALT_PROCESSING" },
+    ["REJECTED_STATE_COMMITMENT_MISMATCH"] = { "CUT_BRANCH_AND_SLASH_PROPOSER", "CUT_BRANCH_AND_FREEZE_EPOCH", "HALT_PROCESSING" },
+    ["REJECTED_ENCODING"] = { "REJECT_MALFORMED_BATCH", "HALT_PROCESSING" },
+    ["EQUIVOCATION_PROVEN"] = { "FREEZE_EPOCH_AND_PROMOTE_STANDBY_HOT", "HALT_PROCESSING" },
+    ["FENCED_STALE_EPOCH"] = { "FENCE_AND_DROP_ZOMBIE_HOT", "ALERT_OPERATOR" },
+    ["REJECTED_UNAUTHORIZED_SENDER"] = { "DROP_UNAUTHORIZED_PACKET", "ALERT_OPERATOR" }
 }
+
+-- Mapping between legacy on_* keys and canonical Verdict strings
+local LEGACY_POLICY_MAP = {
+    ["on_valid_commit"] = "COMMITTED",
+    ["on_duplicate_overlap"] = "DUPLICATE_BATCH_IDEMPOTENT",
+    ["on_sequence_gap"] = "REJECTED_SEQUENCE_GAP",
+    ["on_out_of_order"] = "REJECTED_OUT_OF_ORDER_BATCH",
+    ["on_schema_violation"] = "REJECTED_SCHEMA_VIOLATION",
+    ["on_contract_mismatch"] = "REJECTED_CONTRACT_MISMATCH",
+    ["on_hash_chain_broken"] = "REJECTED_HASH_CHAIN_BROKEN",
+    ["on_event_hash_mismatch"] = "REJECTED_EVENT_HASH_MISMATCH",
+    ["on_state_root_mismatch"] = "REJECTED_STATE_ROOT_MISMATCH",
+    ["on_state_commitment_mismatch"] = "REJECTED_STATE_COMMITMENT_MISMATCH",
+    ["on_equivocation"] = "EQUIVOCATION_PROVEN",
+    ["on_stale_epoch"] = "FENCED_STALE_EPOCH",
+    ["on_unauthorized_sender"] = "REJECTED_UNAUTHORIZED_SENDER"
+}
+
+DEFAULT_POLICY = {
+    ["COMMITTED"] = "COMMIT_CHECKPOINT_TO_LEDGER",
+    ["DUPLICATE_BATCH_IDEMPOTENT"] = "RECORD_SU_ATTESTATION_IDEMPOTENT",
+    ["REJECTED_SEQUENCE_GAP"] = "REQUEST_CATCHUP_FROM_SU_POOL",
+    ["REJECTED_OUT_OF_ORDER_BATCH"] = "REJECT_MALFORMED_BATCH",
+    ["REJECTED_SCHEMA_VIOLATION"] = "CUT_BRANCH_AND_REJECT_INVALID_SCHEMA",
+    ["REJECTED_CONTRACT_MISMATCH"] = "REJECT_INCOMPATIBLE_CONTRACT_VERSION",
+    ["REJECTED_HASH_CHAIN_BROKEN"] = "CUT_BRANCH_AND_FREEZE_EPOCH",
+    ["REJECTED_EVENT_HASH_MISMATCH"] = "CUT_BRANCH_AND_FREEZE_EPOCH",
+    ["REJECTED_STATE_ROOT_MISMATCH"] = "CUT_BRANCH_AND_SLASH_PROPOSER",
+    ["REJECTED_STATE_COMMITMENT_MISMATCH"] = "CUT_BRANCH_AND_SLASH_PROPOSER",
+    ["REJECTED_ENCODING"] = "REJECT_MALFORMED_BATCH",
+    ["EQUIVOCATION_PROVEN"] = "FREEZE_EPOCH_AND_PROMOTE_STANDBY_HOT",
+    ["FENCED_STALE_EPOCH"] = "FENCE_AND_DROP_ZOMBIE_HOT",
+    ["REJECTED_UNAUTHORIZED_SENDER"] = "DROP_UNAUTHORIZED_PACKET"
+}
+
+-- Pluggable Developer Policy Circuit (Configurable per Application Use-Case)
+PolicyCircuit = PolicyCircuit or {}
+for k, v in pairs(DEFAULT_POLICY) do
+    if PolicyCircuit[k] == nil then
+        PolicyCircuit[k] = v
+    end
+end
+-- Keep legacy aliases synchronized for backward compatibility
+PolicyCircuit.on_valid_commit = PolicyCircuit.on_valid_commit or PolicyCircuit["COMMITTED"]
+PolicyCircuit.on_duplicate_overlap = PolicyCircuit.on_duplicate_overlap or PolicyCircuit["DUPLICATE_BATCH_IDEMPOTENT"]
+PolicyCircuit.on_sequence_gap = PolicyCircuit.on_sequence_gap or PolicyCircuit["REJECTED_SEQUENCE_GAP"]
+PolicyCircuit.on_out_of_order = PolicyCircuit.on_out_of_order or PolicyCircuit["REJECTED_OUT_OF_ORDER_BATCH"]
+PolicyCircuit.on_schema_violation = PolicyCircuit.on_schema_violation or PolicyCircuit["REJECTED_SCHEMA_VIOLATION"]
+PolicyCircuit.on_hash_chain_broken = PolicyCircuit.on_hash_chain_broken or PolicyCircuit["REJECTED_HASH_CHAIN_BROKEN"]
+PolicyCircuit.on_state_root_mismatch = PolicyCircuit.on_state_root_mismatch or PolicyCircuit["REJECTED_STATE_ROOT_MISMATCH"]
+PolicyCircuit.on_equivocation = PolicyCircuit.on_equivocation or PolicyCircuit["EQUIVOCATION_PROVEN"]
+PolicyCircuit.on_stale_epoch = PolicyCircuit.on_stale_epoch or PolicyCircuit["FENCED_STALE_EPOCH"]
+PolicyCircuit.on_unauthorized_sender = PolicyCircuit.on_unauthorized_sender or PolicyCircuit["REJECTED_UNAUTHORIZED_SENDER"]
 
 local FORBIDDEN_POLICY_OVERRIDES = {
     ["COMMIT_CHECKPOINT_TO_LEDGER"] = true,
@@ -136,16 +192,67 @@ local FORBIDDEN_POLICY_OVERRIDES = {
     ["OVERRIDE_VALID"] = true
 }
 
-local function safe_policy_action(policy_key, default_action)
-    local act = PolicyCircuit[policy_key] or default_action
-    local act_str = tostring(act)
-
-    if policy_key ~= "on_valid_commit" and policy_key ~= "on_duplicate_overlap" then
-        if FORBIDDEN_POLICY_OVERRIDES[string.upper(act_str)] then
-            return "GUARDRAIL_BLOCKED_OVERRIDE->" .. default_action
+-- Validate policy table before registration or activation
+function validate_policy(policy)
+    if type(policy) ~= "table" then
+        return false, "policy must be a table", "ERR_POLICY_INVALID"
+    end
+    for k, act in pairs(policy) do
+        local canonical_verdict = LEGACY_POLICY_MAP[k] or k
+        local allowed = POLICY_ALLOWLIST[canonical_verdict]
+        if not allowed then
+            return false, "unknown verdict: " .. tostring(k), "ERR_POLICY_INVALID"
+        end
+        local allowed_map = {}
+        for _, a in ipairs(allowed) do allowed_map[a] = true end
+        if not allowed_map[act] then
+            return false, string.format("action '%s' not allowed for verdict '%s'", tostring(act), tostring(canonical_verdict)), "ERR_POLICY_INVALID"
         end
     end
-    return act_str
+    return true
+end
+
+-- Resolve policy action safely with canonical allowlist and Guardrail enforcement
+function resolve_policy(policy, verdict_key)
+    local canonical_verdict = LEGACY_POLICY_MAP[verdict_key] or verdict_key
+    local allowed = POLICY_ALLOWLIST[canonical_verdict]
+    local default_action = (allowed and allowed[1]) or "HALT_PROCESSING"
+
+    local chosen = (policy and (policy[canonical_verdict] or policy[verdict_key])) or default_action
+    local chosen_str = tostring(chosen)
+
+    -- Guardrail check: non-committing verdict can NEVER force commit
+    if canonical_verdict ~= "COMMITTED" and canonical_verdict ~= "DUPLICATE_BATCH_IDEMPOTENT" then
+        if FORBIDDEN_POLICY_OVERRIDES[string.upper(chosen_str)] then
+            return {
+                action = string.format("GUARDRAIL_BLOCKED_OVERRIDE(%s)->%s", chosen_str, default_action),
+                guardrail_triggered = true,
+                rejected_action = chosen_str
+            }
+        end
+    end
+
+    -- Allowlist enforcement
+    if allowed then
+        local allowed_map = {}
+        for _, a in ipairs(allowed) do allowed_map[a] = true end
+        if allowed_map[chosen_str] then
+            return { action = chosen_str, guardrail_triggered = false }
+        else
+            return {
+                action = string.format("GUARDRAIL_BLOCKED_OVERRIDE(%s)->%s", chosen_str, default_action),
+                guardrail_triggered = true,
+                rejected_action = chosen_str
+            }
+        end
+    end
+
+    return { action = default_action, guardrail_triggered = true, rejected_action = chosen_str }
+end
+
+local function safe_policy_action(policy_key, default_action)
+    local pol = resolve_policy(PolicyCircuit, policy_key)
+    return pol.action
 end
 
 -- Convert string to 64-bit integer hash (first 8 bytes big-endian)
@@ -371,6 +478,62 @@ Handlers.add(
     end
 )
 
+-- Handler: Set Policy Circuit (Admin or Owner only, strictly validated against allowlist)
+Handlers.add(
+    "SetPolicy",
+    Handlers.utils.hasMatchingTag("Action", "SetPolicy"),
+    function(msg)
+        local caller = msg.From
+        if not AuthorizedAdmins[caller] and caller ~= Owner then
+            ao.send({
+                Target = msg.From,
+                Action = "SetPolicy-Rejected",
+                Status = "REJECTED_UNAUTHORIZED_ADMIN",
+                Reason = "Only authorized admin or owner can configure policy"
+            })
+            return
+        end
+        local data = json.decode(msg.Data or "{}")
+        local new_policy = data.policy or data
+        if type(new_policy) ~= "table" then
+            ao.send({
+                Target = msg.From,
+                Action = "SetPolicy-Rejected",
+                Status = "REJECTED_INVALID_POLICY",
+                ErrorCode = "ERR_POLICY_INVALID",
+                Reason = "Policy must be a valid object"
+            })
+            return
+        end
+
+        local ok_val, val_err, val_code = validate_policy(new_policy)
+        if not ok_val then
+            ao.send({
+                Target = msg.From,
+                Action = "SetPolicy-Rejected",
+                Status = "REJECTED_INVALID_POLICY",
+                ErrorCode = val_code or "ERR_POLICY_INVALID",
+                Reason = val_err
+            })
+            return
+        end
+
+        -- Merge valid policy configuration into active PolicyCircuit
+        for k, v in pairs(new_policy) do
+            local canonical_v = LEGACY_POLICY_MAP[k] or k
+            PolicyCircuit[canonical_v] = v
+            PolicyCircuit[k] = v
+        end
+
+        ao.send({
+            Target = msg.From,
+            Action = "Policy-Updated",
+            Status = "POLICY_UPDATED",
+            UpdatedKeysCount = tostring(#new_policy)
+        })
+    end
+)
+
 -- Handler: Commit / Verify Checkpoint Batch (Single or Multi-SU)
 Handlers.add(
     "CommitCheckpoint",
@@ -506,6 +669,26 @@ Handlers.add(
             -- Schema checking & Dynamic Registration
             if action == "register_schema" then
                 local parsed_schema = (type(val) == "table") and val or (json.decode(canonical_val) or {})
+                if parsed_schema.policy and type(parsed_schema.policy) == "table" then
+                    local ok_p, err_p, code_p = validate_policy(parsed_schema.policy)
+                    if not ok_p then
+                        ao.send({
+                            Target = msg.From,
+                            Action = "Audit-Rejected",
+                            Status = "FRAUD_DETECTED_AND_CUT",
+                            SubStatus = "REJECTED_CONTRACT_MISMATCH",
+                            ErrorCode = code_p or "ERR_POLICY_INVALID",
+                            PolicyAction = safe_policy_action("on_contract_mismatch", "REJECT_INCOMPATIBLE_CONTRACT_VERSION"),
+                            Reason = string.format("Invalid policy in register_schema at seq %d: %s", seq, tostring(err_p))
+                        })
+                        return
+                    end
+                    for pk, pv in pairs(parsed_schema.policy) do
+                        local canon_pk = LEGACY_POLICY_MAP[pk] or pk
+                        PolicyCircuit[canon_pk] = pv
+                        PolicyCircuit[pk] = pv
+                    end
+                end
                 staged_schemas[namespace] = {
                     namespace = namespace,
                     backend = parsed_schema.backend or "ets_doc",
@@ -515,7 +698,8 @@ Handlers.add(
                     rules = parsed_schema.rules or {},
                     contract_tx_id = parsed_schema.contract_tx_id,
                     wasm_tx_id = parsed_schema.wasm_tx_id,
-                    wasm_sha256 = parsed_schema.wasm_sha256
+                    wasm_sha256 = parsed_schema.wasm_sha256,
+                    policy = parsed_schema.policy
                 }
             else
                 local schema = staged_schemas[namespace]
@@ -970,5 +1154,9 @@ return {
     Handlers = Handlers,
     ao = ao,
     compute_commitment_256 = compute_commitment_256,
-    record_hash_64 = record_hash_64
+    record_hash_64 = record_hash_64,
+    validate_policy = validate_policy,
+    resolve_policy = resolve_policy,
+    POLICY_ALLOWLIST = POLICY_ALLOWLIST,
+    DEFAULT_POLICY = DEFAULT_POLICY
 }
