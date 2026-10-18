@@ -127,8 +127,15 @@ validate_schema_definition(Namespace, ConfigMap) when is_binary(Namespace), is_m
             Requires = maps:get(<<"requires">>, ConfigMap, []),
             Rules = maps:get(<<"rules">>, ConfigMap, #{}),
 
-            %% Validate backend
-            case lists:member(Backend, [<<"wasm_slot">>, <<"ets_doc">>]) of
+            %% Reject unsupported complex/unimplemented features
+            UnsupportedKeys = [<<"indexes">>, <<"secondary_indexes">>, <<"query_language">>, <<"migrations">>],
+            case [K || K <- UnsupportedKeys, maps:is_key(K, ConfigMap)] of
+                [UnsupKey | _] ->
+                    {error, <<"ERR_UNSUPPORTED_FEATURE">>, 501,
+                     iolist_to_binary([<<"Feature '">>, UnsupKey, <<"' is unsupported in hydb.core@1.0. Complex query languages and secondary indexes are deferred until formal cross-runtime semantics are proven.">>])};
+                [] ->
+                    %% Validate backend
+                    case lists:member(Backend, [<<"wasm_slot">>, <<"ets_doc">>]) of
                 false ->
                     {error, <<"ERR_INVALID_SCHEMA">>, 422, iolist_to_binary([<<"Unknown backend '">>, Backend, <<"'">>])};
                 true ->
@@ -162,6 +169,7 @@ validate_schema_definition(Namespace, ConfigMap) when is_binary(Namespace), is_m
                             end
                     end
             end
+        end
     end.
 
 check_schema_requires_and_rules(Backend, KeyType, Requires, Rules) ->
@@ -212,11 +220,43 @@ check_rules_coherence(_Backend, Rules) when is_map(Rules) ->
         if is_integer(MinLen), is_integer(MaxLen), MinLen > MaxLen ->
             {error, <<"min_length > max_length">>};
            true ->
-            ok
+            case maps:get(<<"fields">>, Rules, undefined) of
+                undefined -> ok;
+                Fields when is_map(Fields) ->
+                    check_declared_fields_definition(maps:to_list(Fields));
+                _ ->
+                    {error, <<"fields rule must be an object">>}
+            end
         end
     end;
 check_rules_coherence(_Backend, _Rules) ->
     ok.
+
+check_declared_fields_definition([]) ->
+    ok;
+check_declared_fields_definition([{FName, FSpec} | Rest]) when is_map(FSpec) ->
+    AllowedTypes = [<<"int64">>, <<"string">>, <<"bool">>, <<"null">>, <<"object">>, <<"array">>],
+    FType = maps:get(<<"type">>, FSpec, undefined),
+    case lists:member(FType, AllowedTypes) of
+        false ->
+            {error, iolist_to_binary([<<"field '">>, FName, <<"' has invalid type (allowed: int64, string, bool, null, object, array)">>])};
+        true ->
+            FMin = maps:get(<<"min_value">>, FSpec, undefined),
+            FMax = maps:get(<<"max_value">>, FSpec, undefined),
+            if is_integer(FMin), is_integer(FMax), FMin > FMax ->
+                {error, iolist_to_binary([<<"field '">>, FName, <<"': min_value > max_value">>])};
+               true ->
+                FLMin = maps:get(<<"min_length">>, FSpec, undefined),
+                FLMax = maps:get(<<"max_length">>, FSpec, undefined),
+                if is_integer(FLMin), is_integer(FLMax), FLMin > FLMax ->
+                    {error, iolist_to_binary([<<"field '">>, FName, <<"': min_length > max_length">>])};
+                   true ->
+                    check_declared_fields_definition(Rest)
+                end
+            end
+    end;
+check_declared_fields_definition([{FName, _} | _]) ->
+    {error, iolist_to_binary([<<"field '">>, FName, <<"' spec must be an object">>])}.
 
 register_namespace(Namespace, ConfigMap) when is_binary(Namespace), is_map(ConfigMap) ->
     init_tables(),
@@ -569,14 +609,27 @@ validate_value_and_rules(<<"bool">>, V, _Rules) ->
     end;
 validate_value_and_rules(<<"string">>, V, Rules) when is_binary(V) ->
     MinLen = maps:get(<<"min_length">>, Rules, 0),
-    if byte_size(V) < MinLen ->
+    MaxLen = maps:get(<<"max_length">>, Rules, undefined),
+    ByteSize = byte_size(V),
+    if ByteSize < MinLen ->
         {error, <<"ERR_SCHEMA_VIOLATION">>, 422, <<"String value shorter than schema min_length">>};
+       is_integer(MaxLen) andalso ByteSize > MaxLen ->
+        {error, <<"ERR_SCHEMA_VIOLATION">>, 422, <<"String value longer than schema max_length">>};
        true ->
         {ok, <<"string">>, V, V}
     end;
-validate_value_and_rules(<<"bytes">>, V, _Rules) when is_binary(V) ->
-    Hex = binary:encode_hex(V),
-    {ok, <<"bytes">>, Hex, Hex};
+validate_value_and_rules(<<"bytes">>, V, Rules) when is_binary(V) ->
+    MinLen = maps:get(<<"min_length">>, Rules, 0),
+    MaxLen = maps:get(<<"max_length">>, Rules, undefined),
+    ByteSize = byte_size(V),
+    if ByteSize < MinLen ->
+        {error, <<"ERR_SCHEMA_VIOLATION">>, 422, <<"Bytes value shorter than schema min_length">>};
+       is_integer(MaxLen) andalso ByteSize > MaxLen ->
+        {error, <<"ERR_SCHEMA_VIOLATION">>, 422, <<"Bytes value longer than schema max_length">>};
+       true ->
+        Hex = binary:encode_hex(V),
+        {ok, <<"bytes">>, Hex, Hex}
+    end;
 validate_value_and_rules(<<"json">>, V, Rules) ->
     Decoded = if
         is_map(V) -> {ok, V};
@@ -633,9 +686,87 @@ check_json_rules(MapVal, Rules) ->
     ReqFields = maps:get(<<"required_fields">>, Rules, []),
     Missing = [F || F <- ReqFields, not maps:is_key(F, MapVal)],
     case Missing of
-        [] -> ok;
         [FirstMissing | _] ->
-            {error, iolist_to_binary([<<"Schema violation: missing required JSON field '">>, FirstMissing, <<"'">>])}
+            {error, iolist_to_binary([<<"Schema violation: missing required JSON field '">>, FirstMissing, <<"'">>])};
+        [] ->
+            FieldsSpec = maps:get(<<"fields">>, Rules, #{}),
+            case check_fields_spec(MapVal, FieldsSpec) of
+                {error, _} = Err -> Err;
+                ok ->
+                    AdditionalFields = maps:get(<<"additional_fields">>, Rules, true),
+                    case AdditionalFields of
+                        false ->
+                            Unexpected = [K || K <- maps:keys(MapVal), not maps:is_key(K, FieldsSpec)],
+                            case Unexpected of
+                                [FirstUnexp | _] ->
+                                    {error, iolist_to_binary([<<"Schema violation: unexpected field '">>, FirstUnexp, <<"' (additional_fields=false)">>])};
+                                [] -> ok
+                            end;
+                        _ -> ok
+                    end
+            end
+    end.
+
+check_fields_spec(MapVal, FieldsSpec) when is_map(FieldsSpec) ->
+    check_fields_iter(maps:keys(FieldsSpec), MapVal, FieldsSpec);
+check_fields_spec(_MapVal, _FieldsSpec) ->
+    ok.
+
+check_fields_iter([], _MapVal, _FieldsSpec) ->
+    ok;
+check_fields_iter([FName | Rest], MapVal, FieldsSpec) ->
+    Spec = maps:get(FName, FieldsSpec),
+    IsReq = maps:get(<<"required">>, Spec, false),
+    case maps:is_key(FName, MapVal) of
+        false ->
+            if IsReq ->
+                {error, iolist_to_binary([<<"Schema violation: missing required field '">>, FName, <<"'">>])};
+               true ->
+                check_fields_iter(Rest, MapVal, FieldsSpec)
+            end;
+        true ->
+            FVal = maps:get(FName, MapVal),
+            ExpectedType = maps:get(<<"type">>, Spec, <<"any">>),
+            case validate_field_type_and_bounds(FName, ExpectedType, FVal, Spec) of
+                ok -> check_fields_iter(Rest, MapVal, FieldsSpec);
+                {error, _} = E -> E
+            end
+    end.
+
+validate_field_type_and_bounds(FName, ExpectedType, FVal, Spec) ->
+    TypeMatch = case ExpectedType of
+        <<"int64">> -> is_integer(FVal);
+        <<"string">> -> is_binary(FVal);
+        <<"bool">> -> is_boolean(FVal);
+        <<"null">> -> FVal =:= null orelse FVal =:= undefined;
+        <<"object">> -> is_map(FVal);
+        <<"array">> -> is_list(FVal);
+        <<"any">> -> true;
+        _ -> false
+    end,
+    case TypeMatch of
+        false ->
+            {error, iolist_to_binary([<<"Schema violation: field '">>, FName, <<"' must be ">>, ExpectedType])};
+        true ->
+            case ExpectedType of
+                <<"int64">> ->
+                    case check_numeric_rules(FVal, Spec) of
+                        ok -> ok;
+                        {error, Reason} ->
+                            {error, iolist_to_binary([<<"Schema violation: field '">>, FName, <<"' ">>, Reason])}
+                    end;
+                <<"string">> ->
+                    MinL = maps:get(<<"min_length">>, Spec, 0),
+                    MaxL = maps:get(<<"max_length">>, Spec, undefined),
+                    ByteSize = byte_size(FVal),
+                    if ByteSize < MinL ->
+                        {error, iolist_to_binary([<<"Schema violation: field '">>, FName, <<"' shorter than min_length">>])};
+                       is_integer(MaxL), ByteSize > MaxL ->
+                        {error, iolist_to_binary([<<"Schema violation: field '">>, FName, <<"' longer than max_length">>])};
+                       true -> ok
+                    end;
+                _ -> ok
+            end
     end.
 
 check_cas_version(_Backend, _Ns, _Key, undefined, _WasmCtx) ->
@@ -826,7 +957,7 @@ execute_backend_put(<<"ets_doc">>, Ns, Key, Val, Seq, CurrentRoot, _WasmCtx) ->
     ets:insert(?DOC_BACKEND_TABLE, {{Ns, KeyBin}, #{
         <<"active">> => true,
         <<"key">> => KeyBin,
-        <<"val">> => Val,
+        <<"val">> => ValBin,
         <<"val_hash">> => ValHashInt,
         <<"ver">> => NewVer,
         <<"last_seq">> => Seq

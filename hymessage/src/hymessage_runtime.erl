@@ -110,7 +110,11 @@ put_from_req(_Base, Req, _Opts) ->
     ensure_started(),
     Namespace = parse_bin_field(<<"namespace">>, Req, <<"default">>),
     RawKey = parse_raw_field(<<"key">>, Req, 1),
-    RawVal = parse_raw_field(<<"val">>, Req, 0),
+    RawVal0 = parse_raw_field(<<"val">>, Req, undefined),
+    RawVal = case RawVal0 of
+        undefined -> parse_raw_field(<<"value">>, Req, 0);
+        _ -> RawVal0
+    end,
     Token = parse_bin_field(<<"token">>, Req, undefined),
     ReqEpoch = parse_opt_int_field(<<"epoch">>, Req),
     ExpectedVer = parse_opt_int_field(<<"expected_ver">>, Req),
@@ -215,13 +219,20 @@ schema_from_req(_Base, Req, _Opts) ->
                         <<"false">> -> Rules3#{ <<"require_auth">> => false };
                         _ -> Rules3
                     end,
-                    Cfg = #{
+                    Cfg0 = #{
                         <<"backend">> => Backend,
                         <<"schema_version">> => SchemaVsn,
                         <<"key_type">> => KeyType,
                         <<"value_type">> => ValType,
                         <<"rules">> => Rules4
                     },
+                    UnsupportedCheckKeys = [<<"indexes">>, <<"secondary_indexes">>, <<"query_language">>, <<"migrations">>],
+                    Cfg = lists:foldl(fun(K, Acc) ->
+                        case maps:find(K, Req) of
+                            {ok, V} -> Acc#{ K => V };
+                            error -> Acc
+                        end
+                    end, Cfg0, UnsupportedCheckKeys),
                     case gen_server:call(?SERVER, {contract_register_schema, Namespace, Cfg, ReqEpoch}, 5000) of
                         {ok, Res} -> Res;
                         {error, ErrMap} when is_map(ErrMap) -> ErrMap

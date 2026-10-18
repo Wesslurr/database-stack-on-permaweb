@@ -16,7 +16,8 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_POLICY,
   POLICY_ALLOWLIST,
-  validatePolicy as specValidatePolicy
+  validatePolicy as specValidatePolicy,
+  validateSchema as specValidateSchema
 } from '../spec/hydb_contract_spec.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -196,6 +197,22 @@ export class HyDBContract {
     if (!spec.namespace) {
       throw new Error('HyDBContract requires a namespace');
     }
+
+    // Tahap 4: Explicit rejection of unsupported future features
+    const unsupportedFeatures = [
+      'indexes', 'secondaryIndexes', 'indices',
+      'queryLanguage', 'migrations', 'foreignKeys',
+      'relations', 'triggers', 'views'
+    ];
+    for (const feat of unsupportedFeatures) {
+      if (spec[feat] !== undefined) {
+        throw new ContractPreflightError(
+          `Feature '${feat}' is marked as unsupported in hydb.core@1.0. Complex query languages, migrations, and secondary indexes are deferred until formal cross-runtime semantics are proven.`,
+          { stage: 'FEATURE_UNSUPPORTED_CHECK', feature: feat }
+        );
+      }
+    }
+
     this.contractVersion = HYDB_CONTRACT_VERSION;
     this.namespace = spec.namespace;
     this.backend = spec.backend || (spec.wasm ? 'wasm_slot' : 'ets_doc');
@@ -206,13 +223,45 @@ export class HyDBContract {
     if (s.minValue !== undefined) rules.min_value = s.minValue;
     if (s.maxValue !== undefined) rules.max_value = s.maxValue;
     if (s.minLength !== undefined) rules.min_length = s.minLength;
+    if (s.maxLength !== undefined) rules.max_length = s.maxLength;
     if (s.requiredFields !== undefined) rules.required_fields = s.requiredFields;
     if (s.requireAuth !== undefined) rules.require_auth = Boolean(s.requireAuth);
     if (s.maxRecords !== undefined) rules.max_records = Number(s.maxRecords);
+    if (s.fields !== undefined) rules.fields = s.fields;
+    if (s.additionalFields !== undefined) rules.additional_fields = Boolean(s.additionalFields);
+
+    const keyType = s.keyType || s.key_type || (this.backend === 'wasm_slot' ? 'int64' : 'string');
+    const valueType = s.valueType || s.value_type || (this.backend === 'wasm_slot' ? 'int64' : 'any');
+
+    const allowedKeys = ['int64', 'string'];
+    if (!allowedKeys.includes(keyType)) {
+      throw new ContractPreflightError(`Unsupported key_type '${keyType}': only int64 and string are supported in hydb.core@1.0`, {
+        stage: 'SCHEMA_TYPE_CHECK',
+        keyType
+      });
+    }
+
+    const allowedVals = ['int64', 'bool', 'string', 'bytes', 'json', 'any'];
+    if (!allowedVals.includes(valueType)) {
+      throw new ContractPreflightError(`Unsupported value_type '${valueType}': only int64, bool, string, bytes, json are supported in hydb.core@1.0`, {
+        stage: 'SCHEMA_TYPE_CHECK',
+        valueType
+      });
+    }
+
+    if (this.backend === 'wasm_slot') {
+      if (keyType !== 'int64' || (valueType !== 'int64' && valueType !== 'any')) {
+        throw new ContractPreflightError(`wasm_slot backend is numerically specialized and only supports int64 key and int64 value`, {
+          stage: 'BACKEND_CAPABILITY_CHECK',
+          keyType,
+          valueType
+        });
+      }
+    }
 
     this.schema = {
-      key_type: s.keyType || s.key_type || (this.backend === 'wasm_slot' ? 'int64' : 'string'),
-      value_type: s.valueType || s.value_type || (this.backend === 'wasm_slot' ? 'int64' : 'any'),
+      key_type: keyType,
+      value_type: valueType,
       rules
     };
 
@@ -258,7 +307,7 @@ export class HyDBContract {
       policySimulations: []
     };
 
-    // 1. Schema Invariants Check
+    // 1. Schema Invariants & Coherence Check
     const rules = this.schema.rules || {};
     if (rules.min_value !== undefined && rules.max_value !== undefined) {
       if (Number(rules.min_value) > Number(rules.max_value)) {
@@ -267,8 +316,36 @@ export class HyDBContract {
           rules
         });
       }
-      report.schemaChecks.push('min_max_bounds_valid');
     }
+    if (rules.min_length !== undefined && rules.max_length !== undefined) {
+      if (Number(rules.min_length) > Number(rules.max_length)) {
+        throw new ContractPreflightError(`Invalid schema: min_length (${rules.min_length}) > max_length (${rules.max_length})`, {
+          stage: 'SCHEMA_INVARIANT_CHECK',
+          rules
+        });
+      }
+    }
+
+    // Validate fields spec if present
+    if (rules.fields && typeof rules.fields === 'object') {
+      const allowedFieldTypes = ['int64', 'string', 'bool', 'null', 'object', 'array'];
+      for (const [fname, fspec] of Object.entries(rules.fields)) {
+        if (!fspec || typeof fspec !== 'object') {
+          throw new ContractPreflightError(`Invalid field spec for '${fname}': must be an object`, { stage: 'SCHEMA_INVARIANT_CHECK' });
+        }
+        if (!allowedFieldTypes.includes(fspec.type)) {
+          throw new ContractPreflightError(`Invalid type '${fspec.type}' for field '${fname}' (allowed: ${allowedFieldTypes.join(', ')})`, { stage: 'SCHEMA_INVARIANT_CHECK' });
+        }
+        if (fspec.min_value !== undefined && fspec.max_value !== undefined && Number(fspec.min_value) > Number(fspec.max_value)) {
+          throw new ContractPreflightError(`Invalid field '${fname}': min_value > max_value`, { stage: 'SCHEMA_INVARIANT_CHECK' });
+        }
+        if (fspec.min_length !== undefined && fspec.max_length !== undefined && Number(fspec.min_length) > Number(fspec.max_length)) {
+          throw new ContractPreflightError(`Invalid field '${fname}': min_length > max_length`, { stage: 'SCHEMA_INVARIANT_CHECK' });
+        }
+      }
+    }
+
+    report.schemaChecks.push('bounds_and_fields_valid');
 
     // 2. WASM Binary & Export Integrity Check (if wasm_slot)
     if (this.backend === 'wasm_slot') {
