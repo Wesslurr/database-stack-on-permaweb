@@ -1070,6 +1070,28 @@ export class ArbitratorDomain {
       }
     }
 
+    if (batch.proposed_state_commitment_256 !== undefined && batch.proposed_state_commitment_256 !== null) {
+      const propCommit = String(batch.proposed_state_commitment_256).toUpperCase();
+      const recomputedCommit = computeCommitment256(stagedRecords);
+      if (propCommit !== recomputedCommit) {
+        rollbackWasmRuntimes();
+        const pol = resolvePolicyAction(this.policyCircuit, 'REJECTED_STATE_COMMITMENT_MISMATCH');
+        return {
+          ok: false,
+          status: 'AUDIT_REJECTED',
+          wasit_verdict: 'FRAUD_DETECTED_AND_CUT',
+          sub_verdict: 'REJECTED_STATE_COMMITMENT_MISMATCH',
+          policy_action: pol.action,
+          policy_guardrail_enforced: pol.guardrail_triggered,
+          reason: `Batch proposed_state_commitment_256 mismatch! Recomputed ${recomputedCommit}, proposed ${propCommit}`,
+          audit_proof: {
+            recomputed_commitment_256: recomputedCommit,
+            proposed_commitment_256: propCommit
+          }
+        };
+      }
+    }
+
     // 7. ATOMIC COMMIT: Promote Staged State, Staged Schemas, & Staged Policy to Official State
     this.records = stagedRecords;
     this.schemas = stagedSchemas;

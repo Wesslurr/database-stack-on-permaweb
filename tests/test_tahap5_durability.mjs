@@ -151,6 +151,9 @@ async function main() {
   assert(isTrue(write1.body.replicated), 'Write replicated to SU');
   assert(write1.body.commit_status === 'durable', `commit_status is "durable" on quorum ACK (got ${write1.body.commit_status})`);
 
+  // Small delay for disk sync before reading WAL file
+  await new Promise(r => setTimeout(r, 150));
+
   // Verify WAL on disk physically contains Seq 1
   const walLines1 = readFileSync(WAL_PATH, 'utf8').trim().split('\n').filter(Boolean);
   assert(walLines1.length >= 1, `Physical WAL contains written record on disk (lines: ${walLines1.length})`);

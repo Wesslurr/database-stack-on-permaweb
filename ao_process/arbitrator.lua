@@ -15,11 +15,43 @@ Responsibilities (Principles B, C, D, E, F):
    (what action the application chooses to take).
 --]]
 
-local json = require("json")
-local crypto = require(".crypto")
+local ok_json, json = pcall(require, "json")
+if not ok_json or not json then
+    -- Minimal fallback JSON decode/encode for standalone test environments
+    json = {
+        decode = function(str)
+            -- If string is a simple primitive or table representation
+            error("json decode module required")
+        end,
+        encode = function(tbl)
+            return "{}"
+        end
+    }
+end
+
+local ok_crypto, crypto = pcall(require, ".crypto")
+if not ok_crypto or not crypto then
+    crypto = nil
+end
+
+-- Fallback to pure-Lua hydb_spec SHA-256 if crypto is unavailable in sandbox
+if not crypto or not crypto.digest then
+    local ok_spec, hydb_spec = pcall(require, "hydb_spec")
+    if ok_spec and hydb_spec and hydb_spec.sha256 then
+        crypto = {
+            digest = function(algo, str)
+                if string.lower(algo) == "sha256" then
+                    return string.lower(hydb_spec.sha256(str))
+                end
+                error("unsupported hash algo in fallback: " .. tostring(algo))
+            end
+        }
+    end
+end
 
 -- Official Persistent Process State
-ProcessId = ProcessId or ao.id
+ProcessId = ProcessId or (ao and ao.id) or "HYDB_ARBITRATOR"
+Owner = Owner or (ao and ao.env and ao.env.Process and ao.env.Process.Owner) or "OWNER_PRIMARY"
 ContractVersion = ContractVersion or "hydb.core@1.0"
 CurrentEpoch = CurrentEpoch or 1
 OfficialSeq = OfficialSeq or 0
@@ -27,7 +59,7 @@ OfficialHash = OfficialHash or "000000000000000000000000000000000000000000000000
 OfficialStateRoot = OfficialStateRoot or "0"
 OfficialCommitment256 = OfficialCommitment256 or "0000000000000000000000000000000000000000000000000000000000000000"
 
-Records = Records or {}         -- key_str -> { val = number, ver = number, active = boolean }
+Records = Records or {}         -- slot_id -> { namespace, raw_key, val, canonical_val, ver, active }
 Schemas = Schemas or {
     ["default"] = { backend = "wasm_slot", schema_version = "1.0.0", key_type = "int64", value_type = "int64", rules = {} },
     ["finance.balances"] = { backend = "wasm_slot", schema_version = "1.0.0", key_type = "int64", value_type = "int64", rules = { min_value = 0 } },
@@ -35,7 +67,51 @@ Schemas = Schemas or {
 }
 EventHistory = EventHistory or {} -- seq_num -> { epoch, seq, namespace, action, key, val, hash, state_root, attestations = {} }
 Checkpoints = Checkpoints or {}
-AuthorizedNodes = AuthorizedNodes or {} -- node_address -> true (if empty, initialized on first trusted registration)
+
+-- Explicit Bootstrapping of Trusted Node and Admin Identities (Fail-Closed)
+AuthorizedNodes = AuthorizedNodes or {
+    ["SU_PRIMARY"] = true,
+    ["SU_NODE_1"] = true,
+    ["SU_NODE_2"] = true,
+    ["hb_su"] = true
+}
+
+AuthorizedAdmins = AuthorizedAdmins or {
+    [Owner] = true,
+    ["ADMIN_PRIMARY"] = true,
+    ["SU_PRIMARY"] = true
+}
+
+-- Fallback mock for ao and Handlers when loaded outside AOS (e.g. standalone lua5.3 runner)
+if not Handlers then
+    Handlers = {
+        _list = {},
+        utils = {
+            hasMatchingTag = function(tag, val)
+                return function(msg)
+                    if not msg or not msg.Tags then return false end
+                    for _, t in ipairs(msg.Tags) do
+                        if t.name == tag and t.value == val then return true end
+                    end
+                    return msg[tag] == val
+                end
+            end
+        },
+        add = function(name, pattern, handle)
+            table.insert(Handlers._list, { name = name, pattern = pattern, handle = handle })
+        end
+    }
+end
+
+if not ao then
+    ao = {
+        id = "HYDB_ARBITRATOR",
+        _outbox = {},
+        send = function(msg)
+            table.insert(ao._outbox, msg)
+        end
+    }
+end
 
 -- Pluggable Developer Policy Circuit (Configurable per Application Use-Case)
 -- Guardrail C: Policy Circuit can NEVER turn an invalid Arbitrator Verdict into a valid commit.
@@ -48,7 +124,8 @@ PolicyCircuit = PolicyCircuit or {
     on_hash_chain_broken = "CUT_BRANCH_AND_FREEZE_EPOCH",
     on_state_root_mismatch = "CUT_BRANCH_AND_SLASH_PROPOSER",
     on_equivocation = "FREEZE_EPOCH_AND_PROMOTE_STANDBY_HOT",
-    on_stale_epoch = "FENCE_AND_DROP_ZOMBIE_HOT"
+    on_stale_epoch = "FENCE_AND_DROP_ZOMBIE_HOT",
+    on_unauthorized_sender = "DROP_UNAUTHORIZED_PACKET"
 }
 
 local FORBIDDEN_POLICY_OVERRIDES = {
@@ -69,6 +146,32 @@ local function safe_policy_action(policy_key, default_action)
         end
     end
     return act_str
+end
+
+-- Convert string to 64-bit integer hash (first 8 bytes big-endian)
+local function bytes_to_u64(str)
+    local hex = crypto.digest("sha256", tostring(str))
+    local b0 = tonumber(hex:sub(1, 2), 16)
+    local b1 = tonumber(hex:sub(3, 4), 16)
+    local b2 = tonumber(hex:sub(5, 6), 16)
+    local b3 = tonumber(hex:sub(7, 8), 16)
+    local b4 = tonumber(hex:sub(9, 10), 16)
+    local b5 = tonumber(hex:sub(11, 12), 16)
+    local b6 = tonumber(hex:sub(13, 14), 16)
+    local b7 = tonumber(hex:sub(15, 16), 16)
+    return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7
+end
+
+-- Match Erlang hydb_contract:namespace_id_64/1
+local function namespace_id_64(ns)
+    if not ns or ns == "default" then return 0 end
+    local hex = crypto.digest("sha256", ns)
+    local b0 = tonumber(hex:sub(1, 2), 16)
+    local b1 = tonumber(hex:sub(3, 4), 16)
+    local b2 = tonumber(hex:sub(5, 6), 16)
+    local b3 = tonumber(hex:sub(7, 8), 16)
+    local u32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    return 1000 + (u32 % 100000000)
 end
 
 -- Exact 64-bit FNV-1a + SplitMix64 record hash matching Rust HyDB (Lua 5.3 64-bit bitwise)
@@ -94,17 +197,38 @@ end
 
 -- Compute 256-bit Canonical State Commitment over active records
 local function compute_commitment_256(rec_table)
-    local keys = {}
-    for k, r in pairs(rec_table) do
+    local list = {}
+    for slot_id, r in pairs(rec_table) do
         if r.active then
-            table.insert(keys, tostring(k))
+            table.insert(list, {
+                slot_id = slot_id,
+                ns = r.namespace or "default",
+                raw_key = r.raw_key,
+                canonical_val = tostring(r.canonical_val or r.val or ""),
+                ver = r.ver
+            })
         end
     end
-    table.sort(keys)
+
+    table.sort(list, function(a, b)
+        if a.ns ~= b.ns then
+            return a.ns < b.ns
+        end
+        local num_a = tonumber(a.raw_key)
+        local num_b = tonumber(b.raw_key)
+        if num_a and num_b then
+            return num_a < num_b
+        end
+        return tostring(a.raw_key) < tostring(b.raw_key)
+    end)
+
     local parts = {}
-    for _, k in ipairs(keys) do
-        local r = rec_table[k]
-        table.insert(parts, string.format("%s:%s:%d", k, tostring(r.val), r.ver))
+    for _, item in ipairs(list) do
+        if item.ns == "default" then
+            table.insert(parts, string.format("%s:%s:%d", tostring(item.raw_key), item.canonical_val, item.ver))
+        else
+            table.insert(parts, string.format("%s:%s:%s:%d", item.ns, tostring(item.raw_key), item.canonical_val, item.ver))
+        end
     end
     local canonical = table.concat(parts, "|")
     return string.upper(crypto.digest("sha256", canonical))
@@ -121,10 +245,131 @@ end
 local function clone_records(src)
     local dst = {}
     for k, v in pairs(src) do
-        dst[k] = { val = v.val, ver = v.ver, active = v.active }
+        dst[k] = {
+            namespace = v.namespace,
+            backend = v.backend,
+            raw_key = v.raw_key,
+            val = v.val,
+            canonical_val = v.canonical_val,
+            key_hash_64 = v.key_hash_64,
+            val_hash_64 = v.val_hash_64,
+            ver = v.ver,
+            active = v.active
+        }
     end
     return dst
 end
+
+local function clone_schemas(src)
+    local dst = {}
+    for k, v in pairs(src) do
+        local r_copy = {}
+        if v.rules then
+            for rk, rv in pairs(v.rules) do r_copy[rk] = rv end
+        end
+        dst[k] = {
+            namespace = v.namespace or k,
+            backend = v.backend,
+            schema_version = v.schema_version,
+            key_type = v.key_type,
+            value_type = v.value_type,
+            rules = r_copy,
+            contract_tx_id = v.contract_tx_id,
+            wasm_tx_id = v.wasm_tx_id,
+            wasm_sha256 = v.wasm_sha256
+        }
+    end
+    return dst
+end
+
+-- Handler: Authorize SU Node (Admin only)
+Handlers.add(
+    "AuthorizeNode",
+    Handlers.utils.hasMatchingTag("Action", "AuthorizeNode"),
+    function(msg)
+        local caller = msg.From
+        if not AuthorizedAdmins[caller] and caller ~= Owner then
+            ao.send({
+                Target = msg.From,
+                Action = "AuthorizeNode-Rejected",
+                Status = "REJECTED_UNAUTHORIZED_ADMIN",
+                Reason = "Only authorized admin or owner can authorize nodes"
+            })
+            return
+        end
+        local data = json.decode(msg.Data or "{}")
+        local node = data.node or data.node_id or (msg.Tags and msg.Tags.Node)
+        if not node then
+            ao.send({ Target = msg.From, Action = "AuthorizeNode-Rejected", Status = "REJECTED_INVALID_INPUT" })
+            return
+        end
+        AuthorizedNodes[node] = true
+        ao.send({
+            Target = msg.From,
+            Action = "Node-Authorized",
+            Status = "AUTHORIZED",
+            Node = node
+        })
+    end
+)
+
+-- Handler: Revoke SU Node (Admin only)
+Handlers.add(
+    "RevokeNode",
+    Handlers.utils.hasMatchingTag("Action", "RevokeNode"),
+    function(msg)
+        local caller = msg.From
+        if not AuthorizedAdmins[caller] and caller ~= Owner then
+            ao.send({
+                Target = msg.From,
+                Action = "RevokeNode-Rejected",
+                Status = "REJECTED_UNAUTHORIZED_ADMIN",
+                Reason = "Only authorized admin or owner can revoke nodes"
+            })
+            return
+        end
+        local data = json.decode(msg.Data or "{}")
+        local node = data.node or data.node_id or (msg.Tags and msg.Tags.Node)
+        if node then
+            AuthorizedNodes[node] = nil
+        end
+        ao.send({
+            Target = msg.From,
+            Action = "Node-Revoked",
+            Status = "REVOKED",
+            Node = node
+        })
+    end
+)
+
+-- Handler: Authorize Admin (Owner only)
+Handlers.add(
+    "AuthorizeAdmin",
+    Handlers.utils.hasMatchingTag("Action", "AuthorizeAdmin"),
+    function(msg)
+        local caller = msg.From
+        if caller ~= Owner then
+            ao.send({
+                Target = msg.From,
+                Action = "AuthorizeAdmin-Rejected",
+                Status = "REJECTED_UNAUTHORIZED_OWNER",
+                Reason = "Only process owner can authorize admins"
+            })
+            return
+        end
+        local data = json.decode(msg.Data or "{}")
+        local admin = data.admin or data.address or (msg.Tags and msg.Tags.Admin)
+        if admin then
+            AuthorizedAdmins[admin] = true
+        end
+        ao.send({
+            Target = msg.From,
+            Action = "Admin-Authorized",
+            Status = "AUTHORIZED",
+            Admin = admin
+        })
+    end
+)
 
 -- Handler: Commit / Verify Checkpoint Batch (Single or Multi-SU)
 Handlers.add(
@@ -132,13 +377,30 @@ Handlers.add(
     Handlers.utils.hasMatchingTag("Action", "CommitCheckpoint"),
     function(msg)
         local batch = json.decode(msg.Data)
+        local su_id = batch.su_id or batch.sender or msg.From or "SU_PRIMARY"
+
+        -- 1. Sender Node Authorization Check (Fail-Closed)
+        if not AuthorizedNodes[su_id] and not AuthorizedNodes[msg.From] then
+            ao.send({
+                Target = msg.From,
+                Action = "Audit-Rejected",
+                Status = "AUDIT_REJECTED",
+                SubStatus = "REJECTED_UNAUTHORIZED_SENDER",
+                ErrorCode = "ERR_UNAUTHORIZED_SENDER",
+                PolicyAction = safe_policy_action("on_unauthorized_sender", "DROP_UNAUTHORIZED_PACKET"),
+                Reason = string.format("Sender %s is not in AuthorizedNodes list", su_id),
+                Sender = su_id
+            })
+            return
+        end
+
         local batch_epoch = tonumber(batch.epoch) or 1
-        local su_id = batch.su_id or msg.From or "SU_PRIMARY"
-        local proposed_root = tostring(batch.proposed_state_root)
+        local proposed_root = tostring(batch.proposed_state_root or "0")
         local proposed_hash = string.upper(tostring(batch.proposed_hash or ""))
+        local proposed_commitment = batch.proposed_state_commitment_256 and string.upper(tostring(batch.proposed_state_commitment_256)) or nil
         local events = batch.events or {}
 
-        -- 1. Check Epoch Fencing (Reject Zombie / Stale Hot Node)
+        -- 2. Check Epoch Fencing (Reject Zombie / Stale Hot Node)
         if batch_epoch < CurrentEpoch then
             ao.send({
                 Target = msg.From,
@@ -162,7 +424,7 @@ Handlers.add(
             return
         end
 
-        -- 2. Verify internal batch ordering (strictly monotonic by +1)
+        -- 3. Verify internal batch ordering (strictly monotonic by +1)
         for i = 1, #events do
             local seq = tonumber(events[i].seq)
             if i > 1 then
@@ -183,7 +445,7 @@ Handlers.add(
         local first_seq = tonumber(events[1].seq)
         local last_seq = tonumber(events[#events].seq)
 
-        -- 3. Check for Sequence Gap before batch starts
+        -- 4. Check for Sequence Gap before batch starts
         if first_seq > (OfficialSeq + 1) then
             ao.send({
                 Target = msg.From,
@@ -198,10 +460,11 @@ Handlers.add(
             return
         end
 
-        -- 4. Stage state for Atomic All-or-Nothing Execution
+        -- 5. Stage state for Atomic All-or-Nothing Execution
         local staged_records = clone_records(Records)
+        local staged_schemas = clone_schemas(Schemas)
         local staged_root = tonumber(OfficialStateRoot) or 0
-        local running_hash = OfficialHash
+        local running_hash = (batch.initial_hash and OfficialSeq == 0) and string.upper(tostring(batch.initial_hash)) or OfficialHash
         local staged_seq = OfficialSeq
         local new_events_to_commit = {}
         local deduplicated_count = 0
@@ -211,27 +474,22 @@ Handlers.add(
             local ev_epoch = tonumber(ev.epoch) or batch_epoch
             local namespace = ev.namespace or "default"
             local action = ev.action or ev.op or "put"
-            local val_type = ev.val_type or "int64"
-            local key = tonumber(ev.key) or tostring(ev.key)
-            local val = tonumber(ev.val or 0) or 0
-            local canonical_val = tostring(ev.canonical_val or ev.val or 0)
+            local val_type = ev.val_type or (action == "register_schema" and "schema" or "int64")
+            local key = tonumber(ev.key) or tostring(ev.key or "")
+            local val = ev.val
+            local canonical_val = tostring(ev.canonical_val or ev.val or "")
             local given_hash = string.upper(tostring(ev.hash or ""))
 
-            -- Independent Schema Rule Validation in Arbitrator
-            local schema = Schemas[namespace]
-            if schema and action == "put" and schema.rules and schema.rules.min_value ~= nil then
-                if tonumber(ev.val) < schema.rules.min_value then
-                    ao.send({
-                        Target = msg.From,
-                        Action = "Audit-Rejected",
-                        Status = "FRAUD_DETECTED_AND_CUT",
-                        SubStatus = "REJECTED_SCHEMA_VIOLATION",
-                        ErrorCode = "ERR_SCHEMA_VIOLATION",
-                        PolicyAction = safe_policy_action("on_schema_violation", "CUT_BRANCH_AND_REJECT_INVALID_SCHEMA"),
-                        Reason = string.format("Schema violation in %s at seq %d: val < min_value", namespace, seq)
-                    })
-                    return
-                end
+            if ev.contract_version and ev.contract_version ~= ContractVersion then
+                ao.send({
+                    Target = msg.From,
+                    Action = "Audit-Rejected",
+                    Status = "FRAUD_DETECTED_AND_CUT",
+                    SubStatus = "REJECTED_CONTRACT_MISMATCH",
+                    ErrorCode = "ERR_CONTRACT_MISMATCH",
+                    Reason = string.format("Incompatible contract_version %s, expected %s", ev.contract_version, ContractVersion)
+                })
+                return
             end
 
             if ev_epoch < CurrentEpoch then
@@ -245,11 +503,97 @@ Handlers.add(
                 return
             end
 
+            -- Schema checking & Dynamic Registration
+            if action == "register_schema" then
+                local parsed_schema = (type(val) == "table") and val or (json.decode(canonical_val) or {})
+                staged_schemas[namespace] = {
+                    namespace = namespace,
+                    backend = parsed_schema.backend or "ets_doc",
+                    schema_version = parsed_schema.schema_version or "1.0.0",
+                    key_type = parsed_schema.key_type or "string",
+                    value_type = parsed_schema.value_type or "any",
+                    rules = parsed_schema.rules or {},
+                    contract_tx_id = parsed_schema.contract_tx_id,
+                    wasm_tx_id = parsed_schema.wasm_tx_id,
+                    wasm_sha256 = parsed_schema.wasm_sha256
+                }
+            else
+                local schema = staged_schemas[namespace]
+                if not schema then
+                    ao.send({
+                        Target = msg.From,
+                        Action = "Audit-Rejected",
+                        Status = "FRAUD_DETECTED_AND_CUT",
+                        SubStatus = "REJECTED_SCHEMA_VIOLATION",
+                        ErrorCode = "ERR_NAMESPACE_UNKNOWN",
+                        PolicyAction = safe_policy_action("on_schema_violation", "CUT_BRANCH_AND_REJECT_INVALID_SCHEMA"),
+                        Reason = string.format("Unknown namespace %s in event seq %d", namespace, seq)
+                    })
+                    return
+                end
+
+                if ev.schema_version and ev.schema_version ~= schema.schema_version then
+                    ao.send({
+                        Target = msg.From,
+                        Action = "Audit-Rejected",
+                        Status = "FRAUD_DETECTED_AND_CUT",
+                        SubStatus = "REJECTED_SCHEMA_VIOLATION",
+                        ErrorCode = "ERR_SCHEMA_VIOLATION",
+                        Reason = string.format("Schema version mismatch for %s at seq %d", namespace, seq)
+                    })
+                    return
+                end
+
+                if action == "put" and schema.rules then
+                    local rules = schema.rules
+                    local num_val = tonumber(val)
+                    if num_val then
+                        if rules.min_value ~= nil and num_val < tonumber(rules.min_value) then
+                            ao.send({
+                                Target = msg.From,
+                                Action = "Audit-Rejected",
+                                Status = "FRAUD_DETECTED_AND_CUT",
+                                SubStatus = "REJECTED_SCHEMA_VIOLATION",
+                                ErrorCode = "ERR_SCHEMA_VIOLATION",
+                                PolicyAction = safe_policy_action("on_schema_violation", "CUT_BRANCH_AND_REJECT_INVALID_SCHEMA"),
+                                Reason = string.format("Schema violation in %s at seq %d: val %d < min_value %s", namespace, seq, num_val, tostring(rules.min_value))
+                            })
+                            return
+                        end
+                        if rules.max_value ~= nil and num_val > tonumber(rules.max_value) then
+                            ao.send({
+                                Target = msg.From,
+                                Action = "Audit-Rejected",
+                                Status = "FRAUD_DETECTED_AND_CUT",
+                                SubStatus = "REJECTED_SCHEMA_VIOLATION",
+                                ErrorCode = "ERR_SCHEMA_VIOLATION",
+                                PolicyAction = safe_policy_action("on_schema_violation", "CUT_BRANCH_AND_REJECT_INVALID_SCHEMA"),
+                                Reason = string.format("Schema violation in %s at seq %d: val %d > max_value %s", namespace, seq, num_val, tostring(rules.max_value))
+                            })
+                            return
+                        end
+                    end
+                    if type(val) == "string" then
+                        if rules.min_length ~= nil and #val < tonumber(rules.min_length) then
+                            ao.send({
+                                Target = msg.From,
+                                Action = "Audit-Rejected",
+                                Status = "FRAUD_DETECTED_AND_CUT",
+                                SubStatus = "REJECTED_SCHEMA_VIOLATION",
+                                ErrorCode = "ERR_SCHEMA_VIOLATION",
+                                Reason = string.format("Schema violation in %s at seq %d: string length < min_length", namespace, seq)
+                            })
+                            return
+                        end
+                    end
+                end
+            end
+
             if seq <= OfficialSeq then
                 -- Already committed sequence: Check Deduplication vs Equivocation!
                 local existing = EventHistory[seq]
                 if existing then
-                    if existing.hash ~= given_hash or tostring(existing.key) ~= tostring(key) or existing.action ~= action then
+                    if existing.hash ~= given_hash or tostring(existing.key) ~= tostring(key) or existing.action ~= action or existing.namespace ~= namespace then
                         -- EQUIVOCATION PROVEN: Conflicting event for the same sequence!
                         ao.send({
                             Target = msg.From,
@@ -263,15 +607,16 @@ Handlers.add(
                         })
                         return
                     else
-                        -- Valid idempotent overlap
                         deduplicated_count = deduplicated_count + 1
                     end
                 end
             else
                 -- New uncommitted event (seq == staged_seq + 1)
-                local action_code = (action == "del") and "22" or "20"
+                local action_code = (action == "register_schema") and "24" or ((action == "del") and "22" or "20")
                 local payload
-                if namespace == "default" and action_code == "20" and val_type == "int64" then
+                if action_code == "24" then
+                    payload = string.format("%s%d24%s:%s", running_hash, seq, namespace, canonical_val)
+                elseif namespace == "default" and action_code == "20" and val_type == "int64" then
                     payload = string.format("%s%d20%s%s", running_hash, seq, tostring(key), canonical_val)
                 elseif namespace == "default" and action_code == "22" then
                     payload = string.format("%s%d22%s", running_hash, seq, tostring(key))
@@ -283,46 +628,96 @@ Handlers.add(
 
                 local expected_hash = string.upper(crypto.digest("sha256", payload))
                 if expected_hash ~= given_hash then
-                    -- Atomic abort: staged_records is discarded, Official state untouched!
+                    -- Atomic abort: staged state is completely discarded, official state untouched!
                     ao.send({
                         Target = msg.From,
                         Action = "Audit-Rejected",
                         Status = "FRAUD_DETECTED_AND_CUT",
                         SubStatus = "REJECTED_HASH_CHAIN_BROKEN",
                         PolicyAction = safe_policy_action("on_hash_chain_broken", "CUT_BRANCH_AND_FREEZE_EPOCH"),
-                        Reason = string.format("Hash chain broken at seq %d", seq),
+                        Reason = string.format("Hash chain broken at seq %d! Expected %s, got %s", seq, expected_hash, given_hash),
                         OfficialSeq = tostring(OfficialSeq)
                     })
                     return
                 end
 
-                -- Recompute 64-bit Merkle-XOR State Root in Staged State
-                local k_str = tostring(key)
-                local cur = staged_records[k_str]
+                if action ~= "register_schema" then
+                    -- Unambiguous Composite Slot Key: namespace .. ":" .. key
+                    local slot_id = (namespace == "default") and tostring(key) or (namespace .. ":" .. tostring(key))
+                    local schema = staged_schemas[namespace]
+                    local backend = (schema and schema.backend) or (val_type == "int64" and "wasm_slot" or "ets_doc")
 
-                if action == "put" then
-                    if cur and cur.active then
-                        local old_h = record_hash_64(key, cur.val, cur.ver)
-                        local new_ver = cur.ver + 1
-                        local new_h = record_hash_64(key, val, new_ver)
-                        staged_root = staged_root ~ old_h ~ new_h
-                        staged_records[k_str] = { val = val, ver = new_ver, active = true }
-                    elseif cur and not cur.active then
-                        -- Reactivating tombstone: version continues from tombstone version + 1
-                        local new_ver = cur.ver + 1
-                        local new_h = record_hash_64(key, val, new_ver)
-                        staged_root = staged_root ~ new_h
-                        staged_records[k_str] = { val = val, ver = new_ver, active = true }
+                    local key_hash_64 = 0
+                    local val_hash_64 = 0
+                    if backend == "wasm_slot" then
+                        key_hash_64 = (namespace == "default") and (tonumber(key) or 0) or ((namespace_id_64(namespace) ~ (tonumber(key) or 0)))
+                        val_hash_64 = tonumber(val) or 0
                     else
-                        local new_h = record_hash_64(key, val, 1)
-                        staged_root = staged_root ~ new_h
-                        staged_records[k_str] = { val = val, ver = 1, active = true }
+                        key_hash_64 = bytes_to_u64(namespace .. ":" .. tostring(key))
+                        val_hash_64 = bytes_to_u64(canonical_val)
                     end
-                elseif action == "del" then
-                    if cur and cur.active then
-                        local old_h = record_hash_64(key, cur.val, cur.ver)
-                        staged_root = staged_root ~ old_h
-                        staged_records[k_str] = { val = cur.val, ver = cur.ver + 1, active = false }
+
+                    local cur = staged_records[slot_id]
+
+                    if action == "put" then
+                        if cur and cur.active then
+                            local old_h = record_hash_64(cur.key_hash_64, cur.val_hash_64, cur.ver)
+                            local new_ver = cur.ver + 1
+                            local new_h = record_hash_64(key_hash_64, val_hash_64, new_ver)
+                            staged_root = staged_root ~ old_h ~ new_h
+                            staged_records[slot_id] = {
+                                namespace = namespace,
+                                raw_key = key,
+                                val = val,
+                                canonical_val = canonical_val,
+                                key_hash_64 = key_hash_64,
+                                val_hash_64 = val_hash_64,
+                                ver = new_ver,
+                                active = true
+                            }
+                        elseif cur and not cur.active then
+                            local new_ver = cur.ver + 1
+                            local new_h = record_hash_64(key_hash_64, val_hash_64, new_ver)
+                            staged_root = staged_root ~ new_h
+                            staged_records[slot_id] = {
+                                namespace = namespace,
+                                raw_key = key,
+                                val = val,
+                                canonical_val = canonical_val,
+                                key_hash_64 = key_hash_64,
+                                val_hash_64 = val_hash_64,
+                                ver = new_ver,
+                                active = true
+                            }
+                        else
+                            local new_h = record_hash_64(key_hash_64, val_hash_64, 1)
+                            staged_root = staged_root ~ new_h
+                            staged_records[slot_id] = {
+                                namespace = namespace,
+                                raw_key = key,
+                                val = val,
+                                canonical_val = canonical_val,
+                                key_hash_64 = key_hash_64,
+                                val_hash_64 = val_hash_64,
+                                ver = 1,
+                                active = true
+                            }
+                        end
+                    elseif action == "del" then
+                        if cur and cur.active then
+                            local old_h = record_hash_64(cur.key_hash_64, cur.val_hash_64, cur.ver)
+                            staged_root = staged_root ~ old_h
+                            staged_records[slot_id] = {
+                                namespace = namespace,
+                                raw_key = key,
+                                val = cur.val,
+                                canonical_val = cur.canonical_val,
+                                key_hash_64 = cur.key_hash_64,
+                                val_hash_64 = cur.val_hash_64,
+                                ver = cur.ver + 1,
+                                active = false
+                            }
+                        end
                     end
                 end
 
@@ -347,9 +742,11 @@ Handlers.add(
                 table.insert(new_events_to_commit, {
                     epoch = ev_epoch,
                     seq = seq,
+                    namespace = namespace,
                     action = action,
                     key = key,
                     val = val,
+                    canonical_val = canonical_val,
                     hash = given_hash,
                     state_root = tostring(staged_root),
                     su_id = su_id
@@ -403,23 +800,40 @@ Handlers.add(
             return
         end
 
+        -- Recompute 256-bit cryptographic state commitment
+        local recomputed_commitment_256 = compute_commitment_256(staged_records)
+        if proposed_commitment and proposed_commitment ~= recomputed_commitment_256 then
+            ao.send({
+                Target = msg.From,
+                Action = "Audit-Rejected",
+                Status = "FRAUD_DETECTED_AND_CUT",
+                SubStatus = "REJECTED_STATE_COMMITMENT_MISMATCH",
+                ErrorCode = "ERR_STATE_COMMITMENT_MISMATCH",
+                Reason = string.format("256-bit State commitment mismatch: recomputed %s vs proposed %s", recomputed_commitment_256, proposed_commitment)
+            })
+            return
+        end
+
         -- 6. ATOMIC COMMIT: All validations passed! Promote staged state to Official State
         Records = staged_records
+        Schemas = staged_schemas
         if batch_epoch > CurrentEpoch then
             CurrentEpoch = batch_epoch
         end
         OfficialSeq = staged_seq
         OfficialHash = running_hash
         OfficialStateRoot = tostring(staged_root)
-        OfficialCommitment256 = compute_commitment_256(Records)
+        OfficialCommitment256 = recomputed_commitment_256
 
         for _, cev in ipairs(new_events_to_commit) do
             EventHistory[cev.seq] = {
                 epoch = cev.epoch,
                 seq = cev.seq,
+                namespace = cev.namespace,
                 action = cev.action,
                 key = cev.key,
                 val = cev.val,
+                canonical_val = cev.canonical_val,
                 hash = cev.hash,
                 state_root = cev.state_root,
                 attestations = { [su_id] = true }
@@ -461,6 +875,16 @@ Handlers.add(
     "PromoteEpoch",
     Handlers.utils.hasMatchingTag("Action", "PromoteEpoch"),
     function(msg)
+        local caller = msg.From
+        if not AuthorizedAdmins[caller] and caller ~= Owner then
+            ao.send({
+                Target = msg.From,
+                Action = "Epoch-Promotion-Rejected",
+                Status = "REJECTED_UNAUTHORIZED_ADMIN",
+                Reason = "Only authorized admin or owner can promote epoch"
+            })
+            return
+        end
         local data = json.decode(msg.Data or "{}")
         local new_epoch = tonumber(data.new_epoch) or (CurrentEpoch + 1)
         if new_epoch <= CurrentEpoch then
@@ -514,3 +938,37 @@ Handlers.add(
         })
     end
 )
+
+-- Direct Dispatcher function for runners / test evaluators
+function handle_message(msg)
+    if not msg then return { ok = false, error = "nil message" } end
+    local handled = false
+    local initial_outbox_len = #ao._outbox
+    for _, h in ipairs(Handlers._list) do
+        if h.pattern(msg) then
+            h.handle(msg)
+            handled = true
+            break
+        end
+    end
+    local responses = {}
+    for i = initial_outbox_len + 1, #ao._outbox do
+        table.insert(responses, ao._outbox[i])
+    end
+    return {
+        handled = handled,
+        responses = responses,
+        official_seq = OfficialSeq,
+        current_epoch = CurrentEpoch,
+        official_commitment = OfficialCommitment256,
+        official_hash = OfficialHash
+    }
+end
+
+return {
+    handle = handle_message,
+    Handlers = Handlers,
+    ao = ao,
+    compute_commitment_256 = compute_commitment_256,
+    record_hash_64 = record_hash_64
+}
