@@ -9,11 +9,15 @@
  */
 
 import Arweave from 'arweave';
-import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  DEFAULT_POLICY,
+  POLICY_ALLOWLIST,
+  validatePolicy as specValidatePolicy
+} from '../spec/hydb_contract_spec.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WALLET_PATH = resolve(__dirname, '../secrets/wallet.json');
@@ -98,88 +102,17 @@ export function verifyWasmArtifact(wasmBytes, expectedExports = {}) {
 }
 
 /**
- * Sandbox Lua Policy Handler Simulator:
- * Injects mock incident context $X$ into developer's Lua handler $Y$,
- * validates syntax, verifies non-hanging timeout (<1.5s), and ensures valid return action.
+ * Policy Circuit Validator:
+ * Validates that developer's policy mapping conforms to canonical spec allowlist.
+ * Arbitrary Lua execution is prohibited.
  */
-export function simulateLuaPolicyHandler(luaCode, eventName, namespace = 'vault.test') {
-  if (typeof luaCode !== 'string' || !luaCode.trim()) {
-    throw new ContractPreflightError('Lua policy handler must be a non-empty string', {
-      stage: 'LUA_POLICY_CHECK',
-      eventName
-    });
-  }
-
-  const mockEvent = {
-    verdict: eventName,
-    seq: 100,
-    epoch: 1,
-    namespace: namespace,
-    sub_verdict: eventName,
-    timestamp: Date.now()
-  };
-
-  const runnerScript = `
-    local event_json = ${JSON.stringify(JSON.stringify(mockEvent))}
-    local event = {}
-    for k, v in string.gmatch(event_json, '"([^"]+)":([%w_%-%.]+)') do
-      event[k] = v
-    end
-    for k, v in string.gmatch(event_json, '"([^"]+)":"([^"]+)"') do
-      event[k] = v
-    end
-
-    local code = ${JSON.stringify(luaCode)}
-    local loader, err = load(code)
-    if not loader then
-      io.stderr:write("LUA_SYNTAX_ERROR: " .. tostring(err))
-      os.exit(101)
-    end
-
-    local ok_load, handler = pcall(loader)
-    if not ok_load then
-      io.stderr:write("LUA_EVAL_ERROR: " .. tostring(handler))
-      os.exit(102)
-    end
-
-    if type(handler) ~= "function" then
-      io.stderr:write("LUA_TYPE_ERROR: Script did not return a function (got " .. type(handler) .. ")")
-      os.exit(103)
-    end
-
-    local ok_exec, res = pcall(handler, event)
-    if not ok_exec then
-      io.stderr:write("LUA_RUNTIME_PANIC: " .. tostring(res))
-      os.exit(104)
-    end
-
-    if res == nil or tostring(res) == "" then
-      io.stderr:write("LUA_EMPTY_RETURN: Handler returned nil or empty string")
-      os.exit(105)
-    end
-
-    io.write(tostring(res))
-  `;
-
+export function validateContractPolicy(policy = {}) {
   try {
-    const verdictOut = execFileSync('lua', ['-e', runnerScript], {
-      timeout: 1500,
-      encoding: 'utf-8'
-    }).trim();
-    return { ok: true, verdict: verdictOut };
+    return specValidatePolicy(policy);
   } catch (err) {
-    let reason = 'Lua execution failed';
-    if (err.code === 'ETIMEDOUT' || err.signal === 'SIGTERM') {
-      reason = 'Handler timed out (>1500ms) - detected potential infinite loop (while true do end)';
-    } else if (err.stderr) {
-      reason = err.stderr.trim();
-    } else if (err.message) {
-      reason = err.message;
-    }
-    throw new ContractPreflightError(`Lua Policy Simulation failed for event [${eventName}]: ${reason}`, {
-      stage: 'LUA_POLICY_SIMULATION',
-      eventName,
-      reason
+    throw new ContractPreflightError(err.message, {
+      stage: 'POLICY_ALLOWLIST_VALIDATION',
+      code: err.code || 'ERR_POLICY_INVALID'
     });
   }
 }
@@ -359,16 +292,13 @@ export class HyDBContract {
       }
     }
 
-    // 3. Lua Policy Handler Sandbox Simulation
-    for (const [eventName, handlerSpec] of Object.entries(this.policy)) {
-      if (typeof handlerSpec === 'string' && (handlerSpec.includes('function(') || handlerSpec.includes('return '))) {
-        const sim = simulateLuaPolicyHandler(handlerSpec, eventName, this.namespace);
-        report.policySimulations.push({
-          event: eventName,
-          passed: true,
-          verdict: sim.verdict
-        });
-      }
+    // 3. Policy Circuit Allowlist Validation
+    if (this.policy && Object.keys(this.policy).length > 0) {
+      validateContractPolicy(this.policy);
+      report.policyChecks = {
+        verified: true,
+        rulesCount: Object.keys(this.policy).length
+      };
     }
 
     return { ok: true, report };

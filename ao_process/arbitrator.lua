@@ -59,28 +59,16 @@ local FORBIDDEN_POLICY_OVERRIDES = {
     ["OVERRIDE_VALID"] = true
 }
 
-local function safe_policy_action(policy_key, default_action, event_context)
+local function safe_policy_action(policy_key, default_action)
     local act = PolicyCircuit[policy_key] or default_action
-    if type(act) == "function" then
-        local ok, res = pcall(act, event_context or {})
-        if ok and res then act = res else act = default_action end
-    elseif type(act) == "string" and (string.find(act, "function%s*%(") or string.find(act, "^return%s+")) then
-        local loader_fn, load_err = load(act)
-        if loader_fn then
-            local ok_call, handler = pcall(loader_fn)
-            if ok_call and type(handler) == "function" then
-                local ok_exec, res = pcall(handler, event_context or {})
-                if ok_exec and res then act = res else act = default_action end
-            end
-        end
-    end
+    local act_str = tostring(act)
 
     if policy_key ~= "on_valid_commit" and policy_key ~= "on_duplicate_overlap" then
-        if FORBIDDEN_POLICY_OVERRIDES[string.upper(tostring(act))] then
+        if FORBIDDEN_POLICY_OVERRIDES[string.upper(act_str)] then
             return "GUARDRAIL_BLOCKED_OVERRIDE->" .. default_action
         end
     end
-    return tostring(act)
+    return act_str
 end
 
 -- Exact 64-bit FNV-1a + SplitMix64 record hash matching Rust HyDB (Lua 5.3 64-bit bitwise)
@@ -334,7 +322,7 @@ Handlers.add(
                     if cur and cur.active then
                         local old_h = record_hash_64(key, cur.val, cur.ver)
                         staged_root = staged_root ~ old_h
-                        staged_records[k_str] = { val = cur.val, ver = cur.ver, active = false }
+                        staged_records[k_str] = { val = cur.val, ver = cur.ver + 1, active = false }
                     end
                 end
 

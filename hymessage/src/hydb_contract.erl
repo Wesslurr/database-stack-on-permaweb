@@ -31,6 +31,14 @@
     init_tables/0,
     reset_tables/0,
     register_namespace/2,
+    unregister_namespace/1,
+    update_namespace_status/2,
+    is_namespace_registered/1,
+    is_namespace_active/1,
+    validate_schema_definition/2,
+    check_requires_list/3,
+    check_rules_coherence/2,
+    check_record_exists/4,
     configure_wasm_contract/3,
     get_namespace_config/1,
     list_namespaces/0,
@@ -82,6 +90,7 @@ register_default_namespaces() ->
         <<"schema_version">> => <<"1.0.0">>,
         <<"key_type">> => <<"int64">>,
         <<"value_type">> => <<"int64">>,
+        <<"status">> => <<"replicated">>,
         <<"rules">> => #{}
     }}),
     %% 2. Financial balances namespace: int64 with non-negative invariant (min_value: 0)
@@ -91,6 +100,7 @@ register_default_namespaces() ->
         <<"schema_version">> => <<"1.0.0">>,
         <<"key_type">> => <<"int64">>,
         <<"value_type">> => <<"int64">>,
+        <<"status">> => <<"replicated">>,
         <<"rules">> => #{ <<"min_value">> => 0 }
     }}),
     %% 3. Document / Universal KV namespace: backed by ets_doc supporting JSON, strings, CAS, prefix_scan
@@ -100,94 +110,243 @@ register_default_namespaces() ->
         <<"schema_version">> => <<"1.0.0">>,
         <<"key_type">> => <<"string">>,
         <<"value_type">> => <<"any">>,
+        <<"status">> => <<"replicated">>,
         <<"rules">> => #{}
     }}),
     ok.
 
+validate_schema_definition(Namespace, ConfigMap) when is_binary(Namespace), is_map(ConfigMap) ->
+    case re:run(Namespace, "^[a-z0-9][a-z0-9._-]{0,63}$") of
+        nomatch ->
+            {error, <<"ERR_INVALID_SCHEMA">>, 422, <<"Invalid namespace format (must be lowercase alphanumeric + ._-)">>};
+        {match, _} ->
+            Backend = maps:get(<<"backend">>, ConfigMap, <<"ets_doc">>),
+            KeyType = maps:get(<<"key_type">>, ConfigMap, <<"string">>),
+            ValType = maps:get(<<"value_type">>, ConfigMap, <<"any">>),
+            SchemaVsn = maps:get(<<"schema_version">>, ConfigMap, <<"1.0.0">>),
+            Requires = maps:get(<<"requires">>, ConfigMap, []),
+            Rules = maps:get(<<"rules">>, ConfigMap, #{}),
+
+            %% Validate backend
+            case lists:member(Backend, [<<"wasm_slot">>, <<"ets_doc">>]) of
+                false ->
+                    {error, <<"ERR_INVALID_SCHEMA">>, 422, iolist_to_binary([<<"Unknown backend '">>, Backend, <<"'">>])};
+                true ->
+                    %% Validate Schema Version semver
+                    case re:run(SchemaVsn, "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$") of
+                        nomatch ->
+                            {error, <<"ERR_INVALID_SCHEMA">>, 422, <<"schema_version must be MAJOR.MINOR.PATCH">>};
+                        {match, _} ->
+                            %% Validate backend capability vs key_type & value_type
+                            case Backend of
+                                <<"wasm_slot">> ->
+                                    if KeyType =/= <<"int64">> ->
+                                        {error, <<"ERR_CAPABILITY_UNSUPPORTED">>, 501, <<"wasm_slot only supports int64 keys">>};
+                                       ValType =/= <<"int64">> ->
+                                        {error, <<"ERR_CAPABILITY_UNSUPPORTED">>, 501, <<"wasm_slot only supports int64 values">>};
+                                       true ->
+                                        check_schema_requires_and_rules(Backend, KeyType, Requires, Rules)
+                                    end;
+                                <<"ets_doc">> ->
+                                    ValidKeys = [<<"int64">>, <<"string">>],
+                                    ValidVals = [<<"int64">>, <<"bool">>, <<"string">>, <<"bytes">>, <<"json">>, <<"any">>],
+                                    case lists:member(KeyType, ValidKeys) of
+                                        false -> {error, <<"ERR_INVALID_SCHEMA">>, 422, <<"Invalid key_type">>};
+                                        true ->
+                                            case lists:member(ValType, ValidVals) of
+                                                false -> {error, <<"ERR_INVALID_SCHEMA">>, 422, <<"Invalid value_type">>};
+                                                true ->
+                                                    check_schema_requires_and_rules(Backend, KeyType, Requires, Rules)
+                                            end
+                                    end
+                            end
+                    end
+            end
+    end.
+
+check_schema_requires_and_rules(Backend, KeyType, Requires, Rules) ->
+    case check_requires_list(Backend, KeyType, Requires) of
+        {error, Code, Reason} ->
+            {error, Code, 501, Reason};
+        ok ->
+            case check_rules_coherence(Backend, Rules) of
+                {error, Reason} ->
+                    {error, <<"ERR_INVALID_SCHEMA">>, 422, Reason};
+                ok ->
+                    ok
+            end
+    end.
+
+check_requires_list(<<"wasm_slot">>, _KeyType, Requires) when is_list(Requires) ->
+    Allowed = [<<"get">>, <<"put">>, <<"del">>, <<"exists">>, <<"cas">>, <<"kv_core">>, <<"fast_fingerprint_64">>, <<"snapshot">>],
+    case lists:all(fun(R) -> lists:member(R, Allowed) end, Requires) of
+        false ->
+            {error, <<"ERR_CAPABILITY_UNSUPPORTED">>, <<"wasm_slot lacks required capability">>};
+        true ->
+            ok
+    end;
+check_requires_list(<<"ets_doc">>, KeyType, Requires) when is_list(Requires) ->
+    Allowed = [<<"get">>, <<"put">>, <<"del">>, <<"exists">>, <<"cas">>, <<"kv_core">>, <<"prefix_scan">>, <<"structured_doc">>, <<"fast_fingerprint_64">>],
+    case lists:all(fun(R) -> lists:member(R, Allowed) end, Requires) of
+        false ->
+            {error, <<"ERR_CAPABILITY_UNSUPPORTED">>, <<"ets_doc lacks capability">>};
+        true ->
+            case lists:member(<<"prefix_scan">>, Requires) of
+                true when KeyType =/= <<"string">> ->
+                    {error, <<"ERR_CAPABILITY_UNSUPPORTED">>, <<"prefix_scan requires string keys">>};
+                _ ->
+                    ok
+            end
+    end;
+check_requires_list(_Backend, _KeyType, _Requires) ->
+    ok.
+
+check_rules_coherence(_Backend, Rules) when is_map(Rules) ->
+    MinVal = maps:get(<<"min_value">>, Rules, undefined),
+    MaxVal = maps:get(<<"max_value">>, Rules, undefined),
+    if is_integer(MinVal), is_integer(MaxVal), MinVal > MaxVal ->
+        {error, <<"min_value > max_value">>};
+       true ->
+        MinLen = maps:get(<<"min_length">>, Rules, undefined),
+        MaxLen = maps:get(<<"max_length">>, Rules, undefined),
+        if is_integer(MinLen), is_integer(MaxLen), MinLen > MaxLen ->
+            {error, <<"min_length > max_length">>};
+           true ->
+            ok
+        end
+    end;
+check_rules_coherence(_Backend, _Rules) ->
+    ok.
+
 register_namespace(Namespace, ConfigMap) when is_binary(Namespace), is_map(ConfigMap) ->
     init_tables(),
-    Backend = maps:get(<<"backend">>, ConfigMap, <<"ets_doc">>),
-    SchemaVsn = maps:get(<<"schema_version">>, ConfigMap, <<"1.0.0">>),
-    KeyType = maps:get(<<"key_type">>, ConfigMap, <<"string">>),
-    ValType = maps:get(<<"value_type">>, ConfigMap, <<"any">>),
-    Rules = maps:get(<<"rules">>, ConfigMap, #{}),
-    BaseEntry = #{
-        <<"namespace">> => Namespace,
-        <<"backend">> => Backend,
-        <<"schema_version">> => SchemaVsn,
-        <<"key_type">> => KeyType,
-        <<"value_type">> => ValType,
-        <<"rules">> => Rules
-    },
-    Entry1 = case maps:get(<<"contract_tx_id">>, ConfigMap, undefined) of
-        undefined -> BaseEntry;
-        CTx when is_binary(CTx) -> BaseEntry#{ <<"contract_tx_id">> => CTx }
-    end,
-    Entry2 = case maps:get(<<"wasm_tx_id">>, ConfigMap, undefined) of
-        undefined -> Entry1;
-        WTx when is_binary(WTx) -> Entry1#{ <<"wasm_tx_id">> => WTx }
-    end,
-    WasmSha = case maps:get(<<"wasm_sha256">>, ConfigMap, undefined) of
-        S when is_binary(S), byte_size(S) > 0 -> S;
-        _ ->
-            case maps:get(<<"connector">>, ConfigMap, undefined) of
-                #{ <<"wasm_sha256">> := CS } when is_binary(CS), byte_size(CS) > 0 -> CS;
-                _ -> undefined
-            end
-    end,
-    Entry3 = case WasmSha of
-        undefined -> Entry2;
-        _ -> Entry2#{ <<"wasm_sha256">> => WasmSha }
-    end,
-    Entry4 = case maps:get(<<"policy">>, ConfigMap, undefined) of
-        undefined -> Entry3;
-        Pol when is_map(Pol) -> Entry3#{ <<"policy">> => Pol }
-    end,
-    Entry5 = case maps:get(<<"connector">>, ConfigMap, undefined) of
-        undefined -> Entry4;
-        Conn when is_map(Conn) -> Entry4#{ <<"connector">> => Conn }
-    end,
-    ets:insert(?SCHEMA_TABLE, {Namespace, Entry5}),
-    {ok, Entry5}.
+    case validate_schema_definition(Namespace, ConfigMap) of
+        {error, Code, Status, Reason} ->
+            {error, Code, Status, Reason};
+        ok ->
+            Backend = maps:get(<<"backend">>, ConfigMap, <<"ets_doc">>),
+            SchemaVsn = maps:get(<<"schema_version">>, ConfigMap, <<"1.0.0">>),
+            KeyType = maps:get(<<"key_type">>, ConfigMap, <<"string">>),
+            ValType = maps:get(<<"value_type">>, ConfigMap, <<"any">>),
+            Rules = maps:get(<<"rules">>, ConfigMap, #{}),
+            BaseEntry = #{
+                <<"namespace">> => Namespace,
+                <<"backend">> => Backend,
+                <<"schema_version">> => SchemaVsn,
+                <<"key_type">> => KeyType,
+                <<"value_type">> => ValType,
+                <<"rules">> => Rules,
+                <<"status">> => <<"registered">>
+            },
+            Entry1 = case maps:get(<<"contract_tx_id">>, ConfigMap, undefined) of
+                undefined -> BaseEntry;
+                CTx when is_binary(CTx) -> BaseEntry#{ <<"contract_tx_id">> => CTx }
+            end,
+            Entry2 = case maps:get(<<"wasm_tx_id">>, ConfigMap, undefined) of
+                undefined -> Entry1;
+                WTx when is_binary(WTx) -> Entry1#{ <<"wasm_tx_id">> => WTx }
+            end,
+            WasmSha = case maps:get(<<"wasm_sha256">>, ConfigMap, undefined) of
+                S when is_binary(S), byte_size(S) > 0 -> S;
+                _ ->
+                    case maps:get(<<"connector">>, ConfigMap, undefined) of
+                        #{ <<"wasm_sha256">> := CS } when is_binary(CS), byte_size(CS) > 0 -> CS;
+                        _ -> undefined
+                    end
+            end,
+            Entry3 = case WasmSha of
+                undefined -> Entry2;
+                _ -> Entry2#{ <<"wasm_sha256">> => WasmSha }
+            end,
+            Entry4 = case maps:get(<<"policy">>, ConfigMap, undefined) of
+                undefined -> Entry3;
+                Pol when is_map(Pol) -> Entry3#{ <<"policy">> => Pol }
+            end,
+            Entry5 = case maps:get(<<"connector">>, ConfigMap, undefined) of
+                undefined -> Entry4;
+                Conn when is_map(Conn) -> Entry4#{ <<"connector">> => Conn }
+            end,
+            ets:insert(?SCHEMA_TABLE, {Namespace, Entry5}),
+            {ok, Entry5}
+    end.
+
+unregister_namespace(Namespace) when is_binary(Namespace) ->
+    init_tables(),
+    ets:delete(?SCHEMA_TABLE, Namespace),
+    ok.
+
+update_namespace_status(Namespace, NewStatus) when is_binary(Namespace), is_binary(NewStatus) ->
+    init_tables(),
+    case ets:lookup(?SCHEMA_TABLE, Namespace) of
+        [{Namespace, Entry}] ->
+            Updated = Entry#{ <<"status">> => NewStatus },
+            ets:insert(?SCHEMA_TABLE, {Namespace, Updated}),
+            {ok, Updated};
+        [] ->
+            {error, not_found}
+    end.
+
+is_namespace_registered(Namespace) when is_binary(Namespace) ->
+    init_tables(),
+    case ets:lookup(?SCHEMA_TABLE, Namespace) of
+        [{Namespace, _}] -> true;
+        [] -> false
+    end.
+
+is_namespace_active(Namespace) when is_binary(Namespace) ->
+    init_tables(),
+    case ets:lookup(?SCHEMA_TABLE, Namespace) of
+        [{Namespace, #{ <<"status">> := Status }}] ->
+            Status =:= <<"replicated">> orelse Status =:= <<"committed">>;
+        [{Namespace, _}] ->
+            true;
+        [] ->
+            false
+    end.
 
 configure_wasm_contract(Namespace, Entry, {WasmCallFun, WasmBase, NodeMsg}) when is_map(Entry) ->
     Backend = maps:get(<<"backend">>, Entry, <<"wasm_slot">>),
-    case {Backend, WasmBase =/= undefined} of
-        {<<"wasm_slot">>, true} ->
-            Rules = maps:get(<<"rules">>, Entry, #{}),
-            NsId = namespace_id_64(Namespace),
-            {HasMin, MinVal} = case maps:get(<<"min_value">>, Rules, undefined) of
-                Min when is_integer(Min) -> {1, Min};
-                _ -> {0, 0}
-            end,
-            {HasMax, MaxVal} = case maps:get(<<"max_value">>, Rules, undefined) of
-                Max when is_integer(Max) -> {1, Max};
-                _ -> {0, 0}
-            end,
-            MaxRecords = case maps:get(<<"max_records">>, Rules, undefined) of
-                MR when is_integer(MR), MR > 0 -> MR;
-                _ -> 0
-            end,
-            _ = WasmCallFun(WasmBase, <<"db_set_contract_ns">>, [NsId, HasMin, MinVal, HasMax, MaxVal, MaxRecords], NodeMsg, 0),
-            ok;
+    case Backend of
+        <<"wasm_slot">> ->
+            case WasmBase of
+                undefined ->
+                    {error, <<"ERR_BACKEND_UNAVAILABLE">>, 503, <<"WASM runtime not available">>};
+                _ ->
+                    Rules = maps:get(<<"rules">>, Entry, #{}),
+                    NsId = namespace_id_64(Namespace),
+                    {HasMin, MinVal} = case maps:get(<<"min_value">>, Rules, undefined) of
+                        Min when is_integer(Min) -> {1, Min};
+                        _ -> {0, 0}
+                    end,
+                    {HasMax, MaxVal} = case maps:get(<<"max_value">>, Rules, undefined) of
+                        Max when is_integer(Max) -> {1, Max};
+                        _ -> {0, 0}
+                    end,
+                    MaxRecords = case maps:get(<<"max_records">>, Rules, undefined) of
+                        MR when is_integer(MR), MR > 0 -> MR;
+                        _ -> 0
+                    end,
+                    Res = WasmCallFun(WasmBase, <<"db_set_contract_ns">>, [NsId, HasMin, MinVal, HasMax, MaxVal, MaxRecords], NodeMsg, 0),
+                    case Res of
+                        1 ->
+                            update_namespace_status(Namespace, <<"configured">>),
+                            ok;
+                        _ ->
+                            {error, <<"ERR_BACKEND_FAILURE">>, 500, <<"WASM contract configuration failed inside WASM linear memory">>}
+                    end
+            end;
         _ ->
+            update_namespace_status(Namespace, <<"configured">>),
             ok
     end.
 
 get_namespace_config(Namespace) ->
     init_tables(),
     case ets:lookup(?SCHEMA_TABLE, Namespace) of
-        [{Namespace, Cfg}] -> Cfg;
+        [{Namespace, Cfg}] ->
+            {ok, Cfg};
         [] ->
-            %% Dynamic fallback: if namespace not explicitly registered, use default wasm_slot for int64
-            #{
-                <<"namespace">> => Namespace,
-                <<"backend">> => <<"wasm_slot">>,
-                <<"schema_version">> => <<"1.0.0">>,
-                <<"key_type">> => <<"int64">>,
-                <<"value_type">> => <<"int64">>,
-                <<"rules">> => #{}
-            }
+            {error, not_found}
     end.
 
 list_namespaces() ->
@@ -229,7 +388,22 @@ check_capability(Backend, RequiredCap) ->
 %%   {ok, ValidatedMap}
 %%   | {error, ErrorCode, HttpStatus, ReasonBin}
 validate_pre_sequence(Namespace, Op, RawKey, RawVal, Opts, WasmCtx) ->
-    Cfg = get_namespace_config(Namespace),
+    case get_namespace_config(Namespace) of
+        {error, not_found} ->
+            {error, <<"ERR_NAMESPACE_UNKNOWN">>, 404,
+             iolist_to_binary([<<"Namespace '">>, Namespace, <<"' is not registered">>])};
+        {ok, Cfg} ->
+            Status = maps:get(<<"status">>, Cfg, <<"replicated">>),
+            case (Status =:= <<"replicated">> orelse Status =:= <<"committed">>) of
+                false ->
+                    {error, <<"ERR_NAMESPACE_NOT_ACTIVE">>, 409,
+                     iolist_to_binary([<<"Namespace '">>, Namespace, <<"' is not active (status=">>, Status, <<")">>])};
+                true ->
+                    validate_pre_sequence_cfg(Namespace, Op, RawKey, RawVal, Opts, WasmCtx, Cfg)
+            end
+    end.
+
+validate_pre_sequence_cfg(Namespace, Op, RawKey, RawVal, Opts, WasmCtx, Cfg) ->
     Backend = maps:get(<<"backend">>, Cfg, <<"wasm_slot">>),
     SchemaVsn = maps:get(<<"schema_version">>, Cfg, <<"1.0.0">>),
     KeyType = maps:get(<<"key_type">>, Cfg, <<"int64">>),
@@ -238,67 +412,90 @@ validate_pre_sequence(Namespace, Op, RawKey, RawVal, Opts, WasmCtx) ->
     ReqType = maps:get(<<"type">>, Opts, ValType),
     ExpectedVer = maps:get(<<"expected_ver">>, Opts, undefined),
 
-    %% 1. Check Backend Capability for Operation & Data Type
-    CapCheck = case Op of
-        <<"prefix_scan">> ->
-            check_capability(Backend, <<"prefix_scan">>);
-        _ ->
-            case (KeyType =/= <<"int64">>) orelse (ReqType =/= <<"int64">> andalso ReqType =/= <<"any">>) of
-                true -> check_capability(Backend, <<"structured_doc">>);
-                false -> check_capability(Backend, <<"kv_core">>)
-            end
+    %% 0. Check Backend Availability
+    BackendAvail = case Backend of
+        <<"wasm_slot">> ->
+            {_WasmCallFun, WasmBase, _NodeMsg} = WasmCtx,
+            case WasmBase of
+                undefined -> {error, <<"ERR_BACKEND_UNAVAILABLE">>, 503, <<"WASM backend runtime is unavailable">>};
+                _ -> ok
+            end;
+        _ -> ok
     end,
 
-    case CapCheck of
-        false ->
-            {error, <<"ERR_CAPABILITY_UNSUPPORTED">>, 501,
-             iolist_to_binary([<<"Backend '">>, Backend, <<"' in namespace '">>, Namespace,
-                               <<"' does not support required capability for op='">>, Op,
-                               <<"' type='">>, ReqType, <<"'">>])};
-        true ->
-            %% 2. Validate Key Type
-            case validate_key(KeyType, RawKey) of
-                {error, KeyReason} ->
-                    {error, <<"ERR_INVALID_INPUT">>, 400, KeyReason};
-                {ok, NormKey} ->
-                    %% 3. Validate Value Type & Business Schema Rules (if Op == put)
-                    ValCheck = case Op of
-                        <<"put">> ->
-                            EffectiveType = if ValType == <<"any">> -> ReqType; true -> ValType end,
-                            validate_value_and_rules(EffectiveType, RawVal, Rules);
-                        _ ->
-                            {ok, <<"int64">>, 0, <<"0">>}
-                    end,
-                    case ValCheck of
-                        {error, ErrCode, Status, ValReason} ->
-                            {error, ErrCode, Status, ValReason};
-                        {ok, FinalType, NormVal, CanonicalValBin} ->
-                            %% 3b. Check Contract-Level Authentication Requirement (require_auth: true)
-                            case check_auth_requirement(Op, Rules, Opts) of
-                                {error, AuthReason} ->
-                                    {error, <<"ERR_UNAUTHORIZED">>, 403, AuthReason};
-                                ok ->
-                                    %% 3c. Check WASM Slot Capacity Limit & In-WASM Contract Gate (db_check_put_ns)
-                                    case check_wasm_capacity(Op, Backend, Namespace, NormKey, NormVal, Rules, WasmCtx) of
-                                        {error, CapCode, CapStatus, CapReason} ->
-                                            {error, CapCode, CapStatus, CapReason};
+    case BackendAvail of
+        {error, ErrBackendCode, ErrBackendStatus, ErrBackendMsg} ->
+            {error, ErrBackendCode, ErrBackendStatus, ErrBackendMsg};
+        ok ->
+            %% 1. Check Backend Capability for Operation & Data Type
+            CapCheck = case Op of
+                <<"prefix_scan">> ->
+                    check_capability(Backend, <<"prefix_scan">>);
+                _ ->
+                    case (KeyType =/= <<"int64">>) orelse (ReqType =/= <<"int64">> andalso ReqType =/= <<"any">>) of
+                        true -> check_capability(Backend, <<"structured_doc">>);
+                        false -> check_capability(Backend, <<"kv_core">>)
+                    end
+            end,
+
+            case CapCheck of
+                false ->
+                    {error, <<"ERR_CAPABILITY_UNSUPPORTED">>, 501,
+                     iolist_to_binary([<<"Backend '">>, Backend, <<"' in namespace '">>, Namespace,
+                                       <<"' does not support required capability for op='">>, Op,
+                                       <<"' type='">>, ReqType, <<"'">>])};
+                true ->
+                    %% 2. Validate Key Type
+                    case validate_key(KeyType, RawKey) of
+                        {error, KeyReason} ->
+                            {error, <<"ERR_INVALID_KEY">>, 400, KeyReason};
+                        {ok, NormKey} ->
+                            %% 3. Validate Value Type & Business Schema Rules (or existence on del)
+                            ValCheck = case Op of
+                                <<"put">> ->
+                                    EffectiveType = if ValType == <<"any">> -> ReqType; true -> ValType end,
+                                    validate_value_and_rules(EffectiveType, RawVal, Rules);
+                                <<"del">> ->
+                                    case check_record_exists(Backend, Namespace, NormKey, WasmCtx) of
+                                        false ->
+                                            {error, <<"ERR_NOT_FOUND">>, 404, <<"Record does not exist">>};
+                                        true ->
+                                            {ok, ValType, 0, <<"0">>}
+                                    end;
+                                _ ->
+                                    {ok, <<"int64">>, 0, <<"0">>}
+                            end,
+                            case ValCheck of
+                                {error, ErrCode, Status, ValReason} ->
+                                    {error, ErrCode, Status, ValReason};
+                                {ok, FinalType, NormVal, CanonicalValBin} ->
+                                    %% 3b. Check Contract-Level Authentication Requirement (require_auth: true)
+                                    case check_auth_requirement(Op, Rules, Opts) of
+                                        {error, AuthReason} ->
+                                            {error, <<"ERR_UNAUTHORIZED">>, 403, AuthReason};
                                         ok ->
-                                            %% 4. Check Optimistic Concurrency Control / CAS (if expected_ver specified)
-                                            case check_cas_version(Backend, Namespace, NormKey, ExpectedVer, WasmCtx) of
-                                                {error, CasReason, CurrentVer} ->
-                                                    {error, <<"ERR_VERSION_CONFLICT">>, 409,
-                                                     iolist_to_binary([CasReason, <<" (current_ver=">>, integer_to_binary(CurrentVer), <<")">>])};
+                                            %% 3c. Check WASM Slot Capacity Limit & In-WASM Contract Gate (db_check_put_ns)
+                                            case check_wasm_capacity(Op, Backend, Namespace, NormKey, NormVal, Rules, WasmCtx) of
+                                                {error, CapCode, CapStatus, CapReason} ->
+                                                    {error, CapCode, CapStatus, CapReason};
                                                 ok ->
-                                                    {ok, #{
-                                                        <<"contract_version">> => ?CONTRACT_VERSION,
-                                                        <<"namespace">> => Namespace,
-                                                        <<"schema_version">> => SchemaVsn,
-                                                        <<"backend">> => Backend,
-                                                        <<"key">> => NormKey,
-                                                        <<"val">> => NormVal,
-                                                        <<"val_type">> => FinalType,
-                                                        <<"canonical_val">> => CanonicalValBin
-                                                    }}
+                                                    %% 4. Check Optimistic Concurrency Control / CAS (if expected_ver specified)
+                                                    case check_cas_version(Backend, Namespace, NormKey, ExpectedVer, WasmCtx) of
+                                                        {error, CasReason, CurrentVer} ->
+                                                            {error, <<"ERR_VERSION_CONFLICT">>, 409,
+                                                             iolist_to_binary([CasReason, <<" (current_ver=">>, integer_to_binary(CurrentVer), <<")">>])};
+                                                        ok ->
+                                                            {ok, #{
+                                                                <<"contract_version">> => ?CONTRACT_VERSION,
+                                                                <<"namespace">> => Namespace,
+                                                                <<"schema_version">> => SchemaVsn,
+                                                                <<"backend">> => Backend,
+                                                                <<"key">> => NormKey,
+                                                                <<"val">> => NormVal,
+                                                                <<"val_type">> => FinalType,
+                                                                <<"canonical_val">> => CanonicalValBin
+                                                            }}
+                                                    end
                                             end
                                     end
                             end
@@ -466,6 +663,22 @@ check_cas_version(<<"ets_doc">>, Ns, Key, ExpectedVer, _WasmCtx) ->
        true -> {error, <<"CAS expected_ver mismatch">>, CurrVer}
     end.
 
+check_record_exists(<<"wasm_slot">>, <<"default">>, Key, {WasmCallFun, WasmBase, NodeMsg}) when is_integer(Key) ->
+    WasmCallFun(WasmBase, <<"db_has">>, [Key], NodeMsg, 0) =:= 1;
+check_record_exists(<<"wasm_slot">>, Ns, Key, {WasmCallFun, WasmBase, NodeMsg}) when is_integer(Key) ->
+    NsId = namespace_id_64(Ns),
+    HasFun = wasm_export_name(Ns, <<"has">>, <<"db_has_ns">>),
+    WasmCallFun(WasmBase, HasFun, [NsId, Key], NodeMsg, 0) =:= 1;
+check_record_exists(<<"ets_doc">>, Ns, Key, _WasmCtx) ->
+    init_tables(),
+    KeyBin = to_key_bin(Key),
+    case ets:lookup(?DOC_BACKEND_TABLE, {Ns, KeyBin}) of
+        [{{Ns, KeyBin}, #{ <<"active">> := true }}] -> true;
+        _ -> false
+    end;
+check_record_exists(_Backend, _Ns, _Key, _WasmCtx) ->
+    false.
+
 %% ============================================================================
 %% Canonical Encoding & 64-bit Merkle-XOR Hashing
 %% ============================================================================
@@ -567,10 +780,14 @@ bytes_to_u64(Bin) when is_binary(Bin) ->
 %% ============================================================================
 
 wasm_export_name(Ns, OpKey, DefaultFun) ->
-    Cfg = get_namespace_config(Ns),
-    case maps:get(<<"connector">>, Cfg, undefined) of
-        #{ <<"exports">> := Exports } when is_map(Exports) ->
-            maps:get(OpKey, Exports, DefaultFun);
+    case get_namespace_config(Ns) of
+        {ok, Cfg} ->
+            case maps:get(<<"connector">>, Cfg, undefined) of
+                #{ <<"exports">> := Exports } when is_map(Exports) ->
+                    maps:get(OpKey, Exports, DefaultFun);
+                _ ->
+                    DefaultFun
+            end;
         _ ->
             DefaultFun
     end.
@@ -618,25 +835,29 @@ execute_backend_put(<<"ets_doc">>, Ns, Key, Val, Seq, CurrentRoot, _WasmCtx) ->
 
 execute_backend_del(<<"wasm_slot">>, <<"default">>, Key, Seq, {WasmCallFun, WasmBase, NodeMsg}) ->
     NewRoot = WasmCallFun(WasmBase, <<"db_del">>, [Key, Seq], NodeMsg, 0),
-    {ok, NewRoot, 0};
+    Ver = WasmCallFun(WasmBase, <<"db_version">>, [Key], NodeMsg, 1),
+    {ok, NewRoot, Ver};
 execute_backend_del(<<"wasm_slot">>, Ns, Key, Seq, {WasmCallFun, WasmBase, NodeMsg}) ->
     NsId = namespace_id_64(Ns),
     DelFun = wasm_export_name(Ns, <<"del">>, <<"db_del_ns">>),
+    VerFun = wasm_export_name(Ns, <<"version">>, <<"db_version_ns">>),
     NewRoot = WasmCallFun(WasmBase, DelFun, [NsId, Key, Seq], NodeMsg, 0),
-    {ok, NewRoot, 0};
+    Ver = WasmCallFun(WasmBase, VerFun, [NsId, Key], NodeMsg, 1),
+    {ok, NewRoot, Ver};
 execute_backend_del(<<"ets_doc">>, Ns, Key, Seq, {CurrentRoot}) ->
     init_tables(),
     KeyBin = to_key_bin(Key),
     KeyHashInt = bytes_to_u64(iolist_to_binary([Ns, <<":">>, KeyBin])),
-    NewRoot = case ets:lookup(?DOC_BACKEND_TABLE, {Ns, KeyBin}) of
+    {NewRoot, TombstoneVer} = case ets:lookup(?DOC_BACKEND_TABLE, {Ns, KeyBin}) of
         [{{Ns, KeyBin}, Rec = #{ <<"active">> := true, <<"val_hash">> := OldVH, <<"ver">> := OldV }}] ->
             OldH = canonical_hash_64(KeyHashInt, OldVH, OldV),
-            ets:insert(?DOC_BACKEND_TABLE, {{Ns, KeyBin}, Rec#{ <<"active">> => false, <<"last_seq">> => Seq }}),
-            to_signed_64((CurrentRoot bxor OldH) band 16#FFFFFFFFFFFFFFFF);
+            NewV = OldV + 1,
+            ets:insert(?DOC_BACKEND_TABLE, {{Ns, KeyBin}, Rec#{ <<"active">> => false, <<"ver">> => NewV, <<"last_seq">> => Seq }}),
+            {to_signed_64((CurrentRoot bxor OldH) band 16#FFFFFFFFFFFFFFFF), NewV};
         _ ->
-            CurrentRoot
+            {CurrentRoot, 0}
     end,
-    {ok, NewRoot, 0}.
+    {ok, NewRoot, TombstoneVer}.
 
 execute_backend_get(<<"wasm_slot">>, <<"default">>, Key, {WasmCallFun, WasmBase, NodeMsg}) ->
     HasKey = WasmCallFun(WasmBase, <<"db_has">>, [Key], NodeMsg, 0),
@@ -674,14 +895,14 @@ execute_backend_get(<<"ets_doc">>, Ns, Key, _WasmCtx) ->
 
 execute_backend_exists(<<"wasm_slot">>, <<"default">>, Key, {WasmCallFun, WasmBase, NodeMsg}) ->
     HasKey = WasmCallFun(WasmBase, <<"db_has">>, [Key], NodeMsg, 0),
-    Ver = case HasKey of 1 -> WasmCallFun(WasmBase, <<"db_version">>, [Key], NodeMsg, 0); _ -> 0 end,
+    Ver = WasmCallFun(WasmBase, <<"db_version">>, [Key], NodeMsg, 0),
     {ok, #{ <<"exists">> => (HasKey == 1), <<"ver">> => Ver }};
 execute_backend_exists(<<"wasm_slot">>, Ns, Key, {WasmCallFun, WasmBase, NodeMsg}) ->
     NsId = namespace_id_64(Ns),
     HasFun = wasm_export_name(Ns, <<"has">>, <<"db_has_ns">>),
     VerFun = wasm_export_name(Ns, <<"version">>, <<"db_version_ns">>),
     HasKey = WasmCallFun(WasmBase, HasFun, [NsId, Key], NodeMsg, 0),
-    Ver = case HasKey of 1 -> WasmCallFun(WasmBase, VerFun, [NsId, Key], NodeMsg, 0); _ -> 0 end,
+    Ver = WasmCallFun(WasmBase, VerFun, [NsId, Key], NodeMsg, 0),
     {ok, #{ <<"exists">> => (HasKey == 1), <<"ver">> => Ver }};
 execute_backend_exists(<<"ets_doc">>, Ns, Key, _WasmCtx) ->
     init_tables(),
@@ -689,6 +910,8 @@ execute_backend_exists(<<"ets_doc">>, Ns, Key, _WasmCtx) ->
     case ets:lookup(?DOC_BACKEND_TABLE, {Ns, KeyBin}) of
         [{{Ns, KeyBin}, #{ <<"active">> := true, <<"ver">> := Ver }}] ->
             {ok, #{ <<"exists">> => true, <<"ver">> => Ver }};
+        [{{Ns, KeyBin}, #{ <<"active">> := false, <<"ver">> := TombstoneVer }}] ->
+            {ok, #{ <<"exists">> => false, <<"ver">> => TombstoneVer }};
         _ ->
             {ok, #{ <<"exists">> => false, <<"ver">> => 0 }}
     end.

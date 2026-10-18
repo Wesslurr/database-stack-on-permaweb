@@ -169,11 +169,11 @@ async function main() {
     throw new Error(`Tombstone bug! Colliding key ${keyB} lost after deleting ${keyA}: ${JSON.stringify(getAfterDelB)}`);
   }
 
-  // Re-insert keyA and verify version increments monotonically to 2 (not reset to 1)
+  // Re-insert keyA and verify version increments monotonically to 3 (1 -> 2 on delete -> 3 on re-insert)
   await httpGet(`${HOT_URL}/put?key=${keyA}&val=33333`); // seq 24
   expectedKV.set(keyA, 33333);
   const getReinsertedA = await httpGet(`${HOT_URL}/get?key=${keyA}`);
-  if (!isTrue(getReinsertedA.found) || Number(getReinsertedA.val) !== 33333 || Number(getReinsertedA.ver) !== 2) {
+  if (!isTrue(getReinsertedA.found) || Number(getReinsertedA.val) !== 33333 || Number(getReinsertedA.ver) !== 3) {
     throw new Error(`Tombstone re-insert version continuity failed: ${JSON.stringify(getReinsertedA)}`);
   }
 
@@ -735,27 +735,25 @@ async function main() {
   }
   if (!caughtBadWasm) throw new Error('Preflight gate failed to block missing WASM export function!');
 
-  // 3. Hanging Lua Policy Handler (infinite loop) MUST abort before Arweave upload
-  const hangingLuaContract = defineContract({
-    namespace: 'test.hanging_policy',
+  // 3. Invalid Policy Action (e.g. non-allowlisted action or forbidden override) MUST abort before Arweave upload
+  const badPolicyContract = defineContract({
+    namespace: 'test.bad_policy',
     policy: {
-      REJECTED_SCHEMA_VIOLATION: 'return function(event) while true do end end'
+      REJECTED_SCHEMA_VIOLATION: 'FORCE_COMMIT'
     }
   });
-  let caughtHangingLua = false;
+  let caughtBadPolicy = false;
   try {
-    await hangingLuaContract.publishToArweave({ gatewayUrl: 'http://127.0.0.1:1984' });
+    await badPolicyContract.publishToArweave({ gatewayUrl: 'http://127.0.0.1:1984' });
   } catch (err) {
-    if (err.name === 'ContractPreflightError' && err.stage === 'LUA_POLICY_SIMULATION') {
-      caughtHangingLua = true;
+    if (err.name === 'ContractPreflightError' && err.stage === 'POLICY_ALLOWLIST_VALIDATION') {
+      caughtBadPolicy = true;
     }
   }
-  if (!caughtHangingLua) throw new Error('Preflight gate failed to abort hanging Lua infinite loop!');
-  console.log('  * Preflight Sandbox:  Incoherent schema, missing WASM export & hanging Lua loop 100% blocked before upload!');
+  if (!caughtBadPolicy) throw new Error('Preflight gate failed to abort forbidden policy action!');
+  console.log('  * Preflight Sandbox:  Incoherent schema, missing WASM export & invalid policy action 100% blocked before upload!');
 
-  // 13a. Formulate Contract + WASM Connector via SDK with Dynamic Lua Policy Handler ($Y$) & Publish to Arweave WITHOUT any Node URL
-  const customLuaPolicyHandler = 'return function(event) return "NOTIFY_SEC_TEAM_" .. tostring(event.namespace) .. "_VERDICT_" .. tostring(event.verdict) end';
-
+  // 13a. Formulate Contract + WASM Connector via SDK with Allowlisted Policy Action & Publish to Arweave WITHOUT any Node URL
   const vaultContract = defineContract({
     namespace: 'vault.assets',
     backend: 'wasm_slot',
@@ -776,7 +774,7 @@ async function main() {
       }
     },
     policy: {
-      REJECTED_SCHEMA_VIOLATION: customLuaPolicyHandler
+      REJECTED_SCHEMA_VIOLATION: 'CUT_BRANCH_AND_REJECT_INVALID_SCHEMA'
     }
   });
 
@@ -845,20 +843,16 @@ async function main() {
     commit36.official_seq !== 36 ||
     commit36.arweave_wasm_executions !== 1 ||
     !commit36.autonomously_loaded_contracts.includes(pubRes.contractTxId) ||
-    domain.policyCircuit.REJECTED_SCHEMA_VIOLATION !== customLuaPolicyHandler
+    domain.policyCircuit.REJECTED_SCHEMA_VIOLATION !== 'CUT_BRANCH_AND_REJECT_INVALID_SCHEMA'
   ) {
     throw new Error(`Arbitrator autonomous commit 35..36 failed: ${JSON.stringify(commit36)}`);
   }
 
-  // Verify that when Arbitrator evaluates REJECTED_SCHEMA_VIOLATION on vault.assets,
-  // the custom Lua handler ($Y$) dynamically executes with incident context ($X$)
-  const luaPolicyEval = domain.resolvePolicy('REJECTED_SCHEMA_VIOLATION', {
-    seq: 37,
-    namespace: 'vault.assets'
-  });
-  console.log(`  * Lua Policy Dynamic: Incident -> Action: '${luaPolicyEval.action}' (Guardrail Blocked: ${luaPolicyEval.guardrail_triggered})`);
-  if (luaPolicyEval.action !== 'NOTIFY_SEC_TEAM_vault.assets_VERDICT_REJECTED_SCHEMA_VIOLATION') {
-    throw new Error(`Dynamic Lua Policy handler did not produce expected output: ${JSON.stringify(luaPolicyEval)}`);
+  // Verify policy resolution and guardrail on Arbitrator
+  const policyEval = domain.resolvePolicy('REJECTED_SCHEMA_VIOLATION');
+  console.log(`  * Policy Resolution:  Verdict REJECTED_SCHEMA_VIOLATION -> Action '${policyEval.action}' (Guardrail Blocked: ${policyEval.guardrail_triggered})`);
+  if (policyEval.action !== 'CUT_BRANCH_AND_REJECT_INVALID_SCHEMA') {
+    throw new Error(`Policy resolution did not produce expected output: ${JSON.stringify(policyEval)}`);
   }
 
   // 13d. Prove In-WASM Linear Memory Contract Enforcement inside the Rust WASM Engine itself

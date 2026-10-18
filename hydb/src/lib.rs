@@ -404,6 +404,7 @@ pub extern "C" fn db_del_ns(ns: i64, key: i64, seq: i64) -> i64 {
                 let h = record_hash(ckey, rec.val, rec.ver);
                 DB.state_root ^= h;
                 rec.active = SLOT_TOMBSTONE;
+                rec.ver = rec.ver.wrapping_add(1);
                 rec.last_seq = useq;
                 if DB.count > 0 {
                     DB.count -= 1;
@@ -443,7 +444,7 @@ pub extern "C" fn db_version_ns(ns: i64, key: i64) -> i64 {
         for i in 0..TABLE_SIZE {
             let slot = (start_slot + i) % TABLE_SIZE;
             let rec = &DB.records[slot];
-            if rec.active == SLOT_ACTIVE && rec.ns == uns && rec.key == ukey {
+            if (rec.active == SLOT_ACTIVE || rec.active == SLOT_TOMBSTONE) && rec.ns == uns && rec.key == ukey {
                 return rec.ver as i64;
             }
             if rec.active == SLOT_EMPTY {

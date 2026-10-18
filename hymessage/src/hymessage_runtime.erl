@@ -1034,61 +1034,91 @@ handle_call({contract_register_schema, Namespace, Cfg, ReqEpoch}, _From, State =
                 <<"error">> => <<"fenced_stale_epoch">>
             }}, State};
         {ok, Epoch} ->
-            WasmBooted = boot_arweave_wasm_for_namespace(Namespace, Cfg, NodeMsg),
             CleanCfg = maps:remove(<<"wasm_bin">>, Cfg),
-            {ok, Entry} = hydb_contract:register_namespace(Namespace, CleanCfg),
-            {ActiveWasmBase, _IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
-            _ = hydb_contract:configure_wasm_contract(Namespace, Entry, {fun wasm_call/5, ActiveWasmBase, NodeMsg}),
-            CanonicalSchemaBin = hydb_contract:canonical_encode_schema(Entry),
-            Seq = ets:update_counter(?TABLE, seq, 1),
-            [{latest_hash, PrevHash}] = ets:lookup(?TABLE, latest_hash),
-            [{state_root, StateRoot}] = ets:lookup(?TABLE, state_root),
-            NewHash = build_event_hash(PrevHash, Seq, <<"24">>, Namespace, <<"__schema__">>, <<"schema">>, CanonicalSchemaBin),
-            ets:insert(?TABLE, {latest_hash, NewHash}),
+            case hydb_contract:validate_schema_definition(Namespace, CleanCfg) of
+                {error, SchemaErrCode, SchemaStatus, SchemaReason} ->
+                    {reply, {error, #{
+                        <<"ok">> => false,
+                        <<"status">> => SchemaStatus,
+                        <<"error_code">> => SchemaErrCode,
+                        <<"error">> => SchemaReason,
+                        <<"namespace">> => Namespace,
+                        <<"contract_version">> => hydb_contract:contract_version()
+                    }}, State};
+                ok ->
+                    WasmBooted = boot_arweave_wasm_for_namespace(Namespace, Cfg, NodeMsg),
+                    {ok, Entry} = hydb_contract:register_namespace(Namespace, CleanCfg),
+                    {ActiveWasmBase, _IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
+                    case hydb_contract:configure_wasm_contract(Namespace, Entry, {fun wasm_call/5, ActiveWasmBase, NodeMsg}) of
+                        {error, WasmErrCode, WasmStatus, WasmReason} ->
+                            hydb_contract:unregister_namespace(Namespace),
+                            {reply, {error, #{
+                                <<"ok">> => false,
+                                <<"status">> => WasmStatus,
+                                <<"error_code">> => WasmErrCode,
+                                <<"error">> => WasmReason,
+                                <<"namespace">> => Namespace,
+                                <<"contract_version">> => hydb_contract:contract_version()
+                            }}, State};
+                        ok ->
+                            CanonicalSchemaBin = hydb_contract:canonical_encode_schema(Entry),
+                            Seq = ets:update_counter(?TABLE, seq, 1),
+                            [{latest_hash, PrevHash}] = ets:lookup(?TABLE, latest_hash),
+                            [{state_root, StateRoot}] = ets:lookup(?TABLE, state_root),
+                            NewHash = build_event_hash(PrevHash, Seq, <<"24">>, Namespace, <<"__schema__">>, <<"schema">>, CanonicalSchemaBin),
+                            ets:insert(?TABLE, {latest_hash, NewHash}),
 
-            Backend = maps:get(<<"backend">>, Entry),
-            SchemaVsn = maps:get(<<"schema_version">>, Entry),
-            [{history, Hist}] = ets:lookup(?TABLE, history),
-            Event = #{
-                <<"contract_version">> => hydb_contract:contract_version(),
-                <<"namespace">> => Namespace,
-                <<"schema_version">> => SchemaVsn,
-                <<"backend">> => Backend,
-                <<"epoch">> => Epoch,
-                <<"seq">> => Seq,
-                <<"action">> => <<"register_schema">>,
-                <<"key">> => <<"__schema__">>,
-                <<"val">> => Entry,
-                <<"val_type">> => <<"schema">>,
-                <<"canonical_val">> => CanonicalSchemaBin,
-                <<"ver">> => 1,
-                <<"prev_hash">> => PrevHash,
-                <<"hash">> => NewHash,
-                <<"state_root">> => StateRoot
-            },
-            NewHist = [Event | lists:sublist(Hist, 49)],
-            ets:insert(?TABLE, {history, NewHist}),
-            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq),
-            Result = #{
-                <<"ok">> => true,
-                <<"error_code">> => <<"OK">>,
-                <<"device">> => <<"hymessage@1.0">>,
-                <<"contract_version">> => hydb_contract:contract_version(),
-                <<"epoch">> => Epoch,
-                <<"seq">> => Seq,
-                <<"op">> => <<"register_schema">>,
-                <<"namespace">> => Namespace,
-                <<"registered_schema">> => Entry,
-                <<"canonical_schema">> => CanonicalSchemaBin,
-                <<"wasm_vm_booted_from_arweave">> => WasmBooted,
-                <<"wasm_contract_configured">> => (Backend =:= <<"wasm_slot">>),
-                <<"capabilities">> => hydb_contract:backend_capabilities(Backend),
-                <<"hash">> => NewHash,
-                <<"state_root">> => StateRoot,
-                <<"replicated">> => Replicated,
-                <<"su_count">> => SuCount
-            },
-            {reply, {ok, Result}, State}
+                            Backend = maps:get(<<"backend">>, Entry),
+                            SchemaVsn = maps:get(<<"schema_version">>, Entry),
+                            [{history, Hist}] = ets:lookup(?TABLE, history),
+                            Event = #{
+                                <<"contract_version">> => hydb_contract:contract_version(),
+                                <<"namespace">> => Namespace,
+                                <<"schema_version">> => SchemaVsn,
+                                <<"backend">> => Backend,
+                                <<"epoch">> => Epoch,
+                                <<"seq">> => Seq,
+                                <<"action">> => <<"register_schema">>,
+                                <<"key">> => <<"__schema__">>,
+                                <<"val">> => Entry,
+                                <<"val_type">> => <<"schema">>,
+                                <<"canonical_val">> => CanonicalSchemaBin,
+                                <<"ver">> => 1,
+                                <<"prev_hash">> => PrevHash,
+                                <<"hash">> => NewHash,
+                                <<"state_root">> => StateRoot
+                            },
+                            NewHist = [Event | lists:sublist(Hist, 49)],
+                            ets:insert(?TABLE, {history, NewHist}),
+                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq),
+                            case Replicated of
+                                true -> hydb_contract:update_namespace_status(Namespace, <<"replicated">>);
+                                false -> ok
+                            end,
+                            Result = #{
+                                <<"ok">> => true,
+                                <<"error_code">> => <<"OK">>,
+                                <<"device">> => <<"hymessage@1.0">>,
+                                <<"contract_version">> => hydb_contract:contract_version(),
+                                <<"epoch">> => Epoch,
+                                <<"seq">> => Seq,
+                                <<"op">> => <<"register_schema">>,
+                                <<"namespace">> => Namespace,
+                                <<"status">> => case Replicated of true -> <<"replicated">>; false -> <<"configured">> end,
+                                <<"contract_status">> => case Replicated of true -> <<"replicated">>; false -> <<"configured">> end,
+                                <<"registered_schema">> => Entry,
+                                <<"canonical_schema">> => CanonicalSchemaBin,
+                                <<"wasm_vm_booted_from_arweave">> => WasmBooted,
+                                <<"wasm_contract_configured">> => (Backend =:= <<"wasm_slot">>),
+                                <<"capabilities">> => hydb_contract:backend_capabilities(Backend),
+                                <<"hash">> => NewHash,
+                                <<"state_root">> => StateRoot,
+                                <<"replicated">> => Replicated,
+                                <<"su_count">> => SuCount
+                            },
+                            {reply, {ok, Result}, State}
+                    end
+            end
     end;
 
 handle_call({promote_epoch, NewEpoch}, _From, State) ->
@@ -1274,141 +1304,171 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
 
 handle_call({contract_get, Namespace, RawKey}, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMsg}) ->
     T0 = os:perf_counter(nanosecond),
-    Cfg = hydb_contract:get_namespace_config(Namespace),
-    Backend = maps:get(<<"backend">>, Cfg, <<"wasm_slot">>),
-    Epoch = case ets:lookup(?TABLE, epoch) of [{epoch, Ep}] -> Ep; _ -> 1 end,
-    {ActiveWasmBase, IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
-    WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
-    WasmSource = case IsCustomWasm of true -> <<"arweave_tx">>; false -> <<"node_default">> end,
+    case hydb_contract:get_namespace_config(Namespace) of
+        {error, not_found} ->
+            {reply, {error, #{
+                <<"ok">> => false,
+                <<"status">> => 404,
+                <<"error_code">> => <<"ERR_NAMESPACE_UNKNOWN">>,
+                <<"namespace">> => Namespace,
+                <<"error">> => iolist_to_binary([<<"Namespace '">>, Namespace, <<"' is not registered">>])
+            }}, State};
+        {ok, Cfg} ->
+            Backend = maps:get(<<"backend">>, Cfg, <<"wasm_slot">>),
+            Epoch = case ets:lookup(?TABLE, epoch) of [{epoch, Ep}] -> Ep; _ -> 1 end,
+            {ActiveWasmBase, IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
+            WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
+            WasmSource = case IsCustomWasm of true -> <<"arweave_tx">>; false -> <<"node_default">> end,
 
-    case Backend of
-        <<"wasm_slot">> ->
-            NormKey = to_integer(RawKey, undefined),
-            if NormKey =:= undefined ->
-                {reply, {error, #{
-                    <<"ok">> => false,
-                    <<"status">> => 400,
-                    <<"error_code">> => <<"ERR_INVALID_INPUT">>,
-                    <<"namespace">> => Namespace,
-                    <<"error">> => <<"Key must be int64 for wasm_slot backend">>
-                }}, State};
-               true ->
-                case hydb_contract:execute_backend_get(<<"wasm_slot">>, Namespace, NormKey, WasmCtx) of
-                    {ok, #{ <<"val">> := Val, <<"ver">> := Ver }} ->
-                        T1 = os:perf_counter(nanosecond),
-                        {reply, {ok, #{
-                            <<"ok">> => true,
-                            <<"error_code">> => <<"OK">>,
-                            <<"device">> => <<"hymessage@1.0">>,
-                            <<"contract_version">> => hydb_contract:contract_version(),
+            case Backend of
+                <<"wasm_slot">> ->
+                    NormKey = to_integer(RawKey, undefined),
+                    if NormKey =:= undefined ->
+                        {reply, {error, #{
+                            <<"ok">> => false,
+                            <<"status">> => 400,
+                            <<"error_code">> => <<"ERR_INVALID_INPUT">>,
                             <<"namespace">> => Namespace,
-                            <<"backend">> => Backend,
-                            <<"wasm_source">> => WasmSource,
-                            <<"epoch">> => Epoch,
-                            <<"key">> => NormKey,
-                            <<"val">> => Val,
-                            <<"ver">> => Ver,
-                            <<"found">> => true,
-                            <<"duration_ms">> => ((T1 - T0) / 1000.0) / 1000.0
+                            <<"error">> => <<"Key must be int64 for wasm_slot backend">>
                         }}, State};
-                    {error, ErrCode, _Status} ->
-                        T1 = os:perf_counter(nanosecond),
-                        {reply, {ok, #{
-                            <<"ok">> => true,
-                            <<"error_code">> => ErrCode,
-                            <<"device">> => <<"hymessage@1.0">>,
-                            <<"contract_version">> => hydb_contract:contract_version(),
-                            <<"namespace">> => Namespace,
-                            <<"backend">> => Backend,
-                            <<"wasm_source">> => WasmSource,
-                            <<"epoch">> => Epoch,
-                            <<"key">> => NormKey,
-                            <<"val">> => -1,
-                            <<"ver">> => 0,
-                            <<"found">> => false,
-                            <<"duration_ms">> => ((T1 - T0) / 1000.0) / 1000.0
-                        }}, State}
-                end
-            end;
-        _ ->
-            case hydb_contract:execute_backend_get(Backend, Namespace, RawKey, WasmCtx) of
-                {ok, #{ <<"val">> := Val, <<"ver">> := Ver }} ->
-                    T1 = os:perf_counter(nanosecond),
-                    {reply, {ok, #{
-                        <<"ok">> => true,
-                        <<"error_code">> => <<"OK">>,
-                        <<"device">> => <<"hymessage@1.0">>,
-                        <<"contract_version">> => hydb_contract:contract_version(),
-                        <<"namespace">> => Namespace,
-                        <<"backend">> => Backend,
-                        <<"epoch">> => Epoch,
-                        <<"key">> => RawKey,
-                        <<"val">> => Val,
-                        <<"ver">> => Ver,
-                        <<"found">> => true,
-                        <<"duration_ms">> => ((T1 - T0) / 1000.0) / 1000.0
-                    }}, State};
-                {error, ErrCode, _Status} ->
-                    T1 = os:perf_counter(nanosecond),
-                    {reply, {ok, #{
-                        <<"ok">> => true,
-                        <<"error_code">> => ErrCode,
-                        <<"device">> => <<"hymessage@1.0">>,
-                        <<"contract_version">> => hydb_contract:contract_version(),
-                        <<"namespace">> => Namespace,
-                        <<"backend">> => Backend,
-                        <<"epoch">> => Epoch,
-                        <<"key">> => RawKey,
-                        <<"val">> => null,
-                        <<"ver">> => 0,
-                        <<"found">> => false,
-                        <<"duration_ms">> => ((T1 - T0) / 1000.0) / 1000.0
-                    }}, State}
+                       true ->
+                        case hydb_contract:execute_backend_get(<<"wasm_slot">>, Namespace, NormKey, WasmCtx) of
+                            {ok, #{ <<"val">> := Val, <<"ver">> := Ver }} ->
+                                T1 = os:perf_counter(nanosecond),
+                                {reply, {ok, #{
+                                    <<"ok">> => true,
+                                    <<"error_code">> => <<"OK">>,
+                                    <<"device">> => <<"hymessage@1.0">>,
+                                    <<"contract_version">> => hydb_contract:contract_version(),
+                                    <<"namespace">> => Namespace,
+                                    <<"backend">> => Backend,
+                                    <<"wasm_source">> => WasmSource,
+                                    <<"epoch">> => Epoch,
+                                    <<"key">> => NormKey,
+                                    <<"val">> => Val,
+                                    <<"ver">> => Ver,
+                                    <<"found">> => true,
+                                    <<"duration_ms">> => ((T1 - T0) / 1000.0) / 1000.0
+                                }}, State};
+                            {error, ErrCode, _Status} ->
+                                T1 = os:perf_counter(nanosecond),
+                                {reply, {ok, #{
+                                    <<"ok">> => true,
+                                    <<"error_code">> => ErrCode,
+                                    <<"device">> => <<"hymessage@1.0">>,
+                                    <<"contract_version">> => hydb_contract:contract_version(),
+                                    <<"namespace">> => Namespace,
+                                    <<"backend">> => Backend,
+                                    <<"wasm_source">> => WasmSource,
+                                    <<"epoch">> => Epoch,
+                                    <<"key">> => NormKey,
+                                    <<"val">> => -1,
+                                    <<"ver">> => 0,
+                                    <<"found">> => false,
+                                    <<"duration_ms">> => ((T1 - T0) / 1000.0) / 1000.0
+                                }}, State}
+                        end
+                    end;
+                _ ->
+                    case hydb_contract:execute_backend_get(Backend, Namespace, RawKey, WasmCtx) of
+                        {ok, #{ <<"val">> := Val, <<"ver">> := Ver }} ->
+                            T1 = os:perf_counter(nanosecond),
+                            {reply, {ok, #{
+                                <<"ok">> => true,
+                                <<"error_code">> => <<"OK">>,
+                                <<"device">> => <<"hymessage@1.0">>,
+                                <<"contract_version">> => hydb_contract:contract_version(),
+                                <<"namespace">> => Namespace,
+                                <<"backend">> => Backend,
+                                <<"epoch">> => Epoch,
+                                <<"key">> => RawKey,
+                                <<"val">> => Val,
+                                <<"ver">> => Ver,
+                                <<"found">> => true,
+                                <<"duration_ms">> => ((T1 - T0) / 1000.0) / 1000.0
+                            }}, State};
+                        {error, ErrCode, _Status} ->
+                            T1 = os:perf_counter(nanosecond),
+                            {reply, {ok, #{
+                                <<"ok">> => true,
+                                <<"error_code">> => ErrCode,
+                                <<"device">> => <<"hymessage@1.0">>,
+                                <<"contract_version">> => hydb_contract:contract_version(),
+                                <<"namespace">> => Namespace,
+                                <<"backend">> => Backend,
+                                <<"epoch">> => Epoch,
+                                <<"key">> => RawKey,
+                                <<"val">> => null,
+                                <<"ver">> => 0,
+                                <<"found">> => false,
+                                <<"duration_ms">> => ((T1 - T0) / 1000.0) / 1000.0
+                            }}, State}
+                    end
             end
     end;
 
 handle_call({contract_exists, Namespace, RawKey}, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMsg}) ->
-    Cfg = hydb_contract:get_namespace_config(Namespace),
-    Backend = maps:get(<<"backend">>, Cfg, <<"wasm_slot">>),
-    {ActiveWasmBase, _IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
-    WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
-    NormKey = case Backend of <<"wasm_slot">> -> to_integer(RawKey, 0); _ -> RawKey end,
-    {ok, #{ <<"exists">> := Exists, <<"ver">> := Ver }} = hydb_contract:execute_backend_exists(Backend, Namespace, NormKey, WasmCtx),
-    {reply, {ok, #{
-        <<"ok">> => true,
-        <<"error_code">> => <<"OK">>,
-        <<"contract_version">> => hydb_contract:contract_version(),
-        <<"namespace">> => Namespace,
-        <<"backend">> => Backend,
-        <<"key">> => NormKey,
-        <<"exists">> => Exists,
-        <<"ver">> => Ver
-    }}, State};
-
-handle_call({contract_scan, Namespace, Prefix}, _From, State) ->
-    Cfg = hydb_contract:get_namespace_config(Namespace),
-    Backend = maps:get(<<"backend">>, Cfg, <<"wasm_slot">>),
-    case hydb_contract:execute_backend_scan(Backend, Namespace, Prefix) of
-        {ok, Items} ->
+    case hydb_contract:get_namespace_config(Namespace) of
+        {error, not_found} ->
+            {reply, {error, #{
+                <<"ok">> => false,
+                <<"status">> => 404,
+                <<"error_code">> => <<"ERR_NAMESPACE_UNKNOWN">>,
+                <<"namespace">> => Namespace,
+                <<"error">> => iolist_to_binary([<<"Namespace '">>, Namespace, <<"' is not registered">>])
+            }}, State};
+        {ok, Cfg} ->
+            Backend = maps:get(<<"backend">>, Cfg, <<"wasm_slot">>),
+            {ActiveWasmBase, _IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
+            WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
+            NormKey = case Backend of <<"wasm_slot">> -> to_integer(RawKey, 0); _ -> RawKey end,
+            {ok, #{ <<"exists">> := Exists, <<"ver">> := Ver }} = hydb_contract:execute_backend_exists(Backend, Namespace, NormKey, WasmCtx),
             {reply, {ok, #{
                 <<"ok">> => true,
                 <<"error_code">> => <<"OK">>,
                 <<"contract_version">> => hydb_contract:contract_version(),
                 <<"namespace">> => Namespace,
                 <<"backend">> => Backend,
-                <<"prefix">> => Prefix,
-                <<"count">> => length(Items),
-                <<"items">> => Items
-            }}, State};
-        {error, ErrCode, HttpStatus, ReasonBin} ->
+                <<"key">> => NormKey,
+                <<"exists">> => Exists,
+                <<"ver">> => Ver
+            }}, State}
+    end;
+
+handle_call({contract_scan, Namespace, Prefix}, _From, State) ->
+    case hydb_contract:get_namespace_config(Namespace) of
+        {error, not_found} ->
             {reply, {error, #{
                 <<"ok">> => false,
-                <<"status">> => HttpStatus,
-                <<"error_code">> => ErrCode,
+                <<"status">> => 404,
+                <<"error_code">> => <<"ERR_NAMESPACE_UNKNOWN">>,
                 <<"namespace">> => Namespace,
-                <<"backend">> => Backend,
-                <<"error">> => ReasonBin
-            }}, State}
+                <<"error">> => iolist_to_binary([<<"Namespace '">>, Namespace, <<"' is not registered">>])
+            }}, State};
+        {ok, Cfg} ->
+            Backend = maps:get(<<"backend">>, Cfg, <<"wasm_slot">>),
+            case hydb_contract:execute_backend_scan(Backend, Namespace, Prefix) of
+                {ok, Items} ->
+                    {reply, {ok, #{
+                        <<"ok">> => true,
+                        <<"error_code">> => <<"OK">>,
+                        <<"contract_version">> => hydb_contract:contract_version(),
+                        <<"namespace">> => Namespace,
+                        <<"backend">> => Backend,
+                        <<"prefix">> => Prefix,
+                        <<"count">> => length(Items),
+                        <<"items">> => Items
+                    }}, State};
+                {error, ErrCode, HttpStatus, ReasonBin} ->
+                    {reply, {error, #{
+                        <<"ok">> => false,
+                        <<"status">> => HttpStatus,
+                        <<"error_code">> => ErrCode,
+                        <<"namespace">> => Namespace,
+                        <<"backend">> => Backend,
+                        <<"error">> => ReasonBin
+                    }}, State}
+            end
     end;
 
 handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMsg}) ->
@@ -1469,16 +1529,16 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
 
                             NewHash = build_event_hash(PrevHash, Seq, <<"22">>, Namespace, NormKey, <<"int64">>, <<"0">>),
 
-                            {WasmRoot1, DocRoot1} = case Backend of
+                            {WasmRoot1, DocRoot1, DelVer} = case Backend of
                                 <<"wasm_slot">> ->
-                                    {ok, NewInstanceWR, _} = hydb_contract:execute_backend_del(<<"wasm_slot">>, Namespace, NormKey, Seq, WasmCtx),
+                                    {ok, NewInstanceWR, DVer} = hydb_contract:execute_backend_del(<<"wasm_slot">>, Namespace, NormKey, Seq, WasmCtx),
                                     CombinedWR = apply_wasm_root_delta(Namespace, IsCustomWasm, NewInstanceWR, WasmRoot0),
                                     ets:insert(?TABLE, {wasm_root, CombinedWR}),
-                                    {CombinedWR, DocRoot0};
+                                    {CombinedWR, DocRoot0, DVer};
                                 <<"ets_doc">> ->
-                                    {ok, NewDR, _} = hydb_contract:execute_backend_del(<<"ets_doc">>, Namespace, NormKey, Seq, {DocRoot0}),
+                                    {ok, NewDR, DVer} = hydb_contract:execute_backend_del(<<"ets_doc">>, Namespace, NormKey, Seq, {DocRoot0}),
                                     ets:insert(?TABLE, {doc_root, NewDR}),
-                                    {WasmRoot0, NewDR}
+                                    {WasmRoot0, NewDR, DVer}
                             end,
                             StateRoot = combine_roots(WasmRoot1, DocRoot1),
                             ets:insert(?TABLE, {latest_hash, NewHash}),
@@ -1495,7 +1555,7 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                                 <<"action">> => <<"del">>,
                                 <<"key">> => NormKey,
                                 <<"val">> => 0,
-                                <<"ver">> => 0,
+                                <<"ver">> => DelVer,
                                 <<"prev_hash">> => PrevHash,
                                 <<"hash">> => NewHash,
                                 <<"state_root">> => StateRoot
@@ -1518,6 +1578,7 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                                 <<"seq">> => Seq,
                                 <<"op">> => <<"del">>,
                                 <<"key">> => NormKey,
+                                <<"ver">> => DelVer,
                                 <<"state_root">> => StateRoot,
                                 <<"hash">> => NewHash,
                                 <<"replicated">> => Replicated,
@@ -1725,6 +1786,7 @@ handle_call({replay, Events}, _From, State = #state{wasm_base = WasmBase, node_m
                 {ok, Entry} = hydb_contract:register_namespace(Namespace, SchemaCfg),
                 {ActiveWasmBase, _IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
                 _ = hydb_contract:configure_wasm_contract(Namespace, Entry, {fun wasm_call/5, ActiveWasmBase, NodeMsg}),
+                hydb_contract:update_namespace_status(Namespace, <<"replicated">>),
                 {WasmRoot0, DocRoot0, 1};
             {<<"del">>, <<"wasm_slot">>} ->
                 {ActiveWasmBase, IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
@@ -1822,8 +1884,9 @@ handle_call(reset, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMs
             end
     end,
     wasm_call(ActiveBase, <<"db_reset">>, [], NodeMsg, 0),
-    FinCfg = hydb_contract:get_namespace_config(<<"finance.balances">>),
+    {ok, FinCfg} = hydb_contract:get_namespace_config(<<"finance.balances">>),
     _ = hydb_contract:configure_wasm_contract(<<"finance.balances">>, FinCfg, {fun wasm_call/5, ActiveBase, NodeMsg}),
+    hydb_contract:update_namespace_status(<<"finance.balances">>, <<"replicated">>),
     {reply, ok, State#state{wasm_base = ActiveBase}};
 
 handle_call(_Request, _From, State) ->

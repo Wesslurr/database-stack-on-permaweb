@@ -15,10 +15,14 @@
 
 import AoLoader from '/home/weslur/database/vendor/HyperBEAM/_build/genesis_wasm/genesis-wasm-server/node_modules/@permaweb/ao-loader/dist/index.cjs';
 import Arweave from 'arweave';
-import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  DEFAULT_POLICY as SPEC_DEFAULT_POLICY,
+  resolvePolicy as specResolvePolicy,
+  validatePolicy as specValidatePolicy
+} from '../spec/hydb_contract_spec.mjs';
 
 const DB_DIR = '/home/weslur/database';
 const WALLET_PATH = join(DB_DIR, 'secrets/wallet.json');
@@ -37,81 +41,27 @@ let aoHandle = null;
 
 export const HYDB_CONTRACT_VERSION = 'hydb.core@1.0';
 
-// Pluggable Developer Policy Circuit
-export const DefaultPolicyCircuit = {
-  COMMITTED: 'COMMIT_CHECKPOINT_TO_LEDGER',
-  DUPLICATE_BATCH_IDEMPOTENT: 'RECORD_SU_ATTESTATION_IDEMPOTENT',
-  REJECTED_SEQUENCE_GAP: 'REQUEST_CATCHUP_FROM_SU_POOL',
-  REJECTED_OUT_OF_ORDER_BATCH: 'REJECT_MALFORMED_BATCH',
-  REJECTED_SCHEMA_VIOLATION: 'CUT_BRANCH_AND_REJECT_INVALID_SCHEMA',
-  REJECTED_CONTRACT_MISMATCH: 'REJECT_INCOMPATIBLE_CONTRACT_VERSION',
-  REJECTED_HASH_CHAIN_BROKEN: 'CUT_BRANCH_AND_FREEZE_EPOCH',
-  REJECTED_STATE_ROOT_MISMATCH: 'CUT_BRANCH_AND_SLASH_PROPOSER',
-  EQUIVOCATION_PROVEN: 'FREEZE_EPOCH_AND_PROMOTE_STANDBY_HOT',
-  FENCED_STALE_EPOCH: 'FENCE_AND_DROP_ZOMBIE_HOT',
-  REJECTED_UNAUTHORIZED_SENDER: 'DROP_UNAUTHORIZED_PACKET'
-};
-
-const FORBIDDEN_OVERRIDE_ACTIONS = new Set([
-  'COMMIT_CHECKPOINT_TO_LEDGER',
-  'FORCE_ACCEPT',
-  'FORCE_COMMIT',
-  'IGNORE_AND_COMMIT',
-  'OVERRIDE_VALID'
-]);
+// Pluggable Developer Policy Circuit — defaults & allowlist come from the canonical spec.
+export const DefaultPolicyCircuit = { ...SPEC_DEFAULT_POLICY };
 
 /**
  * Guardrail C: Policy Circuit can choose operational recovery response,
  * but can NEVER turn an invalid Arbitrator Verdict into a valid state commit.
  *
- * If `configured` is Lua code (or a function-returning Lua script), execute it
- * with incident context `event = { verdict, seq, epoch, namespace, sub_verdict, timestamp, node_id }`.
+ * Only actions listed in POLICY_ALLOWLIST[verdict] are honoured. Arbitrary code
+ * (e.g. Lua strings from a contract manifest) is NEVER executed here; any value
+ * outside the allowlist falls back to the verdict's safe default and is flagged.
  */
-export function resolvePolicyAction(policyCircuit, verdictKey, eventContext = {}) {
-  const configured = policyCircuit[verdictKey] || DefaultPolicyCircuit[verdictKey] || 'HALT_AND_ALERT';
-  
-  let evaluatedAction = configured;
-  if (typeof configured === 'string' && (configured.includes('function(') || configured.includes('return '))) {
-    try {
-      const payload = {
-        verdict: verdictKey,
-        seq: eventContext.seq ?? null,
-        epoch: eventContext.epoch ?? null,
-        namespace: eventContext.namespace ?? 'default',
-        sub_verdict: eventContext.sub_verdict ?? verdictKey,
-        timestamp: Date.now()
-      };
-      const runner = `
-        local json_raw = ${JSON.stringify(JSON.stringify(payload))}
-        local event = {}
-        for k, v in string.gmatch(json_raw, '"([^"]+)":([%w_%-%.]+)') do
-          event[k] = v
-        end
-        for k, v in string.gmatch(json_raw, '"([^"]+)":"([^"]+)"') do
-          event[k] = v
-        end
-        local handler = assert(load(${JSON.stringify(configured)}))()
-        local res = handler(event)
-        io.write(tostring(res or ''))
-      `;
-      const out = execFileSync('lua', ['-e', runner], { timeout: 1500, encoding: 'utf-8' }).trim();
-      if (out) {
-        evaluatedAction = out;
-      }
-    } catch (err) {
-      evaluatedAction = `LUA_POLICY_EXEC_ERROR(${err.message || 'RUNTIME_FAULT'})->${DefaultPolicyCircuit[verdictKey] || 'HALT_AND_ALERT'}`;
-    }
+export function resolvePolicyAction(policyCircuit, verdictKey, _eventContext = {}) {
+  const res = specResolvePolicy(policyCircuit, verdictKey);
+  if (res.guardrail_triggered) {
+    const rejected = typeof res.rejected_action === 'string' ? res.rejected_action.slice(0, 64) : String(res.rejected_action);
+    return {
+      action: `GUARDRAIL_BLOCKED_OVERRIDE(${rejected})->${res.action}`,
+      guardrail_triggered: true
+    };
   }
-
-  if (verdictKey !== 'COMMITTED' && verdictKey !== 'DUPLICATE_BATCH_IDEMPOTENT') {
-    if (FORBIDDEN_OVERRIDE_ACTIONS.has(String(evaluatedAction).toUpperCase())) {
-      return {
-        action: `GUARDRAIL_BLOCKED_OVERRIDE(${evaluatedAction})->${DefaultPolicyCircuit[verdictKey] || 'REJECT_AND_FREEZE'}`,
-        guardrail_triggered: true
-      };
-    }
-  }
-  return { action: evaluatedAction, guardrail_triggered: false };
+  return { action: res.action, guardrail_triggered: false };
 }
 
 
@@ -296,6 +246,11 @@ export class ArbitratorDomain {
       ...(config.connector ? { connector: config.connector } : {}),
       ...(config.policy ? { policy: config.policy } : {})
     };
+    if (config.policy && typeof config.policy === 'object') {
+      // Throws SpecError(ERR_POLICY_INVALID) for unknown verdicts or non-allowlisted actions.
+      // NOTE: policy is still merged into one global circuit; per-namespace scoping is Tahap 6/7.
+      specValidatePolicy(config.policy);
+    }
     this.schemas.set(namespace, entry);
     if (config.policy && typeof config.policy === 'object') {
       this.policyCircuit = { ...this.policyCircuit, ...config.policy };
@@ -853,6 +808,22 @@ export class ArbitratorDomain {
           }
         }
         if (parsedSchema.policy && typeof parsedSchema.policy === 'object') {
+          try {
+            specValidatePolicy(parsedSchema.policy);
+          } catch (policyErr) {
+            rollbackWasmRuntimes();
+            const pol = resolvePolicyAction(this.policyCircuit, 'REJECTED_CONTRACT_MISMATCH');
+            return {
+              ok: false,
+              status: 'AUDIT_REJECTED',
+              wasit_verdict: 'FRAUD_DETECTED_AND_CUT',
+              sub_verdict: 'REJECTED_CONTRACT_MISMATCH',
+              error_code: 'ERR_POLICY_INVALID',
+              policy_action: pol.action,
+              policy_guardrail_enforced: pol.guardrail_triggered,
+              reason: `register_schema at seq ${seq} carries an invalid policy: ${policyErr.message}`
+            };
+          }
           stagedPolicy = { ...stagedPolicy, ...parsedSchema.policy };
         }
         stagedSchemas.set(namespace, {
@@ -935,7 +906,7 @@ export class ArbitratorDomain {
             wasmRt.lastRoot64 = newWasmRoot;
             arweaveWasmExecutions++;
             if (cur && cur.active) {
-              stagedRecords.set(slotId, { ...cur, active: false });
+              stagedRecords.set(slotId, { ...cur, ver: cur.ver + 1, active: false });
             }
           }
         } else if (action === 'put') {
@@ -990,7 +961,7 @@ export class ArbitratorDomain {
           if (cur && cur.active) {
             const oldH = recordHash64(cur.keyHash64, cur.valHash64, cur.ver);
             stagedRoot64 = stagedRoot64 ^ oldH;
-            stagedRecords.set(slotId, { ...cur, active: false });
+            stagedRecords.set(slotId, { ...cur, ver: cur.ver + 1, active: false });
           }
         }
       }
