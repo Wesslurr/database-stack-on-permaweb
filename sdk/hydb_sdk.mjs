@@ -17,7 +17,9 @@ import {
   DEFAULT_POLICY,
   POLICY_ALLOWLIST,
   validatePolicy as specValidatePolicy,
-  validateSchema as specValidateSchema
+  validateSchema as specValidateSchema,
+  manifestHash as specManifestHash,
+  encodeManifest as specEncodeManifest
 } from '../spec/hydb_contract_spec.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -392,7 +394,7 @@ export class HyDBContract {
       ...(wasmTxId ? { wasm_tx_id: wasmTxId } : {}),
       ...(wasmSha256 ? { wasm_sha256: wasmSha256 } : {})
     };
-    return {
+    const manifestObj = {
       contract_version: this.contractVersion,
       namespace: this.namespace,
       backend: this.backend,
@@ -404,6 +406,23 @@ export class HyDBContract {
       ...(wasmSha256 ? { wasm_sha256: wasmSha256 } : {}),
       ...(overrides.owner ? { owner: overrides.owner } : {})
     };
+    return manifestObj;
+  }
+
+  /**
+   * Computes deterministic canonical manifest hash binding namespace, schema_version,
+   * backend, capabilities, and rules according to spec/hydb_contract_spec.mjs
+   */
+  computeCanonicalManifestHash() {
+    const norm = specValidateSchema({
+      namespace: this.namespace,
+      schema_version: this.schemaVersion,
+      backend: this.backend,
+      key_type: this.schema.key_type,
+      value_type: this.schema.value_type,
+      rules: this.schema.rules || {}
+    });
+    return specManifestHash(norm);
   }
 
   /**
@@ -520,3 +539,8 @@ export class HyDBContract {
 export function defineContract(spec) {
   return new HyDBContract(spec);
 }
+
+export {
+  specManifestHash as computeManifestHash,
+  specEncodeManifest as encodeManifest
+};
