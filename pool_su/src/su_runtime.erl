@@ -105,14 +105,46 @@ close_wal_fd() ->
     end.
 
 recover_from_wal(Path) ->
-    Entries = read_wal_entries(Path),
-    Sorted = lists:sort(fun(A, B) ->
-        to_integer(maps:get(<<"seq">>, A, 0), 0) =< to_integer(maps:get(<<"seq">>, B, 0), 0)
-    end, Entries),
-    lists:foreach(fun(Ev) ->
-        apply_event_to_ets(Ev)
-    end, Sorted),
-    length(Sorted).
+    case file:read_file(Path) of
+        {ok, Content} ->
+            Lines = binary:split(Content, <<"\n">>, [global, trim_all]),
+            validate_and_apply_wal_lines(Lines, 1, ?GENESIS_HASH, 0);
+        _ -> 0
+    end.
+
+validate_and_apply_wal_lines([], _ExpectedSeq, _LastHash, AppliedCount) ->
+    AppliedCount;
+validate_and_apply_wal_lines([Line | Rest], ExpectedSeq, LastHash, AppliedCount) ->
+    case catch json:decode(Line) of
+        Event when is_map(Event) ->
+            Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
+            GivenHash = maps:get(<<"hash">>, Event, <<>>),
+            GivenPrevHash = maps:get(<<"prev_hash">>, Event, <<>>),
+            ExpectedHash = compute_event_hash(Event, LastHash),
+            HashMatches = (string:uppercase(GivenHash) =:= string:uppercase(ExpectedHash)),
+            PrevHashMatches = (string:uppercase(GivenPrevHash) =:= string:uppercase(LastHash)),
+            if
+                Seq =/= ExpectedSeq ->
+                    %% Sequence gap or out of order detected in WAL: halt recovery to preserve integrity
+                    ets:insert(?TABLE, {wal_recovery_halt_reason, {sequence_gap, Seq, ExpectedSeq}}),
+                    AppliedCount;
+                not PrevHashMatches ->
+                    %% Broken hash chain detected in WAL: halt recovery
+                    ets:insert(?TABLE, {wal_recovery_halt_reason, {broken_hash_chain, GivenPrevHash, LastHash}}),
+                    AppliedCount;
+                not HashMatches ->
+                    %% Tampered or corrupted event hash in WAL: halt recovery
+                    ets:insert(?TABLE, {wal_recovery_halt_reason, {hash_mismatch, GivenHash, ExpectedHash}}),
+                    AppliedCount;
+                true ->
+                    apply_event_to_ets(Event),
+                    validate_and_apply_wal_lines(Rest, ExpectedSeq + 1, GivenHash, AppliedCount + 1)
+            end;
+        _CorruptOrTruncated ->
+            %% Truncated line from abrupt node crash: halt cleanly at last valid record
+            ets:insert(?TABLE, {wal_recovery_truncated_detected, true}),
+            AppliedCount
+    end.
 
 apply_event_to_ets(Event) ->
     Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
@@ -328,6 +360,14 @@ handle_call(simulate_restart_from_wal, _From, State) ->
     Root = lookup_val(state_root, 0),
     Epoch = lookup_val(epoch, 1),
     KVCount = ets:foldl(fun({{kv, _}, _}, Acc) -> Acc + 1; (_, Acc) -> Acc end, 0, ?TABLE),
+    HaltReason = case ets:lookup(?TABLE, wal_recovery_halt_reason) of
+        [{wal_recovery_halt_reason, R}] -> list_to_binary(io_lib:format("~p", [R]));
+        _ -> <<"none">>
+    end,
+    Truncated = case ets:lookup(?TABLE, wal_recovery_truncated_detected) of
+        [{wal_recovery_truncated_detected, T}] -> T;
+        _ -> false
+    end,
     {reply, #{
         <<"ok">> => true,
         <<"recovered_entries">> => Count,
@@ -336,6 +376,8 @@ handle_call(simulate_restart_from_wal, _From, State) ->
         <<"state_root">> => Root,
         <<"state_root_str">> => integer_to_binary(Root),
         <<"records_count">> => KVCount,
+        <<"halt_reason">> => HaltReason,
+        <<"truncated_detected">> => Truncated,
         <<"source">> => <<"WAL_TO_RAM_RECOVERY">>
     }, State};
 
@@ -498,8 +540,18 @@ node_auth_secret() ->
 
 compute_node_auth_secret() ->
     case file:read_file("/home/weslur/database/secrets/wallet.json") of
-        {ok, Bin} -> crypto:hash(sha256, Bin);
-        _ -> crypto:hash(sha256, <<"HYDB_DEFAULT_CLUSTER_SECRET">>)
+        {ok, Bin} when byte_size(Bin) > 0 ->
+            crypto:hash(sha256, Bin);
+        _ ->
+            case os:getenv("HYDB_CLUSTER_SECRET") of
+                false ->
+                    %% Fail-closed: Never fall back to insecure public defaults
+                    throw({error, missing_cluster_auth_secret});
+                EnvSec when is_list(EnvSec), length(EnvSec) > 0 ->
+                    crypto:hash(sha256, list_to_binary(EnvSec));
+                _ ->
+                    throw({error, missing_cluster_auth_secret})
+            end
     end.
 
 compute_batch_sig(SuId, Epoch, FromSeq, ToSeq, PropHash, PropRootBin) ->
@@ -621,39 +673,7 @@ handle_incoming_event(Socket, RawData) ->
             ets:update_counter(?TABLE, gap_rejections, 1, {gap_rejections, 0}),
             ok;
            true ->
-            %% 3. CRYPTOGRAPHIC HASH CHAIN VERIFICATION (Contract, Schema & Namespace-Aware)
-            Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, <<"put">>)),
-            Namespace = maps:get(<<"namespace">>, Event, <<"default">>),
-            ValType = maps:get(<<"val_type">>, Event, <<"int64">>),
-            RawKey = maps:get(<<"key">>, Event, 1),
-            KeyBin = if is_integer(RawKey) -> integer_to_binary(RawKey);
-                        is_binary(RawKey) -> RawKey;
-                        true -> <<"1">>
-                     end,
-            RawVal = maps:get(<<"val">>, Event, 0),
-            CanonicalValBin = maps:get(<<"canonical_val">>, Event,
-                if is_integer(RawVal) -> integer_to_binary(RawVal);
-                   is_binary(RawVal) -> RawVal;
-                   true -> <<"0">>
-                end),
-            ActionCode = case Op of
-                <<"register_schema">> -> <<"24">>;
-                <<"del">> -> <<"22">>;
-                _ -> <<"20">>
-            end,
-            Payload = case {Namespace, ActionCode, ValType} of
-                {_, <<"24">>, _} ->
-                    [LastHash, integer_to_binary(Seq), <<"24">>, Namespace, <<":">>, CanonicalValBin];
-                {<<"default">>, <<"20">>, <<"int64">>} ->
-                    [LastHash, integer_to_binary(Seq), <<"20">>, KeyBin, CanonicalValBin];
-                {<<"default">>, <<"22">>, _} ->
-                    [LastHash, integer_to_binary(Seq), <<"22">>, KeyBin];
-                {_, <<"22">>, _} ->
-                    [LastHash, integer_to_binary(Seq), <<"22">>, Namespace, <<":">>, KeyBin];
-                {_, <<"20">>, _} ->
-                    [LastHash, integer_to_binary(Seq), <<"20">>, Namespace, <<":">>, KeyBin, <<":">>, CanonicalValBin]
-            end,
-            ExpectedHash = binary:encode_hex(crypto:hash(sha256, Payload)),
+            ExpectedHash = compute_event_hash(Event, LastHash),
             GivenHashRaw = maps:get(<<"hash">>, Event, <<>>),
             HashMatches = (ExpectedHash =:= GivenHashRaw) orelse
                           (string:uppercase(ExpectedHash) =:= string:uppercase(GivenHashRaw)),
@@ -662,14 +682,15 @@ handle_incoming_event(Socket, RawData) ->
                 ets:update_counter(?TABLE, hash_rejections, 1, {hash_rejections, 0}),
                 ok;
                true ->
-                %% 4. DURABILITY ANCHOR FIRST: Append via persistent raw file descriptor before ACK!
+                %% 4. DURABILITY ANCHOR FIRST: Append via persistent raw file descriptor and fsync before ACK!
                 WalFd = get_or_open_wal_fd(),
                 ok = file:write(WalFd, [RawData, <<"\n">>]),
+                ok = file:datasync(WalFd),
 
                 %% 5. UPDATE RAM DUAL-STORE SECOND (including proper delete & schema handling)
                 apply_event_to_ets(Event),
 
-                %% 6. HONEST DURABILITY ACK LAST: Send 4-byte sequence ACK after WAL + RAM are committed!
+                %% 6. HONEST DURABILITY ACK LAST: Send 4-byte sequence ACK after WAL + RAM are physically synced!
                 gen_tcp:send(Socket, <<Seq:32/big>>),
                 ok
             end
@@ -678,6 +699,41 @@ handle_incoming_event(Socket, RawData) ->
         _:_Err ->
             ok
     end.
+
+compute_event_hash(Event, LastHash) ->
+    Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
+    Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, <<"put">>)),
+    Namespace = maps:get(<<"namespace">>, Event, <<"default">>),
+    ValType = maps:get(<<"val_type">>, Event, <<"int64">>),
+    RawKey = maps:get(<<"key">>, Event, 1),
+    KeyBin = if is_integer(RawKey) -> integer_to_binary(RawKey);
+                is_binary(RawKey) -> RawKey;
+                true -> <<"1">>
+             end,
+    RawVal = maps:get(<<"val">>, Event, 0),
+    CanonicalValBin = maps:get(<<"canonical_val">>, Event,
+        if is_integer(RawVal) -> integer_to_binary(RawVal);
+           is_binary(RawVal) -> RawVal;
+           true -> <<"0">>
+        end),
+    ActionCode = case Op of
+        <<"register_schema">> -> <<"24">>;
+        <<"del">> -> <<"22">>;
+        _ -> <<"20">>
+    end,
+    Payload = case {Namespace, ActionCode, ValType} of
+        {_, <<"24">>, _} ->
+            [LastHash, integer_to_binary(Seq), <<"24">>, Namespace, <<":">>, CanonicalValBin];
+        {<<"default">>, <<"20">>, <<"int64">>} ->
+            [LastHash, integer_to_binary(Seq), <<"20">>, KeyBin, CanonicalValBin];
+        {<<"default">>, <<"22">>, _} ->
+            [LastHash, integer_to_binary(Seq), <<"22">>, KeyBin];
+        {_, <<"22">>, _} ->
+            [LastHash, integer_to_binary(Seq), <<"22">>, Namespace, <<":">>, KeyBin];
+        {_, <<"20">>, _} ->
+            [LastHash, integer_to_binary(Seq), <<"20">>, Namespace, <<":">>, KeyBin, <<":">>, CanonicalValBin]
+    end,
+    binary:encode_hex(crypto:hash(sha256, Payload)).
 
 %% Utilities
 

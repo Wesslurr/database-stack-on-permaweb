@@ -19,7 +19,7 @@ cd "$NODE_SU_RUN_DIR"
 
 if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8735/~meta@1.0/info; then
   echo "[su-node] already running on :8735"
-  "$HB_SU_REL/bin/hb" eval "su_runtime:ensure_started()." >/dev/null 2>&1 || true
+  bash "$DB_DIR/pool_su/reload_dev_scheduler.sh" >/dev/null 2>&1 || true
   exit 0
 fi
 
@@ -29,7 +29,8 @@ cp "$DB_DIR/config/node_su.flat" "$HB_SU_REL/config.flat"
 for i in $(seq 1 45); do
   if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8735/~meta@1.0/info; then
     echo "[su-node] UP on :8735"
-    "$HB_SU_REL/bin/hb" eval "su_runtime:ensure_started()." >/dev/null 2>&1 || true
+    sleep 1
+    bash "$DB_DIR/pool_su/reload_dev_scheduler.sh" || true
     exit 0
   fi
   sleep 1

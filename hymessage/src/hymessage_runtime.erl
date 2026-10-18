@@ -119,10 +119,19 @@ put_from_req(_Base, Req, _Opts) ->
     ReqEpoch = parse_opt_int_field(<<"epoch">>, Req),
     ExpectedVer = parse_opt_int_field(<<"expected_ver">>, Req),
     ValType = parse_bin_field(<<"type">>, Req, undefined),
+    ReqQuorum = parse_bin_field(<<"quorum">>, Req, <<"single">>),
+    RequireDurability = case parse_bin_field(<<"require_durability">>, Req, undefined) of
+        <<"true">> -> true;
+        <<"false">> -> false;
+        _ -> false
+    end,
     BaseOpts = #{
         <<"token">> => Token,
         <<"epoch">> => ReqEpoch,
-        <<"expected_ver">> => ExpectedVer
+        <<"expected_ver">> => ExpectedVer,
+        <<"quorum">> => ReqQuorum,
+        <<"require_durability">> => RequireDurability,
+        <<"timeout_ms">> => parse_opt_int_field(<<"timeout_ms">>, Req)
     },
     Opts = case ValType of
         undefined -> BaseOpts;
@@ -162,10 +171,19 @@ del_from_req(_Base, Req, _Opts) ->
     Token = parse_bin_field(<<"token">>, Req, undefined),
     ReqEpoch = parse_opt_int_field(<<"epoch">>, Req),
     ExpectedVer = parse_opt_int_field(<<"expected_ver">>, Req),
+    ReqQuorum = parse_bin_field(<<"quorum">>, Req, <<"single">>),
+    RequireDurability = case parse_bin_field(<<"require_durability">>, Req, undefined) of
+        <<"true">> -> true;
+        <<"false">> -> false;
+        _ -> false
+    end,
     Opts = #{
         <<"token">> => Token,
         <<"epoch">> => ReqEpoch,
-        <<"expected_ver">> => ExpectedVer
+        <<"expected_ver">> => ExpectedVer,
+        <<"quorum">> => ReqQuorum,
+        <<"require_durability">> => RequireDurability,
+        <<"timeout_ms">> => parse_opt_int_field(<<"timeout_ms">>, Req)
     },
     case gen_server:call(?SERVER, {contract_del, Namespace, RawKey, Opts}, 5000) of
         {ok, Res} -> Res;
@@ -725,8 +743,17 @@ node_auth_secret() ->
             Sec;
         _ ->
             Sec = case file:read_file("/home/weslur/database/secrets/wallet.json") of
-                {ok, Bin} -> crypto:hash(sha256, Bin);
-                _ -> crypto:hash(sha256, <<"HYDB_DEFAULT_CLUSTER_SECRET">>)
+                {ok, Bin} when byte_size(Bin) > 0 ->
+                    crypto:hash(sha256, Bin);
+                _ ->
+                    case os:getenv("HYDB_CLUSTER_SECRET") of
+                        false ->
+                            throw({error, missing_cluster_auth_secret});
+                        EnvSec when is_list(EnvSec), length(EnvSec) > 0 ->
+                            crypto:hash(sha256, list_to_binary(EnvSec));
+                        _ ->
+                            throw({error, missing_cluster_auth_secret})
+                    end
             end,
             case ets:info(?TABLE) of
                 undefined -> ok;
@@ -775,11 +802,12 @@ stream_socket_authenticate(Socket, Nonce) ->
     receive
         {tcp, Socket, Bin} when is_binary(Bin) ->
             case verify_su_handshake(Bin, Nonce) of
-                {ok, _NodeId} ->
-                    ets:insert(hymessage_subscribers, {Socket, os:system_time(millisecond), 0}),
+                {ok, NodeId} ->
+                    ets:insert(hymessage_subscribers, {Socket, NodeId, os:system_time(millisecond), 0}),
                     AckPayload = iolist_to_binary(json:encode(#{
                         <<"type">> => <<"AUTH_OK">>,
-                        <<"status">> => <<"AUTHENTICATED">>
+                        <<"status">> => <<"AUTHENTICATED">>,
+                        <<"node_id">> => NodeId
                     })),
                     _ = gen_tcp:send(Socket, AckPayload),
                     stream_socket_worker(Socket);
@@ -849,13 +877,21 @@ stream_socket_worker(Socket) ->
 
 update_subscriber_ack(Socket, AckSeq) ->
     case ets:lookup(hymessage_subscribers, Socket) of
+        [{Socket, NodeId, ConnAt, _OldAck}] ->
+            ets:insert(hymessage_subscribers, {Socket, NodeId, ConnAt, AckSeq});
         [{Socket, ConnAt, _OldAck}] ->
-            ets:insert(hymessage_subscribers, {Socket, ConnAt, AckSeq});
+            ets:insert(hymessage_subscribers, {Socket, <<"hb_su">>, ConnAt, AckSeq});
         _ ->
-            ets:insert(hymessage_subscribers, {Socket, os:system_time(millisecond), AckSeq})
+            ets:insert(hymessage_subscribers, {Socket, <<"hb_su">>, os:system_time(millisecond), AckSeq})
     end.
 
 broadcast_and_await_su(Event, Seq) ->
+    broadcast_and_await_su(Event, Seq, <<"single">>, 1500).
+
+broadcast_and_await_su(Event, Seq, QuorumMode) ->
+    broadcast_and_await_su(Event, Seq, QuorumMode, 1500).
+
+broadcast_and_await_su(Event, Seq, QuorumMode, TimeoutMs) ->
     case ets:tab2list(hymessage_subscribers) of
         [] ->
             {false, 0};
@@ -870,32 +906,68 @@ broadcast_and_await_su(Event, Seq) ->
                         false
                 end
             end, Subscribers),
-            if ValidSubscribers == [] ->
+            TotalSubs = length(ValidSubscribers),
+            if TotalSubs == 0 ->
                 {false, 0};
                true ->
-                Awaited = await_su_ack(Seq, 50),
-                {Awaited, length(ValidSubscribers)}
+                ActualTimeout = if is_integer(TimeoutMs) andalso TimeoutMs > 0 -> TimeoutMs; true -> 1500 end,
+                Awaited = await_su_ack(Seq, QuorumMode, TotalSubs, ActualTimeout),
+                {Awaited, TotalSubs}
             end
     end.
 
-await_su_ack(Seq, TimeoutMs) ->
-    T0 = os:perf_counter(millisecond),
-    await_su_ack_loop(Seq, T0, TimeoutMs).
+count_acked_subscribers(Seq) ->
+    Subs = ets:tab2list(hymessage_subscribers),
+    lists:foldl(fun
+        ({_Sock, _NodeId, _ConnAt, AckSeq}, Acc) when AckSeq >= Seq -> Acc + 1;
+        ({_Sock, _ConnAt, AckSeq}, Acc) when AckSeq >= Seq -> Acc + 1;
+        (_, Acc) -> Acc
+    end, 0, Subs).
 
-await_su_ack_loop(Seq, T0, TimeoutMs) ->
-    case ets:lookup(?TABLE, last_su_ack) of
-        [{last_su_ack, AckSeq}] when AckSeq >= Seq ->
-            true;
+check_targeted_su_acked(Seq, TargetNodeId) when is_binary(TargetNodeId) ->
+    Subs = ets:tab2list(hymessage_subscribers),
+    lists:any(fun
+        ({_Sock, NodeId, _ConnAt, AckSeq}) when NodeId =:= TargetNodeId andalso AckSeq >= Seq -> true;
+        (_) -> false
+    end, Subs).
+
+is_quorum_satisfied(Seq, QuorumMode, TotalSubs) ->
+    case QuorumMode of
+        <<"all">> ->
+            count_acked_subscribers(Seq) >= TotalSubs andalso TotalSubs > 0;
+        all ->
+            count_acked_subscribers(Seq) >= TotalSubs andalso TotalSubs > 0;
+        <<"majority">> ->
+            count_acked_subscribers(Seq) > (TotalSubs div 2) andalso TotalSubs > 0;
+        majority ->
+            count_acked_subscribers(Seq) > (TotalSubs div 2) andalso TotalSubs > 0;
+        {target, TargetId} ->
+            check_targeted_su_acked(Seq, TargetId);
+        <<"target:", Target/binary>> ->
+            check_targeted_su_acked(Seq, Target);
         _ ->
+            %% Default "single": at least 1 SU ACK
+            count_acked_subscribers(Seq) >= 1
+    end.
+
+await_su_ack(Seq, QuorumMode, TotalSubs, TimeoutMs) ->
+    T0 = os:perf_counter(millisecond),
+    await_su_ack_loop(Seq, QuorumMode, TotalSubs, T0, TimeoutMs).
+
+await_su_ack_loop(Seq, QuorumMode, TotalSubs, T0, TimeoutMs) ->
+    case is_quorum_satisfied(Seq, QuorumMode, TotalSubs) of
+        true ->
+            true;
+        false ->
             receive
                 {su_ack, AckSeq} when AckSeq >= Seq ->
-                    true;
+                    await_su_ack_loop(Seq, QuorumMode, TotalSubs, T0, TimeoutMs);
                 {su_ack, _OldAckSeq} ->
-                    await_su_ack_loop(Seq, T0, TimeoutMs)
-            after 1 ->
+                    await_su_ack_loop(Seq, QuorumMode, TotalSubs, T0, TimeoutMs)
+            after 5 ->
                 Now = os:perf_counter(millisecond),
                 if (Now - T0) >= TimeoutMs -> false;
-                   true -> await_su_ack_loop(Seq, T0, TimeoutMs)
+                   true -> await_su_ack_loop(Seq, QuorumMode, TotalSubs, T0, TimeoutMs)
                 end
             end
     end.
@@ -1271,7 +1343,10 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                             ets:insert(?TABLE, {history, NewHist}),
                             T_hash = os:perf_counter(microsecond),
 
-                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq),
+                            ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
+                            RequireDurability = maps:get(<<"require_durability">>, Opts, false),
+                            TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
+                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
                             T_repl = os:perf_counter(microsecond),
                             T1 = os:perf_counter(nanosecond),
                             DurationMs = ((T1 - T0) / 1000.0) / 1000.0,
@@ -1280,35 +1355,49 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                                 {<<"wasm_slot">>, true} -> wasm_call(ActiveWasmBase, <<"db_count">>, [], NodeMsg, 0);
                                 _ -> 0
                             end,
-
-                            Result = #{
-                                <<"ok">> => true,
-                                <<"error_code">> => <<"OK">>,
-                                <<"device">> => <<"hymessage@1.0">>,
-                                <<"contract_version">> => hydb_contract:contract_version(),
-                                <<"namespace">> => Namespace,
-                                <<"schema_version">> => SchemaVsn,
-                                <<"backend">> => Backend,
-                                <<"wasm_source">> => WasmSource,
-                                <<"wasm_instance_records">> => WasmInstanceCount,
-                                <<"epoch">> => Epoch,
-                                <<"seq">> => Seq,
-                                <<"op">> => <<"put">>,
-                                <<"key">> => NormKey,
-                                <<"val">> => NormVal,
-                                <<"val_type">> => ValType,
-                                <<"ver">> => Ver,
-                                <<"state_root">> => StateRoot,
-                                <<"hash">> => NewHash,
-                                <<"replicated">> => Replicated,
-                                <<"su_count">> => SuCount,
-                                <<"duration_ms">> => DurationMs,
-                                <<"t_val_us">> => (T_val - T_start),
-                                <<"t_wasm_us">> => (T_wasm - T_val),
-                                <<"t_hash_us">> => (T_hash - T_wasm),
-                                <<"t_repl_us">> => (T_repl - T_hash)
-                            },
-                            {reply, {ok, Result}, State}
+                            CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
+                            if
+                                RequireDurability andalso not Replicated ->
+                                    {reply, {error, #{
+                                        <<"ok">> => false,
+                                        <<"status">> => 504,
+                                        <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
+                                        <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
+                                        <<"commit_status">> => CommitStatus,
+                                        <<"replicated">> => false,
+                                        <<"seq">> => Seq
+                                    }}, State};
+                                true ->
+                                    Result = #{
+                                        <<"ok">> => true,
+                                        <<"error_code">> => <<"OK">>,
+                                        <<"device">> => <<"hymessage@1.0">>,
+                                        <<"contract_version">> => hydb_contract:contract_version(),
+                                        <<"namespace">> => Namespace,
+                                        <<"schema_version">> => SchemaVsn,
+                                        <<"backend">> => Backend,
+                                        <<"wasm_source">> => WasmSource,
+                                        <<"wasm_instance_records">> => WasmInstanceCount,
+                                        <<"epoch">> => Epoch,
+                                        <<"seq">> => Seq,
+                                        <<"op">> => <<"put">>,
+                                        <<"key">> => NormKey,
+                                        <<"val">> => NormVal,
+                                        <<"val_type">> => ValType,
+                                        <<"ver">> => Ver,
+                                        <<"state_root">> => StateRoot,
+                                        <<"hash">> => NewHash,
+                                        <<"commit_status">> => CommitStatus,
+                                        <<"replicated">> => Replicated,
+                                        <<"su_count">> => SuCount,
+                                        <<"duration_ms">> => DurationMs,
+                                        <<"t_val_us">> => (T_val - T_start),
+                                        <<"t_wasm_us">> => (T_wasm - T_val),
+                                        <<"t_hash_us">> => (T_hash - T_wasm),
+                                        <<"t_repl_us">> => (T_repl - T_hash)
+                                    },
+                                    {reply, {ok, Result}, State}
+                            end
                     end
             end
     end;
@@ -1574,29 +1663,47 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                             NewHist = [Event | lists:sublist(Hist, 49)],
                             ets:insert(?TABLE, {history, NewHist}),
 
-                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq),
+                            ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
+                            RequireDurability = maps:get(<<"require_durability">>, Opts, false),
+                            TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
+                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
                             T1 = os:perf_counter(nanosecond),
                             DurationMs = ((T1 - T0) / 1000.0) / 1000.0,
-                            Result = #{
-                                <<"ok">> => true,
-                                <<"error_code">> => <<"OK">>,
-                                <<"device">> => <<"hymessage@1.0">>,
-                                <<"contract_version">> => hydb_contract:contract_version(),
-                                <<"namespace">> => Namespace,
-                                <<"schema_version">> => SchemaVsn,
-                                <<"backend">> => Backend,
-                                <<"epoch">> => Epoch,
-                                <<"seq">> => Seq,
-                                <<"op">> => <<"del">>,
-                                <<"key">> => NormKey,
-                                <<"ver">> => DelVer,
-                                <<"state_root">> => StateRoot,
-                                <<"hash">> => NewHash,
-                                <<"replicated">> => Replicated,
-                                <<"su_count">> => SuCount,
-                                <<"duration_ms">> => DurationMs
-                            },
-                            {reply, {ok, Result}, State}
+                            CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
+                            if
+                                RequireDurability andalso not Replicated ->
+                                    {reply, {error, #{
+                                        <<"ok">> => false,
+                                        <<"status">> => 504,
+                                        <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
+                                        <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
+                                        <<"commit_status">> => CommitStatus,
+                                        <<"replicated">> => false,
+                                        <<"seq">> => Seq
+                                    }}, State};
+                                true ->
+                                    Result = #{
+                                        <<"ok">> => true,
+                                        <<"error_code">> => <<"OK">>,
+                                        <<"device">> => <<"hymessage@1.0">>,
+                                        <<"contract_version">> => hydb_contract:contract_version(),
+                                        <<"namespace">> => Namespace,
+                                        <<"schema_version">> => SchemaVsn,
+                                        <<"backend">> => Backend,
+                                        <<"epoch">> => Epoch,
+                                        <<"seq">> => Seq,
+                                        <<"op">> => <<"del">>,
+                                        <<"key">> => NormKey,
+                                        <<"ver">> => DelVer,
+                                        <<"state_root">> => StateRoot,
+                                        <<"hash">> => NewHash,
+                                        <<"commit_status">> => CommitStatus,
+                                        <<"replicated">> => Replicated,
+                                        <<"su_count">> => SuCount,
+                                        <<"duration_ms">> => DurationMs
+                                    },
+                                    {reply, {ok, Result}, State}
+                            end
                     end
             end
     end;
