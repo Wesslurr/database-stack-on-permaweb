@@ -20,7 +20,7 @@
 -define(TABLE, sd_ram_store).
 -define(COMPAT_TABLE, su_ram_store).
 -define(SERVER, ?MODULE).
--define(DEFAULT_WAL_PATH, "/home/weslur/database/pool_su/wal.log").
+-define(DEFAULT_WAL_PATH, "/home/weslur/database/sd/wal.log").
 -define(HOT_NODE_PORT, 8736).
 -define(GENESIS_HASH, <<"0000000000000000000000000000000000000000000000000000000000000000">>).
 

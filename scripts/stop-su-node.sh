@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
+# Backward-compatibility wrapper -> redirects to stop-sd-node.sh
 set -euo pipefail
-DB_DIR="/home/weslur/database"
-HB_SU_REL="$DB_DIR/vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb_su"
-
-"$HB_SU_REL/bin/hb" stop 2>/dev/null || true
-pkill -f "rel/hb_su" 2>/dev/null || true
-echo "[su-node] stopped."
+DIR="$(dirname "${BASH_SOURCE[0]}")"
+exec "$DIR/stop-sd-node.sh" "$@"

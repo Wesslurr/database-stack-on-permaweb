@@ -25,7 +25,7 @@ import crypto from 'node:crypto';
 
 const HOT_URL = 'http://127.0.0.1:8734/~hymessage@1.0';
 const SU_SCHEDULER_URL = 'http://127.0.0.1:8735/~scheduler@1.0';
-const WAL_PATH = '/home/weslur/database/pool_su/wal.log';
+const WAL_PATH = '/home/weslur/database/sd/wal.log';
 const WALLET_PATH = '/home/weslur/database/secrets/wallet.json';
 
 const isTrue = (v) => v === true || String(v).toLowerCase() === 'true';

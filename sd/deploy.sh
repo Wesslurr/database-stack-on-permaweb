@@ -5,18 +5,18 @@ source /home/weslur/database/scripts/env.sh
 export PATH="/home/weslur/.local/bin:/home/weslur/erlang/27.0/bin:/home/weslur/.cargo/bin:$PATH"
 
 DB_DIR="/home/weslur/database"
-SDD="$DB_DIR/pool_sd"
+SDD="$DB_DIR/sd"
 MOD="_hb_device_sd_1_0_sd0"
 OUT="$SDD/out"
 ERL="/home/weslur/erlang/27.0/bin/erl"
 ERLC="/home/weslur/erlang/27.0/bin/erlc"
-HB_SU_REL="$DB_DIR/vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb_su"
+HB_SD_REL="$DB_DIR/vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb_sd"
 
 echo '=== 1. Compiling sd_runtime.erl ==='
-mkdir -p "$HB_SU_REL/lib/sd_runtime-1.0.0/ebin"
-"$ERLC" -o "$HB_SU_REL/lib/sd_runtime-1.0.0/ebin" "$SDD/src/sd_runtime.erl"
+mkdir -p "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin"
+"$ERLC" -o "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin" "$SDD/src/sd_runtime.erl"
 mkdir -p "$HB_REL/lib/sd_runtime-1.0.0/ebin"
-cp "$HB_SU_REL/lib/sd_runtime-1.0.0/ebin/sd_runtime.beam" "$HB_REL/lib/sd_runtime-1.0.0/ebin/"
+cp "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin/sd_runtime.beam" "$HB_REL/lib/sd_runtime-1.0.0/ebin/"
 echo "sd_runtime.beam deployed to lib."
 
 echo '=== 2. Building Gleam sd device ==='
@@ -56,18 +56,18 @@ cd "$SDD"
 
 echo '=== 5. Deploying gleam_stdlib ==='
 STDLIB_EBIN=$(find "$DB_DIR/hymessage/build/dev/erlang/gleam_stdlib" -type d -name ebin | head -1)
-mkdir -p "$HB_SU_REL/lib/gleam_stdlib-1.0.0"
-rm -rf "$HB_SU_REL/lib/gleam_stdlib-1.0.0/ebin"
-cp -r "$STDLIB_EBIN" "$HB_SU_REL/lib/gleam_stdlib-1.0.0/ebin"
+mkdir -p "$HB_SD_REL/lib/gleam_stdlib-1.0.0"
+rm -rf "$HB_SD_REL/lib/gleam_stdlib-1.0.0/ebin"
+cp -r "$STDLIB_EBIN" "$HB_SD_REL/lib/gleam_stdlib-1.0.0/ebin"
 
 echo '=== 6. Writing device archive to SD node cache ==='
 if ! curl -sf --max-time 3 -o /dev/null http://127.0.0.1:8735/~meta@1.0/info; then
   echo 'SD node down — starting SD node'
-  "$DB_DIR/scripts/start-su-node.sh"
+  "$DB_DIR/scripts/start-sd-node.sh"
 fi
 
-export HB_ERL_SNAME="hb_su"
-"$HB_SU_REL/bin/hb" eval "
+export HB_ERL_SNAME="hb_sd"
+"$HB_SD_REL/bin/hb" eval "
   Wallet = hb:wallet(),
   ServerID = hb_util:human_id(ar_wallet:to_address(Wallet)),
   NodeMsg = cowboy:get_env(ServerID, node_msg),
@@ -89,9 +89,9 @@ echo "DEVICE_ID=$DEVICE_ID"
 echo '=== 7. Updating config overlay & restarting SD node ==='
 printf '{"trusted_devices": {"sd@1.0": "%s", "scheduler@1.0": "%s"}}\n' "$DEVICE_ID" "$DEVICE_ID" > "$DB_DIR/config/sd.json"
 cat "$DB_DIR/config/sd.json"
-"$DB_DIR/scripts/stop-su-node.sh" || true
+"$DB_DIR/scripts/stop-sd-node.sh" || true
 sleep 2
-"$DB_DIR/scripts/start-su-node.sh"
+"$DB_DIR/scripts/start-sd-node.sh"
 
 echo '=== 8. Verification ==='
 for i in 1 2 3 4 5; do
