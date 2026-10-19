@@ -56,7 +56,7 @@ flowchart TD
 
 ## 2. Topologi Jaringan & Dual HyperBEAM Runtime
 
-Dalam direktori `vendor/`, terdapat **dua instalasi HyperBEAM fisik independen** untuk mencegah polusi dependensi (*zero cross-contamination*):
+Dalam direktori `vendor/`, contoh ini terdapat **dua instalasi HyperBEAM fisik independen** untuk mencegah polusi dependensi (*zero cross-contamination*):
 
 ```mermaid
 flowchart LR
@@ -84,7 +84,7 @@ flowchart LR
 | Node | Direktori Vendor | Port HTTP / TCP | Device Terpasang | Peran Khusus |
 | :--- | :--- | :--- | :--- | :--- |
 | **Hot Node** | `vendor/HyperBEAM` | `:8734` / `:8736` | `~hymessage@1.0` | Primary Sequencer, CAS lock, Pre-Sequence Gate, TCP Stream Server. |
-| **SD Node** | `vendor/HyperBEAM_sd` | `:8735` | `~sd@1.0` (alias `~scheduler@1.0`) | Shared Data Pool, verifikasi tanda tangan batch, append deterministik `sd/wal.log`, honest durability ACK. |
+| **SD Node** | `vendor/HyperBEAM_sd` | `:8735` | `~sd@1.0`  | Shared Data Pool, verifikasi tanda tangan batch, append deterministik `sd/wal.log`, honest durability ACK. |
 | **AO Arbitrator** | `ao_process/` | Process AO | `HYDB_ARBITRATOR` | Wasit L1/L2 Arweave, verifikasi independen rantai hash, pembuktian kecurangan (*equivocation proof*). |
 | **ArLocal** | `.arlocal-db/` | `:1984` | Gateway Arweave | Penyimpanan permanen block ledger. |
 
