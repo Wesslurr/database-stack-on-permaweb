@@ -2,7 +2,7 @@
 set -euo pipefail
 
 export DB_DIR="/home/weslur/database"
-export HB_SD_REL="$DB_DIR/vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb_sd"
+export HB_SD_REL="$DB_DIR/vendor/HyperBEAM_sd/_build/genesis_wasm+rocksdb/rel/hb_sd"
 export NODE_SD_RUN_DIR="$DB_DIR/data/node_sd"
 export PATH="/home/weslur/erlang/27.0/bin:/home/weslur/.local/bin:/home/weslur/.nvm/versions/node/v22.23.2/bin:/home/weslur/.cargo/bin:$PATH"
 export ERLANG_ROCKSDB_OPTS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"

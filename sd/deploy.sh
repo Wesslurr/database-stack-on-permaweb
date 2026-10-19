@@ -10,13 +10,11 @@ MOD="_hb_device_sd_1_0_sd0"
 OUT="$SDD/out"
 ERL="/home/weslur/erlang/27.0/bin/erl"
 ERLC="/home/weslur/erlang/27.0/bin/erlc"
-HB_SD_REL="$DB_DIR/vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb_sd"
+HB_SD_REL="$DB_DIR/vendor/HyperBEAM_sd/_build/genesis_wasm+rocksdb/rel/hb_sd"
 
 echo '=== 1. Compiling sd_runtime.erl ==='
 mkdir -p "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin"
 "$ERLC" -o "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin" "$SDD/src/sd_runtime.erl"
-mkdir -p "$HB_REL/lib/sd_runtime-1.0.0/ebin"
-cp "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin/sd_runtime.beam" "$HB_REL/lib/sd_runtime-1.0.0/ebin/"
 echo "sd_runtime.beam deployed to lib."
 
 echo '=== 2. Building Gleam sd device ==='
