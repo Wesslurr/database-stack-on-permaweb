@@ -1,0 +1,23 @@
+{
+  "cluster_name": "hydb_universal_mesh",
+  "version": "1.0.0",
+  "nodes": {
+    "hot_node": {
+      "role": "PRIMARY_SEQUENCER",
+      "http_port": 8734,
+      "tcp_stream_port": 8736,
+      "device": "hymessage@1.0"
+    },
+    "sd_node": {
+      "role": "SHARED_DATA_POOL",
+      "http_port": 8735,
+      "device": "sd@1.0",
+      "wal_path": "/home/weslur/database/pool_sd/wal.log"
+    }
+  },
+  "ao_arbitrator": {
+    "process_id": "HYDB_ARBITRATOR",
+    "commitment_algo": "SHA-256",
+    "fingerprint_algo": "MERKLE_XOR_64"
+  }
+}

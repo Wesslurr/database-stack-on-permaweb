@@ -17,6 +17,7 @@ target/
 **/target/
 _build/
 hymessage/build/
+pool_sd/build/
 *.beam
 
 # Dynamic test payload outputs

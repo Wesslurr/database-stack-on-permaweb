@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "guardrails": {
+    "guardrail_a": {
+      "name": "PRE_SEQUENCE_GATE",
+      "description": "Reject invalid mutations before allocating sequence numbers"
+    },
+    "guardrail_b": {
+      "name": "DURABILITY_FSYNC",
+      "description": "Group commit fsync on Shared Data pool before acknowledging final durability"
+    },
+    "guardrail_c": {
+      "name": "ARBITRATOR_FINALITY",
+      "description": "Deterministic dual commitment verification and equivocation cut"
+    }
+  },
+  "violation_actions": {
+    "REJECTED_EVENT_HASH_MISMATCH": "DROP_AND_ALERT",
+    "REJECTED_SEQUENCE_GAP": "REQUEST_CATCHUP_FROM_SD_POOL",
+    "REJECTED_OUT_OF_ORDER_BATCH": "HOLD_FOR_REORDERING",
+    "REJECTED_HASH_CHAIN_BROKEN": "TRIGGER_ISOLATION_AND_AUDIT",
+    "REJECTED_STATE_ROOT_MISMATCH": "ROLLBACK_AND_REQUEST_RESYNC",
+    "REJECTED_UNAUTHORIZED_NODE": "BLOCK_NODE_COMMUNICATION",
+    "EQUIVOCATION_PROVEN": "FREEZE_NAMESPACE_AND_SLASH_EQUIVOCATOR"
+  }
+}

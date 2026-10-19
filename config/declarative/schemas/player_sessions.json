@@ -1,0 +1,12 @@
+{
+  "namespace": "player.sessions",
+  "backend": "ets_doc",
+  "schema_version": "1.0.0",
+  "key_type": "string",
+  "value_type": "json",
+  "status": "replicated",
+  "rules": {
+    "requires": ["session_token"]
+  },
+  "description": "Player session and auth token registry for gaming test scenarios"
+}

@@ -1,0 +1,12 @@
+{
+  "namespace": "finance.balances",
+  "backend": "wasm_slot",
+  "schema_version": "1.0.0",
+  "key_type": "int64",
+  "value_type": "int64",
+  "status": "replicated",
+  "rules": {
+    "min_value": 0
+  },
+  "description": "Financial ledger namespace with non-negative balance constraint"
+}

@@ -8,10 +8,14 @@ export PATH="/home/weslur/erlang/27.0/bin:/home/weslur/.local/bin:/home/weslur/.
 export ERLANG_ROCKSDB_OPTS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
 export CXXFLAGS="-include cstdint"
 export CFLAGS="-include stdint.h -D_DEFAULT_SOURCE"
-export HB_CONFIG="$DB_DIR/config/node_su.flat,$DB_DIR/config/node-rocksdb.json"
+if [ -f "$DB_DIR/config/sd.json" ]; then
+  export HB_CONFIG="$DB_DIR/config/node_su.flat,$DB_DIR/config/node-rocksdb.json,$DB_DIR/config/sd.json"
+else
+  export HB_CONFIG="$DB_DIR/config/node_su.flat,$DB_DIR/config/node-rocksdb.json"
+fi
 export HB_KEY="$DB_DIR/secrets/wallet_su.json"
 export HB_ERL_SNAME="hb_su"
-export ERL_LIBS="$HB_SU_REL/lib/su_runtime-1.0.0/ebin:$HB_SU_REL/lib/hymessage_runtime-1.0.0/ebin:$HB_SU_REL/lib/gleam_stdlib-1.0.0/ebin:$HB_SU_REL/lib${ERL_LIBS:+:$ERL_LIBS}"
+export ERL_LIBS="$HB_SU_REL/lib/sd_runtime-1.0.0/ebin:$HB_SU_REL/lib/su_runtime-1.0.0/ebin:$HB_SU_REL/lib/hymessage_runtime-1.0.0/ebin:$HB_SU_REL/lib/gleam_stdlib-1.0.0/ebin:$HB_SU_REL/lib${ERL_LIBS:+:$ERL_LIBS}"
 export CODE_LOADING_MODE="interactive"
 
 mkdir -p "$NODE_SU_RUN_DIR"
@@ -19,7 +23,9 @@ cd "$NODE_SU_RUN_DIR"
 
 if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8735/~meta@1.0/info; then
   echo "[su-node] already running on :8735"
-  bash "$DB_DIR/pool_su/reload_dev_scheduler.sh" >/dev/null 2>&1 || true
+  if [ ! -f "$DB_DIR/config/sd.json" ]; then
+    bash "$DB_DIR/pool_su/reload_dev_scheduler.sh" >/dev/null 2>&1 || true
+  fi
   exit 0
 fi
 
@@ -30,7 +36,9 @@ for i in $(seq 1 45); do
   if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8735/~meta@1.0/info; then
     echo "[su-node] UP on :8735"
     sleep 1
-    bash "$DB_DIR/pool_su/reload_dev_scheduler.sh" || true
+    if [ ! -f "$DB_DIR/config/sd.json" ]; then
+      bash "$DB_DIR/pool_su/reload_dev_scheduler.sh" || true
+    fi
     exit 0
   fi
   sleep 1

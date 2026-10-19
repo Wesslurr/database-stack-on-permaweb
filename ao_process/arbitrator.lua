@@ -73,13 +73,19 @@ AuthorizedNodes = AuthorizedNodes or {
     ["SU_PRIMARY"] = true,
     ["SU_NODE_1"] = true,
     ["SU_NODE_2"] = true,
-    ["hb_su"] = true
+    ["hb_su"] = true,
+    ["SD_PRIMARY"] = true,
+    ["SD_NODE_1"] = true,
+    ["SD_NODE_2"] = true,
+    ["hb_sd"] = true,
+    ["SD_POOL"] = true
 }
 
 AuthorizedAdmins = AuthorizedAdmins or {
     [Owner] = true,
     ["ADMIN_PRIMARY"] = true,
-    ["SU_PRIMARY"] = true
+    ["SU_PRIMARY"] = true,
+    ["SD_PRIMARY"] = true
 }
 
 -- Fallback mock for ao and Handlers when loaded outside AOS (e.g. standalone lua5.3 runner)

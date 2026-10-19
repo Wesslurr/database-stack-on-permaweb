@@ -1,0 +1,10 @@
+{
+  "namespace": "app.docs",
+  "backend": "ets_doc",
+  "schema_version": "1.0.0",
+  "key_type": "string",
+  "value_type": "any",
+  "status": "replicated",
+  "rules": {},
+  "description": "Universal structured document and JSON key-value store"
+}
