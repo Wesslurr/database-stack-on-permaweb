@@ -58,6 +58,9 @@ jobs:
       - name: Run Phase 04 Idempotency & Write Status Semantics Tests
         run: npm run test:idempotency
 
+      - name: Run Phase 05 Real Multi-Process Chaos & Fault-Injection Suite
+        run: npm run test:chaos
+
       - name: Run Cross-Language Conformance Suite (JS, Erlang, Rust, Lua)
         run: npm run test:conformance
 

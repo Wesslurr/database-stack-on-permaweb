@@ -199,6 +199,10 @@ namespace_id_64(Ns) when is_binary(Ns) ->
 namespace_id_64(_) ->
     0.
 
+bytes_to_u64(Bin) when is_binary(Bin) ->
+    <<Int64:64/big-unsigned-integer, _/binary>> = crypto:hash(sha256, Bin),
+    Int64.
+
 compute_incremental_root(Event, CurrentRoot) ->
     Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, <<"put">>)),
     case Op of
@@ -210,11 +214,19 @@ compute_incremental_root(Event, CurrentRoot) ->
                 undefined -> CurrentRoot;
                 _ ->
                     Namespace = maps:get(<<"namespace">>, Event, <<"default">>),
-                    KeyInt = to_integer(RawKey, 0),
-                    NsId = namespace_id_64(Namespace),
-                    CompKey = if NsId =:= 0 -> KeyInt; true -> NsId bxor KeyInt end,
-                    OldRec = case ets:lookup(?TABLE, {record_meta, Namespace, KeyInt}) of
-                        [{{record_meta, Namespace, KeyInt}, Meta}] -> Meta;
+                    Backend = maps:get(<<"backend">>, Event, <<"wasm_slot">>),
+                    {MetaKey, CompKey} = case Backend of
+                        <<"ets_doc">> ->
+                            KeyBin = to_bin_spec(RawKey),
+                            {KeyBin, bytes_to_u64(iolist_to_binary([Namespace, <<":">>, KeyBin]))};
+                        _ ->
+                            KeyInt = to_integer(RawKey, 0),
+                            NsId = namespace_id_64(Namespace),
+                            CK = if NsId =:= 0 -> KeyInt; true -> NsId bxor KeyInt end,
+                            {KeyInt, CK}
+                    end,
+                    OldRec = case ets:lookup(?TABLE, {record_meta, Namespace, MetaKey}) of
+                        [{{record_meta, Namespace, MetaKey}, Meta}] -> Meta;
                         _ -> undefined
                     end,
                     case Op of
@@ -227,7 +239,20 @@ compute_incremental_root(Event, CurrentRoot) ->
                                     CurrentRoot
                             end;
                         _ ->
-                            NewVal = to_integer(maps:get(<<"val">>, Event, 0), 0),
+                            NewVal = case Backend of
+                                <<"ets_doc">> ->
+                                    RawV = maps:get(<<"val">>, Event, <<>>),
+                                    CanonBin = maps:get(<<"canonical_val">>, Event,
+                                        if is_binary(RawV) -> RawV;
+                                           is_integer(RawV) -> integer_to_binary(RawV);
+                                           is_boolean(RawV) -> atom_to_binary(RawV, utf8);
+                                           is_map(RawV) -> iolist_to_binary(json:encode(RawV));
+                                           true -> <<>>
+                                        end),
+                                    bytes_to_u64(to_bin_spec(CanonBin));
+                                _ ->
+                                    to_integer(maps:get(<<"val">>, Event, 0), 0)
+                            end,
                             NewVer = to_integer(maps:get(<<"ver">>, Event, 1), 1),
                             NewHash = canonical_hash_64(CompKey, NewVal, NewVer),
                             OldHash = case OldRec of
@@ -331,22 +356,37 @@ apply_event_to_ets(Event, ComputedRoot) ->
             case maps:get(<<"key">>, Event, undefined) of
                 undefined -> ok;
                 Key0 ->
+                    Backend = maps:get(<<"backend">>, Event, <<"wasm_slot">>),
+                    MetaKey = case Backend of
+                        <<"ets_doc">> -> to_bin_spec(Key0);
+                        _ -> to_integer(Key0, 0)
+                    end,
                     Key = case Namespace of
                         <<"default">> -> to_integer(Key0, Key0);
                         _ -> Key0
                     end,
                     case Op of
                         <<"del">> ->
-                            KeyInt = to_integer(Key0, 0),
-                            ets:delete(?TABLE, {record_meta, Namespace, KeyInt}),
+                            ets:delete(?TABLE, {record_meta, Namespace, MetaKey}),
                             ets:delete(?TABLE, {kv_ns, Namespace, Key}),
                             if Namespace =:= <<"default">> -> ets:delete(?TABLE, {kv, Key}); true -> ok end;
                         _ ->
                             Val = maps:get(<<"val">>, Event, 0),
-                            KeyInt = to_integer(Key0, 0),
-                            ValInt = to_integer(Val, 0),
+                            ValMeta = case Backend of
+                                <<"ets_doc">> ->
+                                    CanonBin = maps:get(<<"canonical_val">>, Event,
+                                        if is_binary(Val) -> Val;
+                                           is_integer(Val) -> integer_to_binary(Val);
+                                           is_boolean(Val) -> atom_to_binary(Val, utf8);
+                                           is_map(Val) -> iolist_to_binary(json:encode(Val));
+                                           true -> <<>>
+                                        end),
+                                    bytes_to_u64(to_bin_spec(CanonBin));
+                                _ ->
+                                    to_integer(Val, 0)
+                            end,
                             Ver = to_integer(maps:get(<<"ver">>, Event, 1), 1),
-                            ets:insert(?TABLE, {{record_meta, Namespace, KeyInt}, {ValInt, Ver}}),
+                            ets:insert(?TABLE, {{record_meta, Namespace, MetaKey}, {ValMeta, Ver}}),
                             ets:insert(?TABLE, {{kv_ns, Namespace, Key}, Val}),
                             if Namespace =:= <<"default">> -> ets:insert(?TABLE, {{kv, Key}, Val}); true -> ok end
                     end
@@ -808,7 +848,8 @@ sd_perform_handshake(Socket) ->
                     Resp = iolist_to_binary(json:encode(#{
                         <<"type">> => <<"AUTH_RESPONSE">>,
                         <<"node_id">> => NodeId,
-                        <<"sig">> => Sig
+                        <<"sig">> => Sig,
+                        <<"last_tick">> => lookup_val(tick, 0)
                     })),
                     ok = gen_tcp:send(Socket, Resp),
                     receive

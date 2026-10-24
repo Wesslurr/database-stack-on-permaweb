@@ -549,7 +549,7 @@ promote_from_req(_Base, Req, _Opts) ->
             case promote_epoch(NewEpoch) of
                 {ok, Res} -> Res;
                 {error, Reason} ->
-                    #{ <<"ok">> => false, <<"status">> => 409, <<"error">> => hb_util:bin(Reason) }
+                    #{ <<"ok">> => false, <<"status">> => 409, <<"error">> => to_bin_spec(Reason) }
             end
     end.
 
@@ -920,21 +920,16 @@ to_integer(V, Default) when is_list(V) ->
 to_integer(_, Default) -> Default.
 
 parse_events_field(Req) when is_map(Req) ->
-    case hb_ao:get(<<"events">>, Req, #{}) of
-        not_found ->
-            case hb_ao:get(<<"body">>, Req, #{}) of
-                Bin when is_binary(Bin), byte_size(Bin) > 0 ->
-                    try json:decode(Bin) of
-                        Decoded when is_map(Decoded) ->
-                            maps:get(<<"events">>, Decoded, []);
-                        _ -> []
-                    catch _:_ -> []
-                    end;
-                Map when is_map(Map) ->
-                    maps:get(<<"events">>, Map, []);
-                _ -> []
-            end;
+    case parse_raw_field(<<"events">>, Req, not_found) of
+        not_found -> [];
         EvList when is_list(EvList) -> EvList;
+        Bin when is_binary(Bin), byte_size(Bin) > 0 ->
+            try json:decode(Bin) of
+                L when is_list(L) -> L;
+                #{<<"events">> := L2} when is_list(L2) -> L2;
+                _ -> []
+            catch _:_ -> []
+            end;
         _ -> []
     end;
 parse_events_field(_) -> [].
@@ -1057,7 +1052,7 @@ get_db_dir() ->
 init_wasm(NodeMsg) ->
     case erlang:function_exported(hb_ao, resolve, 3) of
         false ->
-            undefined;
+            fallback_wasm_slot;
         true ->
             DbDir = get_db_dir(),
             WasmBinFile = filename:join([DbDir, "hydb/out/hydb.wasm"]),
@@ -1076,7 +1071,7 @@ init_wasm(NodeMsg) ->
 init_wasm_from_id(NodeMsg) ->
     case erlang:function_exported(hb_ao, resolve, 3) of
         false ->
-            undefined;
+            fallback_wasm_slot;
         true ->
             DbDir = get_db_dir(),
             WasmIdFile = filename:join([DbDir, "hydb/out/wasm_id.txt"]),
@@ -1167,14 +1162,15 @@ stream_socket_authenticate(Socket, Nonce) ->
     receive
         {tcp, Socket, Bin} when is_binary(Bin) ->
             case verify_su_handshake(Bin, Nonce) of
-                {ok, NodeId} ->
-                    ets:insert(hymessage_subscribers, {Socket, NodeId, os:system_time(millisecond), 0}),
+                {ok, NodeId, SubLastTick} ->
+                    ets:insert(hymessage_subscribers, {Socket, NodeId, os:system_time(millisecond), SubLastTick}),
                     AckPayload = iolist_to_binary(json:encode(#{
                         <<"type">> => <<"AUTH_OK">>,
                         <<"status">> => <<"AUTHENTICATED">>,
                         <<"node_id">> => NodeId
                     })),
                     _ = gen_tcp:send(Socket, AckPayload),
+                    catch_up_subscriber(Socket, SubLastTick),
                     stream_socket_worker(Socket);
                 error ->
                     ets:update_counter(?TABLE, unauthorized_tcp_rejections, 1, {unauthorized_tcp_rejections, 0}),
@@ -1194,14 +1190,36 @@ stream_socket_authenticate(Socket, Nonce) ->
         gen_tcp:close(Socket)
     end.
 
+catch_up_subscriber(Socket, SubLastTick) when is_integer(SubLastTick) ->
+    case ets:lookup(?TABLE, history) of
+        [{history, Hist}] when is_list(Hist), Hist =/= [] ->
+            Missed = [E || E <- Hist, to_integer(maps:get(<<"seq">>, E, 0), 0) > SubLastTick],
+            Sorted = lists:sort(fun(A, B) ->
+                to_integer(maps:get(<<"seq">>, A, 0), 0) =< to_integer(maps:get(<<"seq">>, B, 0), 0)
+            end, Missed),
+            lists:foreach(fun(Ev) ->
+                Payload = try iolist_to_binary(json:encode(Ev)) catch _:_ -> <<>> end,
+                if byte_size(Payload) > 0 ->
+                    _ = gen_tcp:send(Socket, Payload);
+                   true -> ok
+                end
+            end, Sorted);
+        _ ->
+            ok
+    end;
+catch_up_subscriber(_Socket, _SubLastTick) ->
+    ok.
+
 verify_su_handshake(Bin, Nonce) ->
     try json:decode(Bin) of
-        #{ <<"type">> := <<"AUTH_RESPONSE">>, <<"node_id">> := NodeId, <<"sig">> := GivenSig }
+        #{ <<"type">> := <<"AUTH_RESPONSE">>, <<"node_id">> := NodeId, <<"sig">> := GivenSig } = Decoded
           when is_binary(NodeId), is_binary(GivenSig) ->
             Msg = <<Nonce/binary, ":", NodeId/binary>>,
             ExpectedSig = binary:encode_hex(crypto:mac(hmac, sha256, node_auth_secret(), Msg)),
             case string:uppercase(GivenSig) =:= string:uppercase(ExpectedSig) of
-                true -> {ok, NodeId};
+                true ->
+                    SubLastTick = to_integer(maps:get(<<"last_tick">>, Decoded, 0), 0),
+                    {ok, NodeId, SubLastTick};
                 false -> error
             end;
         _ ->
@@ -1359,6 +1377,8 @@ fast_beamr_call(Pid, Func, Params, Default) ->
 
 wasm_call(undefined, _Func, _Params, _NodeMsg, Default) ->
     Default;
+wasm_call(fallback_wasm_slot, Func, Params, _NodeMsg, Default) ->
+    fallback_wasm_slot_call(Func, Params, Default);
 wasm_call({fast_wasm, Pid, _Base}, Func, Params, _NodeMsg, Default) when is_pid(Pid) ->
     fast_beamr_call(Pid, Func, Params, Default);
 wasm_call(WasmBase, Func, Params, NodeMsg, Default) when is_map(WasmBase) ->
@@ -1380,6 +1400,129 @@ wasm_call(WasmBase, Func, Params, NodeMsg, Default) when is_map(WasmBase) ->
                 _ -> Default
             end
     end.
+
+fallback_wasm_root() ->
+    case ets:lookup(?TABLE, fallback_wasm_root) of
+        [{fallback_wasm_root, R}] -> R;
+        _ -> 0
+    end.
+
+fallback_comp_key(0, Key) -> Key;
+fallback_comp_key(Ns, Key) ->
+    Mask64 = 16#FFFFFFFFFFFFFFFF,
+    ((Ns band Mask64) bxor (Key band Mask64)) band Mask64.
+
+fallback_wasm_slot_call(<<"db_reset">>, [], _Default) ->
+    ets:match_delete(?TABLE, {{wasm_slot_rec, '_', '_'}, '_'}),
+    ets:match_delete(?TABLE, {{wasm_slot_contract, '_'}, '_'}),
+    ets:insert(?TABLE, {fallback_wasm_root, 0}),
+    0;
+fallback_wasm_slot_call(<<"db_root_hash">>, [], _Default) ->
+    fallback_wasm_root();
+fallback_wasm_slot_call(<<"db_count">>, [], _Default) ->
+    ets:foldl(fun
+        ({{wasm_slot_rec, _, _}, #{active := active}}, Acc) -> Acc + 1;
+        (_, Acc) -> Acc
+    end, 0, ?TABLE);
+fallback_wasm_slot_call(<<"db_count_ns">>, [Ns], _Default) ->
+    ets:foldl(fun
+        ({{wasm_slot_rec, RecNs, _}, #{active := active}}, Acc) when RecNs =:= Ns -> Acc + 1;
+        (_, Acc) -> Acc
+    end, 0, ?TABLE);
+fallback_wasm_slot_call(<<"db_set_contract_ns">>, [Ns, HasMin, MinVal, HasMax, MaxVal, MaxRec], _Default) ->
+    ets:insert(?TABLE, {{wasm_slot_contract, Ns}, #{
+        has_min => (HasMin =/= 0),
+        min_val => MinVal,
+        has_max => (HasMax =/= 0),
+        max_val => MaxVal,
+        max_records => if MaxRec > 0 -> MaxRec; true -> 1024 end
+    }}),
+    1;
+fallback_wasm_slot_call(<<"db_contract_violations_ns">>, [_Ns], _Default) ->
+    0;
+fallback_wasm_slot_call(<<"db_check_put_ns">>, [Ns, Key, Val], _Default) ->
+    case ets:lookup(?TABLE, {wasm_slot_contract, Ns}) of
+        [{{wasm_slot_contract, Ns}, #{has_min := HasMin, min_val := MinV, has_max := HasMax, max_val := MaxV, max_records := MaxRec}}] ->
+            if HasMin andalso Val < MinV -> -422;
+               HasMax andalso Val > MaxV -> -422;
+               true ->
+                Exists = fallback_wasm_slot_call(<<"db_has_ns">>, [Ns, Key], 0) =:= 1,
+                case Exists of
+                    true -> 1;
+                    false ->
+                        Cnt = fallback_wasm_slot_call(<<"db_count_ns">>, [Ns], 0),
+                        if Cnt >= MaxRec -> -507; true -> 1 end
+                end
+            end;
+        _ -> 1
+    end;
+fallback_wasm_slot_call(<<"db_put">>, [Key, Val, Seq], Default) ->
+    fallback_wasm_slot_call(<<"db_put_ns">>, [0, Key, Val, Seq], Default);
+fallback_wasm_slot_call(<<"db_put_ns">>, [Ns, Key, Val, Seq], _Default) ->
+    CompKey = fallback_comp_key(Ns, Key),
+    CurrRoot = fallback_wasm_root(),
+    case ets:lookup(?TABLE, {wasm_slot_rec, Ns, Key}) of
+        [{{wasm_slot_rec, Ns, Key}, #{active := active, val := OldVal, ver := OldVer}}] ->
+            OldH = hydb_contract:canonical_hash_64(CompKey, OldVal, OldVer),
+            NewVer = OldVer + 1,
+            NewH = hydb_contract:canonical_hash_64(CompKey, Val, NewVer),
+            NewRoot = combine_roots(combine_roots(CurrRoot, OldH), NewH),
+            ets:insert(?TABLE, {{wasm_slot_rec, Ns, Key}, #{active => active, val => Val, ver => NewVer, seq => Seq}}),
+            ets:insert(?TABLE, {fallback_wasm_root, NewRoot}),
+            NewRoot;
+        [{{wasm_slot_rec, Ns, Key}, #{active := tombstone, ver := OldVer}}] ->
+            NewVer = OldVer + 1,
+            NewH = hydb_contract:canonical_hash_64(CompKey, Val, NewVer),
+            NewRoot = combine_roots(CurrRoot, NewH),
+            ets:insert(?TABLE, {{wasm_slot_rec, Ns, Key}, #{active => active, val => Val, ver => NewVer, seq => Seq}}),
+            ets:insert(?TABLE, {fallback_wasm_root, NewRoot}),
+            NewRoot;
+        [] ->
+            NewH = hydb_contract:canonical_hash_64(CompKey, Val, 1),
+            NewRoot = combine_roots(CurrRoot, NewH),
+            ets:insert(?TABLE, {{wasm_slot_rec, Ns, Key}, #{active => active, val => Val, ver => 1, seq => Seq}}),
+            ets:insert(?TABLE, {fallback_wasm_root, NewRoot}),
+            NewRoot
+    end;
+fallback_wasm_slot_call(<<"db_del">>, [Key, Seq], Default) ->
+    fallback_wasm_slot_call(<<"db_del_ns">>, [0, Key, Seq], Default);
+fallback_wasm_slot_call(<<"db_del_ns">>, [Ns, Key, Seq], _Default) ->
+    CompKey = fallback_comp_key(Ns, Key),
+    CurrRoot = fallback_wasm_root(),
+    case ets:lookup(?TABLE, {wasm_slot_rec, Ns, Key}) of
+        [{{wasm_slot_rec, Ns, Key}, #{active := active, val := OldVal, ver := OldVer}}] ->
+            OldH = hydb_contract:canonical_hash_64(CompKey, OldVal, OldVer),
+            NewVer = OldVer + 1,
+            NewRoot = combine_roots(CurrRoot, OldH),
+            ets:insert(?TABLE, {{wasm_slot_rec, Ns, Key}, #{active => tombstone, val => 0, ver => NewVer, seq => Seq}}),
+            ets:insert(?TABLE, {fallback_wasm_root, NewRoot}),
+            NewRoot;
+        _ ->
+            CurrRoot
+    end;
+fallback_wasm_slot_call(<<"db_has">>, [Key], Default) ->
+    fallback_wasm_slot_call(<<"db_has_ns">>, [0, Key], Default);
+fallback_wasm_slot_call(<<"db_has_ns">>, [Ns, Key], _Default) ->
+    case ets:lookup(?TABLE, {wasm_slot_rec, Ns, Key}) of
+        [{{wasm_slot_rec, Ns, Key}, #{active := active}}] -> 1;
+        _ -> 0
+    end;
+fallback_wasm_slot_call(<<"db_get">>, [Key], Default) ->
+    fallback_wasm_slot_call(<<"db_get_ns">>, [0, Key], Default);
+fallback_wasm_slot_call(<<"db_get_ns">>, [Ns, Key], Default) ->
+    case ets:lookup(?TABLE, {wasm_slot_rec, Ns, Key}) of
+        [{{wasm_slot_rec, Ns, Key}, #{active := active, val := Val}}] -> Val;
+        _ -> Default
+    end;
+fallback_wasm_slot_call(<<"db_version">>, [Key], Default) ->
+    fallback_wasm_slot_call(<<"db_version_ns">>, [0, Key], Default);
+fallback_wasm_slot_call(<<"db_version_ns">>, [Ns, Key], _Default) ->
+    case ets:lookup(?TABLE, {wasm_slot_rec, Ns, Key}) of
+        [{{wasm_slot_rec, Ns, Key}, #{ver := Ver}}] -> Ver;
+        _ -> 0
+    end;
+fallback_wasm_slot_call(_Func, _Params, Default) ->
+    Default.
 
 check_epoch(undefined, CurrentEpoch) -> {ok, CurrentEpoch};
 check_epoch(ReqEpoch, CurrentEpoch) when is_integer(ReqEpoch) ->
@@ -1755,7 +1898,8 @@ handle_call({contract_register_schema, Namespace, Cfg, ReqEpoch}, _From, State =
                                         <<"ver">> => 1,
                                         <<"prev_hash">> => PrevHash,
                                         <<"hash">> => NewHash,
-                                        <<"state_root">> => StateRoot
+                                        <<"state_root">> => StateRoot,
+                                        <<"state_root_str">> => integer_to_binary(StateRoot)
                                     },
                                     NewHist = [Event | lists:sublist(Hist, 49)],
                                     ets:insert(?TABLE, {history, NewHist}),
@@ -1940,7 +2084,8 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                                         <<"ver">> => Ver,
                                         <<"prev_hash">> => PrevHash,
                                         <<"hash">> => NewHash,
-                                        <<"state_root">> => StateRoot
+                                        <<"state_root">> => StateRoot,
+                                        <<"state_root_str">> => integer_to_binary(StateRoot)
                                     },
                                     NewHist = [Event | lists:sublist(Hist, 49)],
                                     ets:insert(?TABLE, {history, NewHist}),
@@ -2276,7 +2421,8 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                                         <<"ver">> => DelVer,
                                         <<"prev_hash">> => PrevHash,
                                         <<"hash">> => NewHash,
-                                        <<"state_root">> => StateRoot
+                                        <<"state_root">> => StateRoot,
+                                        <<"state_root_str">> => integer_to_binary(StateRoot)
                                     },
                                     NewHist = [Event | lists:sublist(Hist, 49)],
                                     ets:insert(?TABLE, {history, NewHist}),
@@ -2443,6 +2589,8 @@ handle_call(get_state, _From, State = #state{wasm_base = WasmBase, node_msg = No
         <<"seq">> => Seq,
         <<"latest_hash">> => LatestHash,
         <<"db_root_hash">> => RootHash,
+        <<"db_root_hash_str">> => integer_to_binary(RootHash),
+        <<"state_root_str">> => integer_to_binary(RootHash),
         <<"db_records_count">> => Count,
         <<"history_length">> => length(Hist),
         <<"active_sessions">> => ActiveSessions,
