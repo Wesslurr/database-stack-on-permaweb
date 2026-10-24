@@ -46,6 +46,9 @@ jobs:
           node scripts/gen-wallet.mjs
           node scripts/gen-wallet-su.mjs
 
+      - name: Run Phase 01 Security & Cluster Endpoint Hardening Tests
+        run: npm run test:security
+
       - name: Run Cross-Language Conformance Suite (JS, Erlang, Rust, Lua)
         run: npm run test:conformance
 

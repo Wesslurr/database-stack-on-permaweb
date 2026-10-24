@@ -15,6 +15,7 @@
 -export([start_link/0, ensure_started/0, reset/0, is_connected/0, get_current_tick/0, get_state_root/0, get_epoch/0]).
 -export([get_tick/0, get_state/0, get_key/1, get_wal/0, get_wal_batch/2, get_status/0, get_status_map/0, fence_epoch/1, recover_wal/0, simulate_restart_from_wal/0]).
 -export([get_tick_from_req/3, get_state_from_req/3, get_key_from_req/3, get_wal_from_req/3, get_wal_batch_from_req/3, get_status_from_req/3, reset_from_req/3, fence_from_req/3, restart_from_req/3, handle_scheduler_http/4]).
+-export([verify_admin_req/1, is_test_profile/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TABLE, sd_ram_store).
@@ -343,19 +344,41 @@ get_status_from_req(_Base, _Req, _Opts) ->
 
 fence_from_req(_Base, Req, _Opts) ->
     ensure_started(),
-    CurrEpoch = lookup_val(epoch, 1),
-    NewEpoch = parse_int_field(<<"epoch">>, Req, CurrEpoch),
-    fence_epoch(NewEpoch).
+    case verify_admin_req(Req) of
+        {error, ErrMap} -> ErrMap;
+        ok ->
+            CurrEpoch = lookup_val(epoch, 1),
+            NewEpoch = parse_int_field(<<"epoch">>, Req, CurrEpoch),
+            fence_epoch(NewEpoch)
+    end.
 
-restart_from_req(_Base, _Req, _Opts) ->
+restart_from_req(_Base, Req, _Opts) ->
     ensure_started(),
-    simulate_restart_from_wal().
+    case verify_admin_req(Req) of
+        {error, ErrMap} -> ErrMap;
+        ok ->
+            simulate_restart_from_wal()
+    end.
 
-reset_from_req(_Base, _Req, _Opts) ->
+reset_from_req(_Base, Req, _Opts) ->
     ensure_started(),
-    case reset() of
-        {ok, Res} -> Res;
-        Res -> Res
+    case verify_admin_req(Req) of
+        {error, ErrMap} -> ErrMap;
+        ok ->
+            case is_test_profile() of
+                false ->
+                    #{
+                        <<"ok">> => false,
+                        <<"status">> => 403,
+                        <<"error_code">> => <<"ERR_RESET_DISABLED">>,
+                        <<"error">> => <<"Reset endpoint is strictly disabled outside test profile">>
+                    };
+                true ->
+                    case reset() of
+                        {ok, Res} -> Res;
+                        Res -> Res
+                    end
+            end
     end.
 
 %% Compatibility handler for ~scheduler@1.0 backward routing
@@ -797,19 +820,133 @@ read_wal_entries(Path) ->
         _ -> []
     end.
 
-parse_int_field(Key, Req, Default) when is_map(Req) ->
-    Val = case hb_ao:get(Key, Req, #{}) of
-        not_found ->
-            case hb_ao:get(<< "query/", Key/binary >>, Req, #{}) of
-                not_found ->
-                    case hb_ao:get(<< "body/", Key/binary >>, Req, #{}) of
-                        not_found -> Default;
-                        V3 -> V3
-                    end;
-                V2 -> V2
+hb_safe_get(Key, Req, Default) ->
+    case erlang:function_exported(hb_ao, get, 3) of
+        true ->
+            try hb_ao:get(Key, Req, #{}) of
+                not_found -> Default;
+                Val -> Val
+            catch _:_ -> Default
             end;
-        V1 -> V1
-    end,
+        false -> Default
+    end.
+
+parse_raw_field(Key, Req, Default) when is_map(Req) ->
+    case maps:get(Key, Req, not_found) of
+        not_found ->
+            QueryKey = << "query/", Key/binary >>,
+            case maps:get(QueryKey, Req, not_found) of
+                not_found ->
+                    BodyKey = << "body/", Key/binary >>,
+                    case maps:get(BodyKey, Req, not_found) of
+                        not_found ->
+                            case maps:get(<<"body">>, Req, not_found) of
+                                Bin when is_binary(Bin), byte_size(Bin) > 0 ->
+                                    try json:decode(Bin) of
+                                        Decoded when is_map(Decoded) ->
+                                            maps:get(Key, Decoded, Default);
+                                        _ -> Default
+                                    catch _:_ -> Default
+                                    end;
+                                Map when is_map(Map) ->
+                                    maps:get(Key, Map, Default);
+                                _ ->
+                                    case hb_safe_get(Key, Req, not_found) of
+                                        not_found ->
+                                            case hb_safe_get(QueryKey, Req, not_found) of
+                                                not_found ->
+                                                    case hb_safe_get(BodyKey, Req, not_found) of
+                                                        not_found -> Default;
+                                                        V3 -> V3
+                                                    end;
+                                                V2 -> V2
+                                            end;
+                                        V1 -> V1
+                                    end
+                            end;
+                        Vb -> Vb
+                    end;
+                Vq -> Vq
+            end;
+        V0 -> V0
+    end;
+parse_raw_field(_Key, _Req, Default) ->
+    Default.
+
+parse_bin_field(Key, Req, Default) when is_map(Req) ->
+    Val = parse_raw_field(Key, Req, Default),
+    if is_binary(Val) -> Val;
+       is_atom(Val) andalso Val =/= undefined -> atom_to_binary(Val, utf8);
+       is_integer(Val) -> integer_to_binary(Val);
+       true -> Default
+    end;
+parse_bin_field(_Key, _Req, Default) ->
+    Default.
+
+extract_admin_token(Req) ->
+    case parse_bin_field(<<"admin_token">>, Req, undefined) of
+        undefined ->
+            case parse_bin_field(<<"authorization">>, Req, undefined) of
+                undefined ->
+                    case parse_bin_field(<<"headers/authorization">>, Req, undefined) of
+                        undefined -> undefined;
+                        AuthHdr -> parse_bearer_token(AuthHdr)
+                    end;
+                AuthVal -> parse_bearer_token(AuthVal)
+            end;
+        Tok -> Tok
+    end.
+
+parse_bearer_token(<<"Bearer ", Token/binary>>) -> string:trim(Token);
+parse_bearer_token(<<"bearer ", Token/binary>>) -> string:trim(Token);
+parse_bearer_token(Token) when is_binary(Token) -> string:trim(Token);
+parse_bearer_token(_) -> undefined.
+
+verify_admin_req(Req) ->
+    GivenToken = extract_admin_token(Req),
+    ExpectedHex = string:uppercase(binary:encode_hex(node_auth_secret())),
+    case GivenToken of
+        undefined ->
+            {error, #{
+                <<"ok">> => false,
+                <<"status">> => 401,
+                <<"error_code">> => <<"ERR_ADMIN_UNAUTHORIZED">>,
+                <<"error">> => <<"Missing operator admin_token for protected administrative action">>
+            }};
+        TokenBin when is_binary(TokenBin) ->
+            case string:uppercase(TokenBin) =:= ExpectedHex of
+                true -> ok;
+                false ->
+                    {error, #{
+                        <<"ok">> => false,
+                        <<"status">> => 403,
+                        <<"error_code">> => <<"ERR_ADMIN_UNAUTHORIZED">>,
+                        <<"error">> => <<"Invalid operator admin_token">>
+                    }}
+            end
+    end.
+
+is_test_profile() ->
+    case os:getenv("HYDB_PROFILE") of
+        "prod" -> false;
+        "production" -> false;
+        "test" -> true;
+        _ ->
+            case os:getenv("NODE_ENV") of
+                "production" -> false;
+                "test" -> true;
+                _ ->
+                    case os:getenv("HYDB_ENV") of
+                        "prod" -> false;
+                        "production" -> false;
+                        "test" -> true;
+                        _ -> true
+                    end
+            end
+    end.
+
+parse_int_field(Key, Req, Default) when is_map(Req) ->
+    Val = parse_raw_field(Key, Req, Default),
     to_integer(Val, Default);
 parse_int_field(_Key, _Req, Default) -> Default.
 

@@ -321,8 +321,46 @@ is_trusted_arweave_gateway(GatewayBin) when is_binary(GatewayBin) ->
     end;
 is_trusted_arweave_gateway(_) -> false.
 
+extract_admin_token(Req) ->
+    case parse_bin_field(<<"admin_token">>, Req, undefined) of
+        undefined ->
+            case parse_bin_field(<<"authorization">>, Req, undefined) of
+                undefined ->
+                    case parse_bin_field(<<"headers/authorization">>, Req, undefined) of
+                        undefined -> undefined;
+                        AuthHdr -> parse_bearer_token(AuthHdr)
+                    end;
+                AuthVal -> parse_bearer_token(AuthVal)
+            end;
+        Tok -> Tok
+    end.
+
+parse_bearer_token(<<"Bearer ", Token/binary>>) -> string:trim(Token);
+parse_bearer_token(<<"bearer ", Token/binary>>) -> string:trim(Token);
+parse_bearer_token(Token) when is_binary(Token) -> string:trim(Token);
+parse_bearer_token(_) -> undefined.
+
+is_test_profile() ->
+    case os:getenv("HYDB_PROFILE") of
+        "prod" -> false;
+        "production" -> false;
+        "test" -> true;
+        _ ->
+            case os:getenv("NODE_ENV") of
+                "production" -> false;
+                "test" -> true;
+                _ ->
+                    case os:getenv("HYDB_ENV") of
+                        "prod" -> false;
+                        "production" -> false;
+                        "test" -> true;
+                        _ -> true
+                    end
+            end
+    end.
+
 verify_admin_req(Req, ForceRequire) ->
-    GivenToken = parse_bin_field(<<"admin_token">>, Req, undefined),
+    GivenToken = extract_admin_token(Req),
     IsLocked = case ets:lookup(?TABLE, admin_locked) of
         [{admin_locked, true}] -> true;
         _ -> false
@@ -334,7 +372,7 @@ verify_admin_req(Req, ForceRequire) ->
         {undefined, true} ->
             {error, #{
                 <<"ok">> => false,
-                <<"status">> => 403,
+                <<"status">> => 401,
                 <<"error_code">> => <<"ERR_ADMIN_UNAUTHORIZED">>,
                 <<"error">> => <<"Missing operator admin_token for protected administrative action">>
             }};
@@ -548,17 +586,27 @@ replay_from_req(_Base, Req, _Opts) ->
 
 reset_from_req(_Base, Req, _Opts) ->
     ensure_started(),
-    case verify_admin_req(Req, false) of
+    case verify_admin_req(Req, true) of
         {error, ErrMap} ->
             ErrMap;
         ok ->
-            ok = reset(),
-            #{
-                <<"ok">> => true,
-                <<"device">> => <<"hymessage@1.0">>,
-                <<"contract_version">> => hydb_contract:contract_version(),
-                <<"message">> => <<"state reset successfully">>
-            }
+            case is_test_profile() of
+                false ->
+                    #{
+                        <<"ok">> => false,
+                        <<"status">> => 403,
+                        <<"error_code">> => <<"ERR_RESET_DISABLED">>,
+                        <<"error">> => <<"Reset endpoint is strictly disabled outside test profile">>
+                    };
+                true ->
+                    ok = reset(),
+                    #{
+                        <<"ok">> => true,
+                        <<"device">> => <<"hymessage@1.0">>,
+                        <<"contract_version">> => hydb_contract:contract_version(),
+                        <<"message">> => <<"state reset successfully">>
+                    }
+            end
     end.
 
 %% ============================================================================

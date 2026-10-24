@@ -26,3 +26,4 @@ ao_process/fraud_batch.json
 
 # Internal scratch / benchmark scripts
 scratch/
+scripts/ci_watch.py

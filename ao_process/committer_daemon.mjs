@@ -72,6 +72,21 @@ function computeBatchSig(batch, secretKey) {
   return crypto.createHmac('sha256', secretKey).update(payload).digest('hex').toUpperCase();
 }
 
+export function deriveClusterSecret(walletPath = WALLET_PATH) {
+  if (existsSync(walletPath)) {
+    try {
+      const walletBytes = readFileSync(walletPath);
+      return crypto.createHash('sha256').update(walletBytes).digest();
+    } catch (e) {
+      throw new Error(`Failed to read cluster WALLET_PATH (${walletPath}): ${e.message}`);
+    }
+  } else if (process.env.HYDB_CLUSTER_SECRET && process.env.HYDB_CLUSTER_SECRET.trim().length > 0) {
+    return crypto.createHash('sha256').update(Buffer.from(process.env.HYDB_CLUSTER_SECRET.trim())).digest();
+  } else {
+    throw new Error('Fatal: missing cluster secret. Set WALLET_PATH or HYDB_CLUSTER_SECRET environment variable.');
+  }
+}
+
 export async function processCommitterCycle() {
   const suStatus = await httpFetch(`${SU_SCHEDULER_URL}/status`);
   if (suStatus.status !== 200 || !suStatus.body) {
@@ -98,16 +113,8 @@ export async function processCommitterCycle() {
   const proposedStateRoot = String(lastEvent.state_root || lastEvent.db_root_hash || suStatus.body.raw_root_hash || '0');
   const proposedHash = String(lastEvent.hash || suStatus.body.latest_hash || '');
 
-  // Derive cluster secret for HMAC signature
-  let secretKey = Buffer.from('HYDB_DEFAULT_CLUSTER_SECRET');
-  if (existsSync(WALLET_PATH)) {
-    try {
-      const walletBytes = readFileSync(WALLET_PATH);
-      secretKey = crypto.createHash('sha256').update(walletBytes).digest();
-    } catch {
-      // Fallback to default
-    }
-  }
+  // Derive cluster secret for HMAC signature - NO guessable fallback permitted
+  const secretKey = deriveClusterSecret(WALLET_PATH);
 
   const batchData = {
     su_id: 'SU_NODE_1',

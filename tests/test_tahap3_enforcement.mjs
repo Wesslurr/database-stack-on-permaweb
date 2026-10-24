@@ -76,7 +76,7 @@ async function main() {
   const validAdminToken = clusterSecret.toString('hex').toUpperCase();
 
   await httpGet(`${HOT_URL}/reset?admin_token=${validAdminToken}`);
-  await httpGet(`${SU_SCHEDULER_URL}/reset`);
+  await httpGet(`${SU_SCHEDULER_URL}/reset?admin_token=${validAdminToken}`);
   await new Promise(r => setTimeout(r, 600));
 
   console.log('[Test 1] Zero Implicit Fallback for Unregistered Namespaces:');

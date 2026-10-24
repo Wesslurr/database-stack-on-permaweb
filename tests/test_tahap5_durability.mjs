@@ -143,7 +143,7 @@ async function main() {
   // Reset both nodes to clean baseline
   console.log('[Setup] Resetting Hot Node and Storage Unit to clean state...');
   await httpGet(`${HOT_URL}/reset?admin_token=${validAdminToken}`);
-  await httpGet(`${SU_SCHEDULER_URL}/reset`);
+  await httpGet(`${SU_SCHEDULER_URL}/reset?admin_token=${validAdminToken}`);
   await new Promise(r => setTimeout(r, 600));
 
   // --------------------------------------------------------------------------
@@ -262,7 +262,7 @@ async function main() {
   console.log('\n[Test 4] Resilient Recovery & Clean EOF Truncation (Node Crash Mid-Write):');
   // --------------------------------------------------------------------------
   // Baseline recovery check
-  const baseRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart`);
+  const baseRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart?admin_token=${validAdminToken}`);
   assert(isTrue(baseRecover.body.ok), 'SU simulate_restart succeeds');
   assert(baseRecover.body.halt_reason === 'none', `Baseline recovery halt_reason is none (got ${baseRecover.body.halt_reason})`);
   assert(isFalse(baseRecover.body.truncated_detected), 'Baseline recovery truncated_detected is false');
@@ -274,7 +274,7 @@ async function main() {
   appendFileSync(WAL_PATH, '{"action":"put","backend":"wasm_slot","canonical_val":"999","contract_ver');
 
   // Trigger simulate_restart on SU
-  const truncRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart`);
+  const truncRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart?admin_token=${validAdminToken}`);
   assert(isTrue(truncRecover.body.ok), 'Recovery succeeds despite truncated line at EOF');
   assert(isTrue(truncRecover.body.truncated_detected), 'truncated_detected is true for truncated EOF line');
   assert(truncRecover.body.halt_reason === 'none', 'Recovery does not abort or fail on EOF truncated line');
@@ -282,7 +282,7 @@ async function main() {
 
   // Restore clean WAL
   writeFileSync(WAL_PATH, originalWal);
-  await httpGet(`${SU_SCHEDULER_URL}/simulate_restart`);
+  await httpGet(`${SU_SCHEDULER_URL}/simulate_restart?admin_token=${validAdminToken}`);
 
   // --------------------------------------------------------------------------
   console.log('\n[Test 5] Strict Cryptographic Recovery Invariants:');
@@ -304,7 +304,7 @@ async function main() {
 
   appendFileSync(WAL_PATH, JSON.stringify(gappedEntry) + '\n');
 
-  const gapRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart`);
+  const gapRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart?admin_token=${validAdminToken}`);
   assert(isTrue(gapRecover.body.ok), 'Recovery call returned');
   assert(gapRecover.body.halt_reason.includes('sequence_gap'), `Recovery halts on sequence gap (got ${gapRecover.body.halt_reason})`);
   assert(Number(gapRecover.body.tick) === Number(lastValidEntry.seq), `Recovery state halted at last valid sequence (${gapRecover.body.tick})`);
@@ -321,7 +321,7 @@ async function main() {
   };
   appendFileSync(WAL_PATH, JSON.stringify(brokenChainEntry) + '\n');
 
-  const chainRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart`);
+  const chainRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart?admin_token=${validAdminToken}`);
   assert(chainRecover.body.halt_reason.includes('broken_hash_chain'), `Recovery halts on broken hash chain (got ${chainRecover.body.halt_reason})`);
 
   // Restore clean WAL
@@ -337,12 +337,12 @@ async function main() {
   };
   appendFileSync(WAL_PATH, JSON.stringify(tamperedEntry) + '\n');
 
-  const tamperRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart`);
+  const tamperRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart?admin_token=${validAdminToken}`);
   assert(tamperRecover.body.halt_reason.includes('hash_mismatch'), `Recovery halts on tampered event hash (got ${tamperRecover.body.halt_reason})`);
 
   // Final cleanup and recovery
   writeFileSync(WAL_PATH, originalWal);
-  const finalRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart`);
+  const finalRecover = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart?admin_token=${validAdminToken}`);
   assert(finalRecover.body.halt_reason === 'none', 'Final clean recovery succeeded with zero halt reason');
 
   console.log('\n========================================================================');

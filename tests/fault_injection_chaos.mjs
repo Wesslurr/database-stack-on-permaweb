@@ -204,7 +204,7 @@ async function runChaosSuite() {
     // Reset baseline
     console.log('[Setup] Initializing clean test baseline on Hot & SU...');
     await httpFetch(`${HOT_URL}/reset?admin_token=${adminToken}`);
-    await httpFetch(`${SU_SCHEDULER_URL}/reset`);
+    await httpFetch(`${SU_SCHEDULER_URL}/reset?admin_token=${adminToken}`);
     await new Promise(r => setTimeout(r, 600));
 
     // ------------------------------------------------------------------------
@@ -276,7 +276,7 @@ async function runChaosSuite() {
     const expectedSeq = Number(stateBefore.body.seq);
 
     // Trigger cold restart of SU RAM from disk wal.log
-    const suRestartRes = await httpFetch(`${SU_SCHEDULER_URL}/simulate_restart`);
+    const suRestartRes = await httpFetch(`${SU_SCHEDULER_URL}/simulate_restart?admin_token=${adminToken}`);
     assert(suRestartRes.status === 200, 'SU cold restart simulated successfully');
     assert(Number(suRestartRes.body.tick) === expectedSeq, `SU recovered tick (${suRestartRes.body.tick}) matches Hot Node seq (${expectedSeq})`);
     assert(suRestartRes.body.halt_reason === 'none', 'SU WAL recovery executed cleanly with zero halt reason');

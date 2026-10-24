@@ -88,7 +88,7 @@ async function main() {
   // -------------------------------------------------------------------
   console.log('\n[PHASE 1] Verifikasi Endpoint Native & Koneksi SU Inbound Subscriber...');
   await httpGet(`${HOT_URL}/reset?admin_token=${validAdminToken}`);
-  await httpGet(`${SU_SCHEDULER_URL}/reset`);
+  await httpGet(`${SU_SCHEDULER_URL}/reset?admin_token=${validAdminToken}`);
   await new Promise(r => setTimeout(r, 600));
 
   let suSchedStatus = await httpGet(`${SU_SCHEDULER_URL}/status`);
@@ -202,7 +202,7 @@ async function main() {
   const expectedRoot64 = String(hotTipBeforeRestart.raw_root_hash);
 
   // Wipe SU ETS RAM and trigger automatic recovery from disk wal.log via SU HTTP API
-  const simRes = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart`);
+  const simRes = await httpGet(`${SU_SCHEDULER_URL}/simulate_restart?admin_token=${validAdminToken}`);
   const suStatusAfter = await httpGet(`${SU_SCHEDULER_URL}/status`);
   const suTickAfterRestart = Number(simRes.tick || suStatusAfter.latest_tick_ram);
   const suRootAfterRestart = String(simRes.state_root_str || suStatusAfter.state_root_str || suStatusAfter.raw_root_hash);
@@ -223,7 +223,7 @@ async function main() {
   // PHASE 5: HOT NODE CRASH & FULL REPLAY RECOVERY (SCENARIO G.1 & G.8)
   // -------------------------------------------------------------------
   console.log('\n[PHASE 5] Simulasi Hot Node Mati Mendadak & Full Replay Failover...');
-  await httpGet(`${HOT_URL}/reset`);
+  await httpGet(`${HOT_URL}/reset?admin_token=${validAdminToken}`);
   const wipedState = await httpGet(`${HOT_URL}/state`);
   if (Number(wipedState.seq) !== 0) throw new Error('Hot Node reset failed');
   console.log(`  * Hot Node Wiped:     Seq=0, Root=0`);
@@ -393,8 +393,8 @@ async function main() {
   // -------------------------------------------------------------------
   console.log('\n[PHASE 10] Uji Pencegahan Split-Brain & Promosi Epoch Fencing (Dua Hot Node)...');
   // Promote Hot Node, SU Node, and Arbitrator Security Domain to Epoch 2
-  const hotPromote = await httpGet(`${HOT_URL}/promote?epoch=2`);
-  const suFence = await httpGet(`${SU_SCHEDULER_URL}/fence_epoch?epoch=2`);
+  const hotPromote = await httpGet(`${HOT_URL}/promote?epoch=2&admin_token=${validAdminToken}`);
+  const suFence = await httpGet(`${SU_SCHEDULER_URL}/fence_epoch?epoch=2&admin_token=${validAdminToken}`);
   if (Number(suFence.epoch) !== 2) throw new Error(`SU fence_epoch failed: ${JSON.stringify(suFence)}`);
   const arbPromote = domain.promoteEpoch(2);
   console.log(`  * Promoted Epoch:     Epoch ${hotPromote.epoch} active on Hot, SU, and Arbitrator`);
@@ -909,7 +909,7 @@ async function main() {
 
   // 13e. Crash-Recovery Replay of Arweave Contract TX: Wipe Hot Node -> Replay 1..36 from SU WAL -> Re-pulls WASM from ArLocal & restores exact StateRoot!
   const allWal36 = await fetchSuBatch(1, 36);
-  await httpGet(`${HOT_URL}/reset`);
+  await httpGet(`${HOT_URL}/reset?admin_token=${validAdminToken}`);
   const replay36 = await httpPost(`${HOT_URL}/replay`, { events: allWal36.events });
   const vaultReadAfterReplay = await vaultClient.get(888);
   const replayedRoot36 = String(replay36.raw_root_hash || replay36.state_root);
