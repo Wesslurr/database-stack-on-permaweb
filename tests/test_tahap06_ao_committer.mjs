@@ -40,6 +40,15 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '..');
 
+function resolveLuaBinary() {
+  for (const bin of ['lua5.3', 'lua', 'lua5.4', 'luajit']) {
+    const check = spawnSync(bin, ['-v'], { encoding: 'utf-8' });
+    if (check.status === 0) return bin;
+  }
+  return 'lua';
+}
+const LUA_BIN = resolveLuaBinary();
+
 let passed = 0;
 let failed = 0;
 
@@ -129,9 +138,9 @@ class LuaArbitratorHarness {
     const tmpLua = join(TEST_TMP_DIR, 'run_arbit.lua');
     const luaSource = this.generateLuaScript(this.historyMessages);
     writeFileSync(tmpLua, luaSource, 'utf-8');
-    const res = spawnSync('lua5.3', [tmpLua], { encoding: 'utf-8' });
+    const res = spawnSync(LUA_BIN, [tmpLua], { encoding: 'utf-8' });
     if (res.status !== 0) {
-      throw new Error(`Lua Arbitrator execution failed: ${res.stderr}`);
+      throw new Error(`Lua Arbitrator execution failed (${LUA_BIN}): ${res.stderr || res.error?.message}`);
     }
     return JSON.parse(res.stdout.trim());
   }
