@@ -14,7 +14,7 @@ on:
 
 jobs:
   conformance-and-specs:
-    name: Conformance & Security Verification
+    name: Conformance, AO & SDK Verification
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -37,8 +37,8 @@ jobs:
           otp-version: "27.0"
           rebar3-version: "3.23.0"
 
-      - name: Install Dependencies
-        run: npm ci || npm install
+      - name: Install Dependencies (Reproducible)
+        run: npm ci
 
       - name: Generate Ephemeral Test Wallets
         run: |
@@ -52,8 +52,19 @@ jobs:
       - name: Run AO Arbitrator & Policy Circuit Verification
         run: npm run test:ao
 
-      - name: Run SDK Canonical Manifest & Preflight Tests
-        run: npm run test:sdk
-
       - name: Run Business Scenarios (Financial Ledger & Gaming State)
         run: npm run test:business
+
+      - name: Start ArLocal Gateway
+        run: |
+          npx arlocal 1984 > arlocal.log 2>&1 &
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:1984/info; then
+              echo "ArLocal is up on :1984"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run SDK Canonical Manifest & Arweave Publication Tests
+        run: npm run test:sdk

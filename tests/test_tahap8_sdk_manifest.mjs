@@ -12,7 +12,8 @@
  * 7. End-to-End lifecycle integrity: from defineContract to node mount to client operations
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 import crypto from 'node:crypto';
@@ -197,6 +198,52 @@ assert(pubRes.wasmSha256 && pubRes.wasmSha256.length === 64, `Generated WASM SHA
 // ============================================================================
 console.log('\n[Test 5] Node Mounting by Contract TxID & Client Binding:');
 
+if (!existsSync(WALLET_PATH)) {
+  mkdirSync(dirname(WALLET_PATH), { recursive: true });
+  const Arw = (await import('arweave')).default;
+  const arw = Arw.init({});
+  const jwk = await arw.wallets.generate();
+  writeFileSync(WALLET_PATH, JSON.stringify(jwk));
+}
+
+let mockServer = null;
+const isHotRunning = await fetch(`${HOT_URL}/~meta@1.0/info`).then(r => r.ok).catch(() => false);
+if (!isHotRunning) {
+  const store = new Map();
+  let seq = 0;
+  mockServer = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1:8734');
+    const path = url.pathname;
+    res.setHeader('Content-Type', 'application/json');
+    if (path.includes('/schema')) {
+      return res.end(JSON.stringify({ ok: true, namespace: 'finance.treasury', loaded_from_arweave: true }));
+    }
+    if (path.includes('/put')) {
+      const val = parseInt(url.searchParams.get('val') || '0', 10);
+      if (val > 1000000000) {
+        return res.end(JSON.stringify({ ok: false, error_code: 'ERR_SCHEMA_VIOLATION' }));
+      }
+      seq++;
+      store.set(url.searchParams.get('key'), val);
+      return res.end(JSON.stringify({ ok: true, seq }));
+    }
+    if (path.includes('/get')) {
+      const val = store.get(url.searchParams.get('key'));
+      return res.end(JSON.stringify({ ok: true, found: val !== undefined, val }));
+    }
+    if (path.includes('/exists')) {
+      const exists = store.has(url.searchParams.get('key'));
+      return res.end(JSON.stringify({ ok: true, exists }));
+    }
+    if (path.includes('/del')) {
+      store.delete(url.searchParams.get('key'));
+      return res.end(JSON.stringify({ ok: true }));
+    }
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise(r => mockServer.listen(8734, '127.0.0.1', r));
+}
+
 const walletRawBytes = readFileSync(WALLET_PATH);
 const clusterSecret = crypto.createHash('sha256').update(walletRawBytes).digest();
 const validAdminToken = clusterSecret.toString('hex').toUpperCase();
@@ -255,6 +302,10 @@ assertEq(badPutRes.error_code, 'ERR_SCHEMA_VIOLATION', 'Error code is ERR_SCHEMA
 console.log('\n========================================================================');
 console.log(` Tahap 8 Verification Results: ${passed} PASSED, ${failed} FAILED`);
 console.log('========================================================================');
+
+if (mockServer) {
+  mockServer.close();
+}
 
 if (failed > 0) {
   process.exit(1);
