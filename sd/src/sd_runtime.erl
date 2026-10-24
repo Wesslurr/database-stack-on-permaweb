@@ -400,17 +400,30 @@ recover_from_wal(Path) ->
     ets:insert(?TABLE, {epoch, max(1, PersistedEpoch)}),
     case file:read_file(Path) of
         {ok, Content} ->
+            MissingTrailingNewline = (byte_size(Content) > 0) andalso (binary:last(Content) =/= $\n),
             Lines = binary:split(Content, <<"\n">>, [global, trim_all]),
-            validate_and_apply_wal_lines(Path, Lines, 1, ?GENESIS_HASH, 1, 0, 0, []);
+            validate_and_apply_wal_lines(Path, Lines, 1, ?GENESIS_HASH, 1, 0, 0, [], MissingTrailingNewline);
         _ -> 0
     end.
 
-validate_and_apply_wal_lines(_Path, [], _ExpectedSeq, _LastHash, LastEpoch, AppliedCount, AccRoot, _ValidLinesRev) ->
+validate_and_apply_wal_lines(Path, [], _ExpectedSeq, _LastHash, LastEpoch, AppliedCount, AccRoot, ValidLinesRev, MissingTrailingNewline) ->
     CurrEpoch = lookup_val(epoch, 1),
     ets:insert(?TABLE, {epoch, max(CurrEpoch, LastEpoch)}),
     ets:insert(?TABLE, {state_root, AccRoot}),
-    AppliedCount;
-validate_and_apply_wal_lines(Path, [Line | Rest], ExpectedSeq, LastHash, LastEpoch, AppliedCount, AccRoot, ValidLinesRev) ->
+    case MissingTrailingNewline andalso ValidLinesRev =/= [] of
+        true ->
+            ets:insert(?TABLE, {wal_recovery_truncated_detected, true}),
+            case repair_truncated_wal_file(Path, ValidLinesRev) of
+                ok ->
+                    AppliedCount;
+                RepairErr ->
+                    mark_recovery_failure({eof_newline_repair_failed, RepairErr}),
+                    AppliedCount
+            end;
+        false ->
+            AppliedCount
+    end;
+validate_and_apply_wal_lines(Path, [Line | Rest], ExpectedSeq, LastHash, LastEpoch, AppliedCount, AccRoot, ValidLinesRev, MissingTrailingNewline) ->
     case catch json:decode(Line) of
         Event when is_map(Event) ->
             Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
@@ -461,7 +474,8 @@ validate_and_apply_wal_lines(Path, [Line | Rest], ExpectedSeq, LastHash, LastEpo
                         max(LastEpoch, EvEpoch),
                         AppliedCount + 1,
                         NewAccRoot,
-                        [Line | ValidLinesRev]
+                        [Line | ValidLinesRev],
+                        MissingTrailingNewline
                     )
             end;
         _CorruptOrTruncated ->

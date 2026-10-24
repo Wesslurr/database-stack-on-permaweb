@@ -138,6 +138,33 @@ main(_) ->
     end,
 
     %% ========================================================================
+    %% TEST 2C: Valid JSON Tail WITHOUT Trailing Newline + Physical Repair + Subsequent Append
+    %% ========================================================================
+    NoNewlineContent = [
+        json:encode(Ev1), <<"\n">>,
+        json:encode(Ev2), <<"\n">>,
+        json:encode(Ev3) %% Notice: NO trailing <<"\n">>!
+    ],
+    ok = file:write_file(TestWal, NoNewlineContent),
+    Restart2C = sd_runtime:simulate_restart_from_wal(),
+    case Restart2C of
+        #{ <<"ok">> := true, <<"recovered_entries">> := 3, <<"tick">> := 3, <<"truncated_detected">> := true, <<"ready">> := true, <<"health">> := <<"healthy">> } ->
+            ok;
+        Other2C ->
+            io:format("FAIL: valid JSON tail without newline not repaired properly: ~p~n", [Other2C]),
+            halt(1)
+    end,
+    ok = file:write_file(TestWal, [json:encode(Ev4), <<"\n">>], [append]),
+    Restart2D = sd_runtime:simulate_restart_from_wal(),
+    case Restart2D of
+        #{ <<"ok">> := true, <<"recovered_entries">> := 4, <<"tick">> := 4, <<"state_root">> := Ev4Root, <<"ready">> := true, <<"health">> := <<"healthy">> } ->
+            io:format("PASS: valid JSON tail without trailing newline is physically repaired so subsequent append recovers all 4 records~n");
+        Other2D ->
+            io:format("FAIL: append after valid JSON tail without newline glued records or failed recovery: ~p~n", [Other2D]),
+            halt(1)
+    end,
+
+    %% ========================================================================
     %% TEST 3: Mid-File Corruption (Unparseable line followed by other records)
     %% ========================================================================
     MidCorruptContent = [

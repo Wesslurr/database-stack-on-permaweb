@@ -129,6 +129,17 @@ assert(
   'TCP handshake enforces configured cluster membership list even when caller possesses shared secret'
 );
 assert(
+  erlOut.includes('PASS: Mismatched cluster_size vs cluster_members returns ERR_CLUSTER_SIZE_MISMATCH') &&
+  erlOut.includes('PASS: get_configured_cluster_size enforces max(cluster_size, length(cluster_members)) = 3') &&
+  erlOut.includes('PASS: Majority quorum with 1 ACK still FAILS when cluster_members has 3 nodes despite cluster_size=1'),
+  'Cluster size and cluster_members are strictly validated for consistency (no 1-ACK majority on 3-member list)'
+);
+assert(
+  erlOut.includes('PASS: Membership disk persistence failure returns ERR_MEMBERSHIP_PERSIST_FAILED') &&
+  erlOut.includes('PASS: ETS cluster membership remains unchanged (3) when disk persistence fails'),
+  'Membership reconfiguration persists to disk before mutating ETS and fails closed on I/O error'
+);
+assert(
   erlOut.includes('PASS: After explicit admin membership change to 1, majority quorum succeeds with 1 node'),
   'Explicit administrative membership reconfiguration updates quorum threshold safely'
 );

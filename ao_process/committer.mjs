@@ -240,70 +240,220 @@ export function verifyArbitratorEvaluation(evalPayload, batchData, options = {})
 }
 
 /**
- * Verify authoritative Arweave L1 transaction finality and tag binding via an L1 gateway.
+ * Verify authoritative Arweave L1 transaction finality, message/bundle identity,
+ * target AO Process binding, full checkpoint commitment tags, and optional multi-gateway consensus.
  */
-export async function verifyArweaveL1Finality(l1TxId, batchData, options = {}) {
-  const env = detectAoEnvironment(options.gatewayUrl || gatewayUrl, options);
+export async function verifyArweaveL1Finality(l1TxId, batchDataOrId, options = {}) {
+  const batchData =
+    batchDataOrId && typeof batchDataOrId === 'object'
+      ? batchDataOrId
+      : options.expectedBatch || {};
+  const explicitBatchId = typeof batchDataOrId === 'string' ? batchDataOrId : options.batchId;
+
+  const env = detectAoEnvironment(options.gatewayUrl || gatewayUrl, {
+    ...options,
+    environment: options.environment || (options.fetchFn || options.l1GatewayFetchFn || options.gatewayUrl ? 'ao_network' : undefined)
+  });
   if (env !== 'ao_network' || !l1TxId) {
-    return { verified: false, reason: 'Not ao_network or missing l1TxId' };
+    return { verified: false, finalized: false, error_code: 'NOT_AO_NETWORK', reason: 'Not ao_network or missing l1TxId' };
   }
-  const gw = (options.gatewayUrl || gatewayUrl).replace(/\/$/, '');
-  const fetchImpl = options.l1GatewayFetchFn || (typeof options.verifyL1Gateway === 'boolean' && !options.verifyL1Gateway ? null : fetch);
+  const fetchImpl =
+    options.l1GatewayFetchFn ||
+    options.fetchFn ||
+    (typeof options.verifyL1Gateway === 'boolean' && !options.verifyL1Gateway ? null : fetch);
   if (!fetchImpl) {
-    return { verified: false, reason: 'No L1 gateway verifier configured' };
+    return { verified: false, finalized: false, error_code: 'NO_GATEWAY_VERIFIER', reason: 'No L1 gateway verifier configured' };
   }
-  try {
-    const statusRes = await fetchImpl(`${gw}/tx/${l1TxId}/status`);
-    if (!statusRes || statusRes.status !== 200) {
-      return { verified: false, reason: `L1 tx status returned HTTP ${statusRes?.status ?? 0}` };
-    }
-    const statusBody = await statusRes.json();
-    const blockHeight = Number(statusBody?.block_height ?? 0);
-    const confirmations = Number(statusBody?.number_of_confirmations ?? 0);
-    const blockIndepHash = String(statusBody?.block_indep_hash ?? '');
-    const minConf = Number(options.minConfirmations ?? 1);
 
-    if (blockHeight <= 0 || confirmations < minConf || blockIndepHash.length < 32) {
-      return {
-        verified: false,
-        reason: `Insufficient L1 finality proof (height=${blockHeight}, confirmations=${confirmations}, min=${minConf})`
-      };
-    }
+  const rawGateways = Array.isArray(options.l1Gateways) && options.l1Gateways.length > 0
+    ? options.l1Gateways
+    : [options.gatewayUrl || gatewayUrl];
+  const gateways = [...new Set(rawGateways.map((g) => String(g).replace(/\/$/, '')).filter(Boolean))];
+  if (gateways.length === 0) {
+    return { verified: false, finalized: false, error_code: 'NO_GATEWAY_URLS', reason: 'No L1 gateway URLs configured' };
+  }
 
-    const txRes = await fetchImpl(`${gw}/tx/${l1TxId}`);
-    if (!txRes || txRes.status !== 200) {
-      return { verified: false, reason: `L1 tx metadata lookup failed with HTTP ${txRes?.status ?? 0}` };
-    }
-    const txBody = await txRes.json();
-    const expectedBatchId = options.batchId || computeBatchId(batchData);
-    const rawTags = Array.isArray(txBody?.tags) ? txBody.tags : [];
-    const decodeTag = (str) => {
-      try {
-        return Buffer.from(str, 'base64url').toString('utf-8');
-      } catch {
-        return String(str || '');
+  const expectedBatchId = explicitBatchId || computeBatchId(batchData);
+  const expectedMessageId = options.expectedMessageId || l1TxId;
+  const expectedProcessId = options.processId || null;
+  const minConf = Number(options.minConfirmations ?? 1);
+
+  const decodeTag = (str) => {
+    if (typeof str !== 'string') return '';
+    try {
+      const dec = Buffer.from(str, 'base64url').toString('utf-8');
+      if (Buffer.from(dec, 'utf-8').toString('base64url') === str.replace(/=+$/, '')) {
+        return dec;
       }
-    };
-    const hasMatchingBatchTag = rawTags.some((t) => {
-      const name = t.name_decoded || decodeTag(t.name) || t.name;
-      const value = t.value_decoded || decodeTag(t.value) || t.value;
-      return name === 'Batch-Id' && value === expectedBatchId;
-    });
+      return str;
+    } catch {
+      return String(str || '');
+    }
+  };
 
-    if (!hasMatchingBatchTag) {
-      return {
-        verified: false,
-        reason: `L1 transaction ${l1TxId} does not carry matching Batch-Id tag (${expectedBatchId})`
-      };
+  try {
+    let canonicalBlockHash = null;
+    let canonicalBlockHeight = null;
+    let minObservedConfirmations = Infinity;
+
+    for (const gw of gateways) {
+      const statusRes = await fetchImpl(`${gw}/tx/${l1TxId}/status`);
+      if (!statusRes || statusRes.status !== 200) {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'L1_STATUS_HTTP_ERROR',
+          reason: `L1 tx status on gateway ${gw} returned HTTP ${statusRes?.status ?? 0}`
+        };
+      }
+      const statusBody = await statusRes.json();
+      const blockHeight = Number(statusBody?.block_height ?? 0);
+      const confirmations = Number(statusBody?.number_of_confirmations ?? 0);
+      const blockIndepHash = String(statusBody?.block_indep_hash ?? '');
+
+      if (blockHeight <= 0 || confirmations < minConf || blockIndepHash.length < 32) {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'INSUFFICIENT_L1_FINALITY',
+          reason: `Insufficient L1 finality proof on ${gw} (height=${blockHeight}, confirmations=${confirmations}, min=${minConf})`
+        };
+      }
+
+      if (canonicalBlockHash === null) {
+        canonicalBlockHash = blockIndepHash;
+        canonicalBlockHeight = blockHeight;
+      } else if (blockIndepHash !== canonicalBlockHash || blockHeight !== canonicalBlockHeight) {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'MULTI_GATEWAY_CONSENSUS_FAILED',
+          reason: 'MULTI_GATEWAY_CONSENSUS_FAILED',
+          details: `Multi-gateway L1 consensus mismatch on ${gw}: expected block ${canonicalBlockHeight}/${canonicalBlockHash}, got ${blockHeight}/${blockIndepHash}`
+        };
+      }
+      minObservedConfirmations = Math.min(minObservedConfirmations, confirmations);
+
+      const txRes = await fetchImpl(`${gw}/tx/${l1TxId}`);
+      if (!txRes || txRes.status !== 200) {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'L1_TX_HTTP_ERROR',
+          reason: `L1 tx metadata lookup on ${gw} failed with HTTP ${txRes?.status ?? 0}`
+        };
+      }
+      const txBody = await txRes.json();
+      const rawTags = Array.isArray(txBody?.tags) ? txBody.tags : [];
+      const tagMap = new Map();
+      for (const t of rawTags) {
+        const name = t.name_decoded || decodeTag(t.name) || t.name;
+        const value = t.value_decoded || decodeTag(t.value) || t.value;
+        if (name) tagMap.set(name, String(value ?? ''));
+      }
+
+      // 1. Verify Message / ANS-104 Bundle ID Binding
+      const actualTxId = txBody?.id ? String(txBody.id) : null;
+      const bundleItems = Array.isArray(txBody?.bundle_items) ? txBody.bundle_items.map(String) : [];
+      const bundledIn = tagMap.get('Bundled-In') || null;
+      const idMatchesDirect = actualTxId === expectedMessageId;
+      const idMatchesBundle =
+        actualTxId === l1TxId &&
+        (bundleItems.includes(expectedMessageId) || (bundledIn && bundledIn === l1TxId && tagMap.get('Message-Id') === expectedMessageId));
+
+      if (!actualTxId || (!idMatchesDirect && !idMatchesBundle)) {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'L1_TX_ID_MISMATCH',
+          reason: 'L1_TX_ID_MISMATCH',
+          details: `L1 transaction ID (${actualTxId || 'missing'}) is not bound to submitted AO message (${expectedMessageId})`
+        };
+      }
+
+      // 2. Verify Target AO Process Binding
+      if (expectedProcessId) {
+        const targetProc = String(txBody?.target || tagMap.get('Recipient') || tagMap.get('Process') || '');
+        if (targetProc !== String(expectedProcessId)) {
+          return {
+            verified: false,
+            finalized: false,
+            error_code: 'L1_PROCESS_ID_MISMATCH',
+            reason: 'L1_PROCESS_ID_MISMATCH',
+            details: `L1 transaction target/Recipient (${targetProc || 'missing'}) does not match AO Process ID (${expectedProcessId})`
+          };
+        }
+      }
+
+      // 3. Verify Full Cryptographic Checkpoint Commitment Tags
+      if (tagMap.get('Batch-Id') !== expectedBatchId) {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'L1_COMMITMENT_TAGS_MISMATCH',
+          reason: 'L1_COMMITMENT_TAGS_MISMATCH',
+          details: `L1 transaction ${l1TxId} does not carry matching Batch-Id tag (${expectedBatchId})`
+        };
+      }
+      if (tagMap.get('Action') !== 'CommitCheckpoint') {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'L1_COMMITMENT_TAGS_MISMATCH',
+          reason: 'L1_COMMITMENT_TAGS_MISMATCH',
+          details: `L1 transaction ${l1TxId} missing or invalid Action tag (${tagMap.get('Action') || 'missing'})`
+        };
+      }
+      if (
+        batchData.from_seq !== undefined &&
+        (tagMap.get('From-Seq') !== String(batchData.from_seq) || tagMap.get('To-Seq') !== String(batchData.to_seq))
+      ) {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'L1_COMMITMENT_TAGS_MISMATCH',
+          reason: 'L1_COMMITMENT_TAGS_MISMATCH',
+          details: `L1 transaction ${l1TxId} sequence range tags (${tagMap.get('From-Seq')}..${tagMap.get('To-Seq')}) do not match batch (${batchData.from_seq}..${batchData.to_seq})`
+        };
+      }
+      if (
+        batchData.proposed_state_root !== undefined &&
+        tagMap.get('State-Root') !== String(batchData.proposed_state_root)
+      ) {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'L1_COMMITMENT_TAGS_MISMATCH',
+          reason: 'L1_COMMITMENT_TAGS_MISMATCH',
+          details: `L1 transaction ${l1TxId} State-Root tag (${tagMap.get('State-Root')}) does not match batch (${batchData.proposed_state_root})`
+        };
+      }
+      if (
+        batchData.proposed_hash !== undefined &&
+        (tagMap.get('Hash') || '').toUpperCase() !== String(batchData.proposed_hash || '').toUpperCase()
+      ) {
+        return {
+          verified: false,
+          finalized: false,
+          error_code: 'L1_COMMITMENT_TAGS_MISMATCH',
+          reason: 'L1_COMMITMENT_TAGS_MISMATCH',
+          details: `L1 transaction ${l1TxId} Hash tag (${tagMap.get('Hash')}) does not match batch (${batchData.proposed_hash})`
+        };
+      }
     }
 
     return {
       verified: true,
+      finalized: true,
       tx_id: l1TxId,
-      block_height: blockHeight,
-      number_of_confirmations: confirmations,
-      block_indep_hash: blockIndepHash,
-      batch_id: expectedBatchId
+      message_id: expectedMessageId,
+      process_id: expectedProcessId,
+      block_height: canonicalBlockHeight,
+      confirmations: minObservedConfirmations,
+      number_of_confirmations: minObservedConfirmations,
+      block_indep_hash: canonicalBlockHash,
+      batch_id: expectedBatchId,
+      gateways_verified: gateways.length
     };
   } catch (err) {
     return { verified: false, reason: `L1 gateway verification error: ${err.message}` };
@@ -465,7 +615,8 @@ export async function commitCheckpointBatch(batchData, options = {}) {
       verifiedL1Finality = await verifyArweaveL1Finality(options.l1TxId || msgId, batchData, {
         ...options,
         batchId,
-        processId
+        processId,
+        expectedMessageId: msgId
       });
     }
 
@@ -558,7 +709,8 @@ export async function commitCheckpointBatch(batchData, options = {}) {
     verifiedL1Finality = await verifyArweaveL1Finality(options.l1TxId || txId, batchData, {
       ...options,
       batchId,
-      processId
+      processId,
+      expectedMessageId: txId
     });
   }
 

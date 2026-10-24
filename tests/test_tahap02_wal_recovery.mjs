@@ -56,6 +56,9 @@ assert(erlOut.includes('PASS: EOF truncation detected cleanly, node recovers up 
 assert(erlOut.includes('PASS: physical EOF truncation repair allows subsequent append and restart to recover all 4 records'),
   'Physical EOF truncation repair allows subsequent append + restart to recover all 4 records without losing data');
 
+assert(erlOut.includes('PASS: valid JSON tail without trailing newline is physically repaired so subsequent append recovers all 4 records'),
+  'Valid JSON tail without trailing newline is physically repaired before subsequent append so all 4 records recover cleanly');
+
 assert(erlOut.includes('PASS: mid-file corruption puts node into degraded status and stops write readiness'),
   'Mid-file corruption immediately marks node degraded and stops write readiness');
 

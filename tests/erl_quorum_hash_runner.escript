@@ -213,11 +213,69 @@ main(_) ->
         {error, not_in_cluster_members},
         "verify_su_handshake rejects valid HMAC when NodeId is not in configured cluster_members"),
 
-    %% 6. Explicit membership change requires admin authorization
+    %% 6. Explicit membership change requires admin authorization & enforces cluster_size == length(cluster_members)
+    os:putenv("HYDB_ADMIN_TOKEN", "phase03-distinct-admin-token-777"),
+    MembershipFile = filename:join([DbDir, "hymessage/test_phase03_membership.json"]),
+    _ = file:delete(MembershipFile),
+    os:putenv("HYDB_MEMBERSHIP_PATH", MembershipFile),
+    catch ets:delete(hymessage_store),
+    catch ets:delete(hymessage_subscribers),
+    {ok, _RuntimePid} = hymessage_runtime:ensure_started(),
+    ets:insert(hymessage_subscribers, {sock1, <<"su-node-1">>, 1000, 3}),
+
+    %% 6A. Mismatched cluster_size (1) vs cluster_members (3 nodes) MUST be rejected with 400 ERR_CLUSTER_SIZE_MISMATCH
+    MismatchRes = hymessage_runtime:cluster_membership_from_req(#{}, #{
+        <<"admin_token">> => <<"phase03-distinct-admin-token-777">>,
+        <<"cluster_size">> => 1,
+        <<"cluster_members">> => <<"su-node-1,su-node-2,su-node-3">>
+    }, #{}),
+    assert_eq(maps:get(<<"ok">>, MismatchRes), false,
+        "Mismatched cluster_size=1 with 3 cluster_members is rejected"),
+    assert_eq(maps:get(<<"status">>, MismatchRes), 400,
+        "Mismatched cluster_size vs cluster_members returns HTTP 400"),
+    assert_eq(maps:get(<<"error_code">>, MismatchRes), <<"ERR_CLUSTER_SIZE_MISMATCH">>,
+        "Mismatched cluster_size vs cluster_members returns ERR_CLUSTER_SIZE_MISMATCH"),
+
+    %% 6B. Even if ETS has cluster_size=1 while cluster_members has 3 nodes, get_configured_cluster_size returns 3
     ets:insert(hymessage_store, {cluster_size, 1}),
-    ets:insert(hymessage_store, {cluster_members, [<<"su-node-1">>]}),
+    ets:insert(hymessage_store, {cluster_members, [<<"su-node-1">>, <<"su-node-2">>, <<"su-node-3">>]}),
+    assert_eq(hymessage_runtime:get_configured_cluster_size(), 3,
+        "get_configured_cluster_size enforces max(cluster_size, length(cluster_members)) = 3"),
+    assert_true(not hymessage_runtime:is_quorum_satisfied(3, <<"majority">>),
+        "Majority quorum with 1 ACK still FAILS when cluster_members has 3 nodes despite cluster_size=1"),
+
+    %% 6C. Membership persistence failure MUST fail closed without mutating ETS
+    UnwritableDir = filename:join([DbDir, "hymessage/test_phase03_unwritable_dir"]),
+    filelib:ensure_dir(filename:join([UnwritableDir, "dummy"])),
+    os:putenv("HYDB_MEMBERSHIP_PATH", UnwritableDir),
+    PersistFailRes = hymessage_runtime:cluster_membership_from_req(#{}, #{
+        <<"admin_token">> => <<"phase03-distinct-admin-token-777">>,
+        <<"cluster_size">> => 1,
+        <<"cluster_members">> => <<"su-node-1">>
+    }, #{}),
+    assert_eq(maps:get(<<"ok">>, PersistFailRes), false,
+        "Membership change fails when disk persistence fails"),
+    assert_eq(maps:get(<<"status">>, PersistFailRes), 503,
+        "Membership disk persistence failure returns HTTP 503"),
+    assert_eq(maps:get(<<"error_code">>, PersistFailRes), <<"ERR_MEMBERSHIP_PERSIST_FAILED">>,
+        "Membership disk persistence failure returns ERR_MEMBERSHIP_PERSIST_FAILED"),
+    assert_eq(hymessage_runtime:get_configured_cluster_size(), 3,
+        "ETS cluster membership remains unchanged (3) when disk persistence fails"),
+    _ = file:delete(UnwritableDir ++ ".tmp"),
+    _ = file:del_dir(UnwritableDir),
+
+    %% 6D. Valid consistent membership change persists to disk and updates ETS
+    os:putenv("HYDB_MEMBERSHIP_PATH", MembershipFile),
+    ValidMemRes = hymessage_runtime:cluster_membership_from_req(#{}, #{
+        <<"admin_token">> => <<"phase03-distinct-admin-token-777">>,
+        <<"cluster_size">> => 1,
+        <<"cluster_members">> => <<"su-node-1">>
+    }, #{}),
+    assert_eq(maps:get(<<"ok">>, ValidMemRes), true,
+        "Consistent admin membership change (size=1, members=[su-node-1]) succeeds"),
     assert_true(hymessage_runtime:is_quorum_satisfied(3, <<"majority">>),
         "After explicit admin membership change to 1, majority quorum succeeds with 1 node"),
+    _ = file:delete(MembershipFile),
 
     io:format("ALL_PHASE_03_ERL_TESTS_PASSED~n").
 

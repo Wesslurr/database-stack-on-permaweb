@@ -63,7 +63,7 @@ main(_) ->
     assert_eq(maps:get(<<"idempotent_replay">>, Res1Retry), true, "Retried PUT is marked with idempotent_replay=true"),
 
     %% ========================================================================
-    %% 2. Conflict Rejection on Reused request_id with Different Payload
+    %% 2. Conflict Rejection on Reused request_id with Different Payload or Quorum
     %% ========================================================================
     PutReqConflict = PutReq1#{ <<"val">> => <<"tampered-different-payload">> },
     ResConflict = hymessage_runtime:put_from_req(#{}, PutReqConflict, #{}),
@@ -71,6 +71,13 @@ main(_) ->
     assert_eq(maps:get(<<"status">>, ResConflict), 409, "Idempotency conflict returns HTTP 409"),
     assert_eq(maps:get(<<"error_code">>, ResConflict), <<"ERR_IDEMPOTENCY_KEY_CONFLICT">>,
         "Idempotency conflict returns ERR_IDEMPOTENCY_KEY_CONFLICT"),
+
+    PutReqQuorumConflict = PutReq1#{ <<"quorum">> => <<"all">> },
+    ResQuorumConflict = hymessage_runtime:put_from_req(#{}, PutReqQuorumConflict, #{}),
+    assert_eq(maps:get(<<"ok">>, ResQuorumConflict), false, "Reusing request_id with different quorum mode is rejected"),
+    assert_eq(maps:get(<<"status">>, ResQuorumConflict), 409, "Quorum parameter conflict on retry returns HTTP 409"),
+    assert_eq(maps:get(<<"error_code">>, ResQuorumConflict), <<"ERR_IDEMPOTENCY_KEY_CONFLICT">>,
+        "Quorum parameter conflict on retry returns ERR_IDEMPOTENCY_KEY_CONFLICT"),
 
     %% ========================================================================
     %% 3. Client Request Status Lookup & Promotion from 'accepted' -> 'durable'
@@ -183,15 +190,51 @@ main(_) ->
     assert_eq(maps:get(<<"error_code">>, StaleAfterRestart), <<"FENCED_STALE_EPOCH">>,
         "Stale epoch write rejected with FENCED_STALE_EPOCH after Hot Node restart"),
 
-    %% Verify idempotency lookup & retry survive Hot Node restart
+    %% Verify idempotency lookup & retry survive Hot Node restart WITHOUT falsely promoting provisional -> durable!
     LookupAfterRestart = hymessage_runtime:request_status_from_req(#{}, #{ <<"request_id">> => <<"req-restart-004">> }, #{}),
     assert_eq(maps:get(<<"found">>, LookupAfterRestart), true, "request_status lookup finds req-restart-004 after Hot Node restart"),
     assert_eq(maps:get(<<"seq">>, LookupAfterRestart), 4, "request_status preserves seq 4 after Hot Node restart"),
+    assert_eq(maps:get(<<"commit_status">>, LookupAfterRestart), <<"provisional">>,
+        "Replay after Hot restart preserves commit_status='provisional' (NEVER promotes unproven write to durable)"),
+    assert_eq(maps:get(<<"write_status">>, LookupAfterRestart), <<"accepted">>,
+        "Replay after Hot restart preserves write_status='accepted'"),
+    assert_eq(maps:get(<<"replicated">>, LookupAfterRestart), false,
+        "Replay after Hot restart preserves replicated=false when quorum ACK was not achieved"),
 
     RetryAfterRestart = hymessage_runtime:put_from_req(#{}, PutReqBeforeRestart, #{}),
     assert_eq(maps:get(<<"ok">>, RetryAfterRestart), true, "Retried PUT after Hot Node restart succeeds"),
     assert_eq(maps:get(<<"seq">>, RetryAfterRestart), 4, "Retried PUT after Hot Node restart returns original seq 4 without re-sequencing"),
     assert_eq(maps:get(<<"idempotent_replay">>, RetryAfterRestart), true, "Retried PUT after Hot Node restart sets idempotent_replay=true"),
+    assert_eq(maps:get(<<"commit_status">>, RetryAfterRestart), <<"provisional">>,
+        "Retried PUT after Hot Node restart still reports commit_status='provisional' before SU ACK"),
+
+    %% Now simulate SU subscriber acknowledging seq 4, promoting it to durable on disk, and restarting again
+    ets:insert(hymessage_subscribers, {su_sock_post_restart, <<"su-node-1">>, 1000, 4}),
+    LookupPromoted = hymessage_runtime:request_status_from_req(#{}, #{ <<"request_id">> => <<"req-restart-004">> }, #{}),
+    assert_eq(maps:get(<<"commit_status">>, LookupPromoted), <<"durable">>,
+        "After SU ACK, request_status promotes seq 4 to commit_status='durable'"),
+
+    %% Strip trailing newline from hot_wal.log to verify Hot startup repairs valid JSON tail without newline
+    {ok, RawHotWal} = file:read_file(HotWalFile),
+    RawHotWalNoNl = string:trim(RawHotWal, trailing, "\r\n"),
+    ok = file:write_file(HotWalFile, RawHotWalNoNl),
+    assert_eq(binary:last(RawHotWalNoNl) =/= $\n, true, "Stripped trailing newline from hot_wal.log before second restart"),
+
+    ok = gen_server:stop(hymessage_runtime),
+    catch ets:delete(hymessage_store),
+    catch ets:delete(hymessage_idempotency_cache),
+    catch ets:delete(hymessage_sessions),
+    hydb_contract:reset_tables(),
+    {ok, _NewPid2} = hymessage_runtime:ensure_started(),
+
+    {ok, RepairedHotWal} = file:read_file(HotWalFile),
+    assert_eq(binary:last(RepairedHotWal), $\n, "Hot Node startup physically repaired missing trailing newline in hot_wal.log"),
+
+    LookupAfterSecondRestart = hymessage_runtime:request_status_from_req(#{}, #{ <<"request_id">> => <<"req-restart-004">> }, #{}),
+    assert_eq(maps:get(<<"commit_status">>, LookupAfterSecondRestart), <<"durable">>,
+        "After durable promotion persisted to hot_wal.log, second Hot restart preserves commit_status='durable'"),
+    assert_eq(maps:get(<<"replicated">>, LookupAfterSecondRestart), true,
+        "After durable promotion persisted to hot_wal.log, second Hot restart preserves replicated=true"),
 
     %% ========================================================================
     %% 7. Production Mandatory request_id & Bounded Idempotency Table Eviction

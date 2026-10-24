@@ -54,13 +54,24 @@ assert(
   'Retrying PUT with identical request_id is strictly idempotent (no duplicate seq or version)'
 );
 assert(
-  erlOut.includes('PASS: Idempotency conflict returns ERR_IDEMPOTENCY_KEY_CONFLICT'),
-  'Reusing request_id with mismatched payload is rejected with 409 ERR_IDEMPOTENCY_KEY_CONFLICT'
+  erlOut.includes('PASS: Idempotency conflict returns ERR_IDEMPOTENCY_KEY_CONFLICT') &&
+  erlOut.includes('PASS: Quorum parameter conflict on retry returns ERR_IDEMPOTENCY_KEY_CONFLICT'),
+  'Reusing request_id with mismatched payload or quorum mode is rejected with 409 ERR_IDEMPOTENCY_KEY_CONFLICT'
 );
 assert(
   erlOut.includes("PASS: Without SU ACK, write_status is 'accepted'") &&
   erlOut.includes("PASS: After SU quorum ACK, request status lookup promotes write_status to 'durable'"),
-  'Write status explicitly distinguishes accepted (provisional in RAM) vs durable (quorum ACKed)'
+  'Write status explicitly distinguishes accepted (provisional) vs durable (quorum ACKed)'
+);
+assert(
+  erlOut.includes("PASS: Replay after Hot restart preserves commit_status='provisional' (NEVER promotes unproven write to durable)") &&
+  erlOut.includes("PASS: Replay after Hot restart preserves replicated=false when quorum ACK was not achieved") &&
+  erlOut.includes("PASS: After durable promotion persisted to hot_wal.log, second Hot restart preserves commit_status='durable'"),
+  'Hot WAL replay strictly preserves provisional status across restarts until quorum ACK is achieved'
+);
+assert(
+  erlOut.includes('PASS: Hot Node startup physically repaired missing trailing newline in hot_wal.log'),
+  'Hot Node startup physically repairs valid JSON WAL tail missing trailing newline'
 );
 assert(
   erlOut.includes("PASS: Unknown request_id returns write_status='unknown'"),

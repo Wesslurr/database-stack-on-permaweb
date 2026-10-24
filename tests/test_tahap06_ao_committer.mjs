@@ -15,11 +15,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import Arweave from 'arweave';
 
 import {
   computeBatchId,
@@ -326,11 +328,12 @@ async function runPhase06Tests() {
     'Raw caller-injected finalityProof without gateway verification is NOT accepted as finalized=true'
   );
 
-  // Retry the exact same batch 1..3 with authoritative Arweave L1 gateway verification (/tx/<id>/status & /tx/<id> Batch-Id tag)
+  // Retry the exact same batch 1..3 with authoritative Arweave L1 gateway verification (/tx/<id>/status & /tx/<id> full commitment tags)
   const retrySameBatchRes = await commitCheckpointBatch(batch1to3, {
     useAoConnect: true,
     environment: 'ao_network',
     minConfirmations: 5,
+    l1Gateways: ['https://arweave.net', 'https://ar-io.dev'],
     l1GatewayFetchFn: async (url) => {
       if (url.endsWith('/status')) {
         return {
@@ -346,11 +349,15 @@ async function runPhase06Tests() {
         status: 200,
         json: async () => ({
           id: 'msg_batch_1_3_retry',
+          target: 'PROC_TEST_01',
           tags: [
-            {
-              name_decoded: 'Batch-Id',
-              value_decoded: verifiedArLocalRes.batch_id
-            }
+            { name_decoded: 'Action', value_decoded: 'CommitCheckpoint' },
+            { name_decoded: 'Recipient', value_decoded: 'PROC_TEST_01' },
+            { name_decoded: 'Batch-Id', value_decoded: verifiedArLocalRes.batch_id },
+            { name_decoded: 'From-Seq', value_decoded: String(batch1to3.from_seq) },
+            { name_decoded: 'To-Seq', value_decoded: String(batch1to3.to_seq) },
+            { name_decoded: 'State-Root', value_decoded: String(batch1to3.proposed_state_root) },
+            { name_decoded: 'Hash', value_decoded: String(batch1to3.proposed_hash) }
           ]
         })
       };
@@ -365,9 +372,163 @@ async function runPhase06Tests() {
   assert(retrySameBatchRes.idempotent_replay === true, 'idempotent_replay is TRUE on duplicate batch retry');
   assert(retrySameBatchRes.verified === true, 'Duplicate batch is verified');
   assert(retrySameBatchRes.confirmed === true, 'Duplicate batch is confirmed');
-  assert(retrySameBatchRes.finalized === true, 'With ao_network + gateway-verified L1 proof & Batch-Id tag, finalized is TRUE');
+  assert(retrySameBatchRes.finalized === true, 'With ao_network + multi-gateway L1 proof & full commitment tags, finalized is TRUE');
   assert(retrySameBatchRes.settlement_status === 'finalized', 'settlement_status is "finalized"');
   assert(retrySameBatchRes.batch_id === verifiedArLocalRes.batch_id, 'Batch-Id is deterministic and identical across retries');
+
+  // Verify L1 finality rejects mismatched TX ID, mismatched Process ID, mismatched commitment tags, and multi-gateway disagreement
+  const baseValidTxBody = {
+    id: 'msg_l1_binding_test',
+    target: 'PROC_TEST_01',
+    tags: [
+      { name_decoded: 'Action', value_decoded: 'CommitCheckpoint' },
+      { name_decoded: 'Recipient', value_decoded: 'PROC_TEST_01' },
+      { name_decoded: 'Batch-Id', value_decoded: verifiedArLocalRes.batch_id },
+      { name_decoded: 'From-Seq', value_decoded: String(batch1to3.from_seq) },
+      { name_decoded: 'To-Seq', value_decoded: String(batch1to3.to_seq) },
+      { name_decoded: 'State-Root', value_decoded: String(batch1to3.proposed_state_root) },
+      { name_decoded: 'Hash', value_decoded: String(batch1to3.proposed_hash) }
+    ]
+  };
+  const validStatusBody = {
+    block_height: 1550000,
+    number_of_confirmations: 12,
+    block_indep_hash: 'B'.repeat(48)
+  };
+
+  const txIdMismatchL1 = await verifyArweaveL1Finality('msg_l1_binding_test', verifiedArLocalRes.batch_id, {
+    processId: 'PROC_TEST_01',
+    expectedBatch: batch1to3,
+    fetchFn: async (url) => ({
+      status: 200,
+      json: async () => (url.endsWith('/status') ? validStatusBody : { ...baseValidTxBody, id: 'wrong_tx_id_999' })
+    })
+  });
+  assert(
+    txIdMismatchL1.finalized === false && txIdMismatchL1.reason === 'L1_TX_ID_MISMATCH',
+    'verifyArweaveL1Finality rejects L1 transaction when tx.id does not match expected message/bundle ID'
+  );
+
+  const procMismatchL1 = await verifyArweaveL1Finality('msg_l1_binding_test', verifiedArLocalRes.batch_id, {
+    processId: 'PROC_TEST_01',
+    expectedBatch: batch1to3,
+    fetchFn: async (url) => ({
+      status: 200,
+      json: async () => (url.endsWith('/status') ? validStatusBody : { ...baseValidTxBody, target: 'WRONG_PROC_999' })
+    })
+  });
+  assert(
+    procMismatchL1.finalized === false && procMismatchL1.reason === 'L1_PROCESS_ID_MISMATCH',
+    'verifyArweaveL1Finality rejects L1 transaction when target/Recipient does not match target AO Process ID'
+  );
+
+  const tagMismatchL1 = await verifyArweaveL1Finality('msg_l1_binding_test', verifiedArLocalRes.batch_id, {
+    processId: 'PROC_TEST_01',
+    expectedBatch: batch1to3,
+    fetchFn: async (url) => ({
+      status: 200,
+      json: async () =>
+        url.endsWith('/status')
+          ? validStatusBody
+          : {
+              ...baseValidTxBody,
+              tags: baseValidTxBody.tags.map((t) =>
+                t.name_decoded === 'State-Root' ? { ...t, value_decoded: '999999999' } : t
+              )
+            }
+    })
+  });
+  assert(
+    tagMismatchL1.finalized === false && tagMismatchL1.reason === 'L1_COMMITMENT_TAGS_MISMATCH',
+    'verifyArweaveL1Finality rejects L1 transaction when State-Root/Hash commitment tags mismatch batch'
+  );
+
+  const gatewaySplitBrainL1 = await verifyArweaveL1Finality('msg_l1_binding_test', verifiedArLocalRes.batch_id, {
+    processId: 'PROC_TEST_01',
+    expectedBatch: batch1to3,
+    l1Gateways: ['https://arweave.net', 'https://ar-io.dev'],
+    fetchFn: async (url) => ({
+      status: 200,
+      json: async () =>
+        url.endsWith('/status')
+          ? {
+              ...validStatusBody,
+              block_indep_hash: url.startsWith('https://arweave.net') ? 'A'.repeat(48) : 'C'.repeat(48)
+            }
+          : baseValidTxBody
+    })
+  });
+  assert(
+    gatewaySplitBrainL1.finalized === false && gatewaySplitBrainL1.reason === 'MULTI_GATEWAY_CONSENSUS_FAILED',
+    'verifyArweaveL1Finality rejects L1 finality when multiple gateways disagree on block_indep_hash'
+  );
+
+  // Verify real Arweave cryptographic transaction signing & local HTTP gateway L1 verification
+  const arweave = Arweave.init({ host: '127.0.0.1', port: 1984, protocol: 'http' });
+  const walletPath = join(ROOT_DIR, 'secrets/wallet.json');
+  const jwk = existsSync(walletPath)
+    ? JSON.parse(readFileSync(walletPath, 'utf-8'))
+    : await arweave.wallets.generate();
+  const realTx = await arweave.createTransaction(
+    {
+      target: 'PROC_TEST_01'.padEnd(43, '0').slice(0, 43),
+      data: JSON.stringify(batch1to3),
+      last_tx: 'A'.repeat(43),
+      reward: '1000000'
+    },
+    jwk
+  );
+  const realTargetProc = realTx.target;
+  realTx.addTag('Action', 'CommitCheckpoint');
+  realTx.addTag('Recipient', realTargetProc);
+  realTx.addTag('Batch-Id', verifiedArLocalRes.batch_id);
+  realTx.addTag('From-Seq', String(batch1to3.from_seq));
+  realTx.addTag('To-Seq', String(batch1to3.to_seq));
+  realTx.addTag('State-Root', String(batch1to3.proposed_state_root));
+  realTx.addTag('Hash', String(batch1to3.proposed_hash));
+  await arweave.transactions.sign(realTx, jwk);
+  const cryptoVerified = await arweave.transactions.verify(realTx);
+  assert(cryptoVerified === true, 'Real Arweave L1 transaction signed and RSA-PSS signature cryptographically verified');
+
+  const localGatewayServer = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === `/tx/${realTx.id}/status`) {
+      res.end(
+        JSON.stringify({
+          block_height: 1600123,
+          number_of_confirmations: 15,
+          block_indep_hash: 'D'.repeat(48)
+        })
+      );
+      return;
+    }
+    if (req.url === `/tx/${realTx.id}`) {
+      res.end(JSON.stringify(realTx));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: 'not_found' }));
+  });
+  await new Promise((r) => localGatewayServer.listen(0, '127.0.0.1', r));
+  const gwPort = localGatewayServer.address().port;
+  try {
+    const realHttpL1Proof = await verifyArweaveL1Finality(realTx.id, verifiedArLocalRes.batch_id, {
+      environment: 'ao_network',
+      gatewayUrl: `http://127.0.0.1:${gwPort}`,
+      processId: realTargetProc,
+      expectedBatch: batch1to3,
+      minConfirmations: 10
+    });
+    assert(
+      realHttpL1Proof.finalized === true &&
+        realHttpL1Proof.tx_id === realTx.id &&
+        realHttpL1Proof.process_id === realTargetProc &&
+        realHttpL1Proof.confirmations === 15,
+      'Real signed Arweave L1 transaction with base64url tags verified over live HTTP gateway'
+    );
+  } finally {
+    localGatewayServer.close();
+  }
 
   // Verify Arbitrator response missing OfficialHash or OfficialStateRoot is rejected (no silent fallback to proposed values)
   const missingProofFieldsRes = verifyArbitratorEvaluation(

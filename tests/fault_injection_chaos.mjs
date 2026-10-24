@@ -43,6 +43,9 @@ const DAEMON_SCRIPT = join(__dirname, 'chaos_node_daemon.escript');
 const TEST_TMP_DIR = join(tmpdir(), `hydb_chaos_${process.pid}_${Date.now()}`);
 mkdirSync(TEST_TMP_DIR, { recursive: true });
 const WAL_PATH = join(TEST_TMP_DIR, 'wal.log');
+const HOT_WAL_PATH = join(TEST_TMP_DIR, 'hot_wal.log');
+const HOT_EPOCH_PATH = join(TEST_TMP_DIR, 'hot_epoch.meta');
+const MEMBERSHIP_PATH = join(TEST_TMP_DIR, 'cluster_membership.json');
 
 const REAL_HOT_PORT = parseInt(process.env.CHAOS_HOT_PORT || '18734', 10);
 const PROXY_PORT = parseInt(process.env.CHAOS_PROXY_PORT || '18744', 10);
@@ -266,6 +269,13 @@ class NodeProcessManager {
       HYDB_CLUSTER_SECRET: CLUSTER_SECRET_RAW,
       HYDB_PROFILE: 'test',
       HYDB_WAL_PATH: WAL_PATH,
+      ...(role === 'hot'
+        ? {
+            HYDB_HOT_WAL_PATH: HOT_WAL_PATH,
+            HYDB_HOT_EPOCH_PATH: HOT_EPOCH_PATH,
+            HYDB_MEMBERSHIP_PATH: MEMBERSHIP_PATH
+          }
+        : {}),
       HOT_TCP_PORT: String(REAL_HOT_TCP_PORT),
       HOT_NODE_HOST: '127.0.0.1',
       HOT_NODE_PORT: String(TCP_PROXY_PORT),
@@ -773,11 +783,12 @@ async function runChaosSuite() {
     const hotDeadViaProxy = await httpFetch(`${PROXY_URL}/state`);
     assert(hotDeadViaProxy.status === 502, `Hot Node OS process (PID ${oldHotPid}) killed with SIGKILL; proxy returns 502`);
 
-    // Spawn brand-new Hot Node OS process reconciling state from durable WAL
+    // Spawn brand-new Hot Node OS process reconciling state from production HYDB_HOT_WAL_PATH (matching docker-compose.yml)
+    assert(existsSync(HOT_WAL_PATH), 'Production Hot WAL file (HYDB_HOT_WAL_PATH) exists on disk before Hot restart');
     const newHotChild = await procMgr.startNode('hot', {
-      HYDB_RECONCILE_WAL_PATH: WAL_PATH
+      HYDB_HOT_WAL_PATH: HOT_WAL_PATH
     });
-    assert(newHotChild.pid !== oldHotPid, `New Hot Node OS process spawned with fresh PID (${newHotChild.pid} !== ${oldHotPid})`);
+    assert(newHotChild.pid !== oldHotPid, `New Hot Node OS process spawned with fresh PID (${newHotChild.pid} !== ${oldHotPid}) using HYDB_HOT_WAL_PATH`);
 
     const hotAndSdReady = await waitForCondition(async () => {
       const hst = await httpFetch(`${PROXY_URL}/state`);
@@ -789,7 +800,7 @@ async function runChaosSuite() {
         isTrue(sst.body.connected_to_hot)
       );
     });
-    assert(hotAndSdReady, 'Restarted Hot Node reconciled state from WAL and re-established SD subscriber stream');
+    assert(hotAndSdReady, 'Restarted Hot Node reconciled state from HYDB_HOT_WAL_PATH and re-established SD subscriber stream');
 
     const hotStateAfterRestart = await httpFetch(`${PROXY_URL}/state`);
     assert(
@@ -804,6 +815,28 @@ async function runChaosSuite() {
     assert(
       String(hotStateAfterRestart.body.latest_hash).toUpperCase() === String(preHotKillHash).toUpperCase(),
       'Reconciled Hot latest_hash matches pre-crash hash'
+    );
+
+    // Also verify fallback: if local HYDB_HOT_WAL_PATH is empty/missing on restart, Hot Node falls back to SD WAL_PATH
+    await procMgr.killNode('hot', 'SIGKILL');
+    rmSync(HOT_WAL_PATH, { force: true });
+    const fallbackHotChild = await procMgr.startNode('hot', {
+      HYDB_HOT_WAL_PATH: HOT_WAL_PATH
+    });
+    const fallbackReady = await waitForCondition(async () => {
+      const hst = await httpFetch(`${PROXY_URL}/state`);
+      const sst = await httpFetch(`${SD_URL}/status`);
+      return (
+        hst.status === 200 &&
+        Number(hst.body.seq) === preHotKillSeq &&
+        Number(hst.body.active_su_subscribers) === 1 &&
+        sst.status === 200 &&
+        isTrue(sst.body.connected_to_hot)
+      );
+    });
+    assert(
+      fallbackReady && fallbackHotChild.pid !== newHotChild.pid,
+      'When local HYDB_HOT_WAL_PATH is missing/empty, Hot Node automatically falls back to validated SD WAL_PATH'
     );
 
     // Perform a new write on the restarted Hot Node to prove seamless continuation
@@ -904,7 +937,8 @@ async function runChaosSuite() {
       'SD Worker disk WAL remained untainted by stale epoch=2 event'
     );
 
-    // Reconcile Hot Node from clean WAL and promote Hot Node to Epoch 3
+    // Reconcile Hot Node from clean WAL and promote Hot Node to Epoch 3 (discarding fenced zombie's local hot_wal.log)
+    rmSync(HOT_WAL_PATH, { force: true });
     await procMgr.startNode('hot', {
       HYDB_RECONCILE_WAL_PATH: WAL_PATH,
       HYDB_RECONCILE_EPOCH: '3'
