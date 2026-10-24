@@ -13,9 +13,20 @@ run_action(<<"all">>) ->
         "" -> filename:dirname(filename:dirname(escript:script_name()));
         D -> D
     end,
+    OutDir = filename:join([DbDir, "hymessage/out/ebin"]),
+    filelib:ensure_dir(filename:join([OutDir, "dummy"])),
+    code:add_path(OutDir),
     code:add_path(filename:join([DbDir, "hymessage/build/dev/erlang/hymessage/ebin"])),
-    code:add_path(filename:join([DbDir, "hymessage/out/ebin"])),
     code:add_path(filename:join([DbDir, "vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb/lib/hymessage_runtime-1.0.0/ebin"])),
+    case code:ensure_loaded(hydb_spec) of
+        {module, hydb_spec} -> ok;
+        _ ->
+            Src = filename:join([DbDir, "hymessage/src/hydb_spec.erl"]),
+            case compile:file(Src, [{outdir, OutDir}, return_errors]) of
+                {ok, hydb_spec} -> code:load_file(hydb_spec);
+                _ -> ok
+            end
+    end,
 
     %% 1. Value encodings
     Int64Enc = binary:encode_hex(hydb_spec:encode_value({int64, 42})),
