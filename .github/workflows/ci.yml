@@ -55,6 +55,9 @@ jobs:
       - name: Run Phase 03 Canonical Hash & Fixed Quorum Tests
         run: npm run test:quorum
 
+      - name: Run Phase 04 Idempotency & Write Status Semantics Tests
+        run: npm run test:idempotency
+
       - name: Run Cross-Language Conformance Suite (JS, Erlang, Rust, Lua)
         run: npm run test:conformance
 

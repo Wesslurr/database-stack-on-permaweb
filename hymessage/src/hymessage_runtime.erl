@@ -5,9 +5,9 @@
 -export([join/1, sync_events/1, replay/1, promote_epoch/1]).
 -export([db_put/3, db_put/4, db_get/1, db_del/2, db_del/3, db_snapshot/0, db_restore/0]).
 -export([submit_from_req/3, get_state_from_req/3, reset_from_req/3, join_from_req/3, sync_from_req/3, replay_from_req/3, promote_from_req/3]).
--export([put_from_req/3, get_from_req/3, del_from_req/3, exists_from_req/3, schema_from_req/3, scan_from_req/3, snapshot_from_req/3, restore_from_req/3, cluster_membership_from_req/3]).
+-export([put_from_req/3, get_from_req/3, del_from_req/3, exists_from_req/3, schema_from_req/3, scan_from_req/3, snapshot_from_req/3, restore_from_req/3, cluster_membership_from_req/3, request_status_from_req/3]).
 -export([compute_event_hash/2, compute_canonical_event_hash/1, compute_canonical_event_hash/2, compute_legacy_event_hash/2]).
--export([get_cluster_membership/0, set_cluster_membership/1, set_cluster_membership/2, get_configured_cluster_size/0, get_configured_cluster_members/0, is_quorum_satisfied/2, is_quorum_satisfied/3]).
+-export([get_cluster_membership/0, set_cluster_membership/1, set_cluster_membership/2, get_configured_cluster_size/0, get_configured_cluster_members/0, is_quorum_satisfied/2, is_quorum_satisfied/3, get_request_status/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {
@@ -17,6 +17,7 @@
 
 -define(TABLE, hymessage_store).
 -define(SESSIONS_TABLE, hymessage_sessions).
+-define(IDEMPOTENCY_TABLE, hymessage_idempotency_cache).
 -define(SERVER, ?MODULE).
 -define(GENESIS_HASH, <<"0000000000000000000000000000000000000000000000000000000000000000">>).
 
@@ -146,7 +147,8 @@ put_from_req(_Base, Req, _Opts) ->
         <<"expected_ver">> => ExpectedVer,
         <<"quorum">> => ReqQuorum,
         <<"require_durability">> => RequireDurability,
-        <<"timeout_ms">> => parse_opt_int_field(<<"timeout_ms">>, Req)
+        <<"timeout_ms">> => parse_opt_int_field(<<"timeout_ms">>, Req),
+        <<"request_id">> => extract_request_id(Req)
     },
     Opts = case ValType of
         undefined -> BaseOpts;
@@ -198,7 +200,8 @@ del_from_req(_Base, Req, _Opts) ->
         <<"expected_ver">> => ExpectedVer,
         <<"quorum">> => ReqQuorum,
         <<"require_durability">> => RequireDurability,
-        <<"timeout_ms">> => parse_opt_int_field(<<"timeout_ms">>, Req)
+        <<"timeout_ms">> => parse_opt_int_field(<<"timeout_ms">>, Req),
+        <<"request_id">> => extract_request_id(Req)
     },
     case gen_server:call(?SERVER, {contract_del, Namespace, RawKey, Opts}, 5000) of
         {ok, Res} -> Res;
@@ -257,7 +260,8 @@ schema_from_req(_Base, Req, _Opts) ->
                         <<"schema_version">> => SchemaVsn,
                         <<"key_type">> => KeyType,
                         <<"value_type">> => ValType,
-                        <<"rules">> => Rules4
+                        <<"rules">> => Rules4,
+                        <<"request_id">> => extract_request_id(Req)
                     },
                     UnsupportedCheckKeys = [<<"indexes">>, <<"secondary_indexes">>, <<"query_language">>, <<"migrations">>],
                     Cfg = lists:foldl(fun(K, Acc) ->
@@ -655,6 +659,166 @@ cluster_membership_from_req(_Base, Req, _Opts) ->
             end
     end.
 
+request_status_from_req(_Base, Req, _Opts) ->
+    ensure_started(),
+    case extract_request_id(Req) of
+        undefined ->
+            #{
+                <<"ok">> => false,
+                <<"status">> => 400,
+                <<"error_code">> => <<"ERR_INVALID_INPUT">>,
+                <<"error">> => <<"Missing request_id parameter">>
+            };
+        ReqId ->
+            {ok, StatusMap} = get_request_status(ReqId),
+            StatusMap
+    end.
+
+get_request_status(ReqId) when is_binary(ReqId) ->
+    ensure_started(),
+    case ets:lookup(?IDEMPOTENCY_TABLE, ReqId) of
+        [] ->
+            {ok, #{
+                <<"ok">> => true,
+                <<"found">> => false,
+                <<"request_id">> => ReqId,
+                <<"commit_status">> => <<"unknown">>,
+                <<"write_status">> => <<"unknown">>
+            }};
+        [{ReqId, Entry}] ->
+            Seq = maps:get(<<"seq">>, Entry),
+            QuorumMode = maps:get(<<"quorum">>, Entry, <<"single">>),
+            WasDurable = maps:get(<<"replicated">>, Entry, false),
+            NowDurable = WasDurable orelse is_quorum_satisfied(Seq, QuorumMode),
+            CommitStatus = case NowDurable of true -> <<"durable">>; false -> <<"provisional">> end,
+            WriteStatus = case NowDurable of true -> <<"durable">>; false -> <<"accepted">> end,
+            Res0 = maps:get(<<"result">>, Entry),
+            Res = Res0#{
+                <<"replicated">> => NowDurable,
+                <<"commit_status">> => CommitStatus,
+                <<"write_status">> => WriteStatus
+            },
+            ets:insert(?IDEMPOTENCY_TABLE, {ReqId, Entry#{
+                <<"replicated">> => NowDurable,
+                <<"commit_status">> => CommitStatus,
+                <<"write_status">> => WriteStatus,
+                <<"result">> => Res
+            }}),
+            {ok, #{
+                <<"ok">> => true,
+                <<"found">> => true,
+                <<"request_id">> => ReqId,
+                <<"seq">> => Seq,
+                <<"op">> => maps:get(<<"op">>, Entry),
+                <<"namespace">> => maps:get(<<"namespace">>, Entry),
+                <<"replicated">> => NowDurable,
+                <<"commit_status">> => CommitStatus,
+                <<"write_status">> => WriteStatus,
+                <<"result">> => Res
+            }}
+    end.
+
+extract_request_id(ReqOrOpts) when is_map(ReqOrOpts) ->
+    case parse_bin_field(<<"request_id">>, ReqOrOpts, undefined) of
+        undefined -> parse_bin_field(<<"idempotency_key">>, ReqOrOpts, undefined);
+        <<>> -> parse_bin_field(<<"idempotency_key">>, ReqOrOpts, undefined);
+        RId -> RId
+    end;
+extract_request_id(_) -> undefined.
+
+check_idempotency(undefined, _Op, _Namespace, _RawKey, _RawVal, _QuorumMode, _RequireDurability) ->
+    not_cached;
+check_idempotency(<<>>, _Op, _Namespace, _RawKey, _RawVal, _QuorumMode, _RequireDurability) ->
+    not_cached;
+check_idempotency(ReqId, Op, Namespace, RawKey, RawVal, QuorumMode, RequireDurability) when is_binary(ReqId) ->
+    case ets:lookup(?IDEMPOTENCY_TABLE, ReqId) of
+        [] ->
+            not_cached;
+        [{ReqId, CachedEntry}] ->
+            CachedOp = maps:get(<<"op">>, CachedEntry),
+            CachedNs = maps:get(<<"namespace">>, CachedEntry),
+            CachedKey = maps:get(<<"raw_key">>, CachedEntry),
+            CachedVal = maps:get(<<"raw_val">>, CachedEntry),
+            KeyMatch = (to_bin_spec(RawKey) =:= to_bin_spec(CachedKey)) orelse (RawKey =:= CachedKey),
+            ValMatch = (Op =:= <<"del">>) orelse (to_bin_spec(RawVal) =:= to_bin_spec(CachedVal)) orelse (RawVal =:= CachedVal),
+            case (CachedOp =:= Op) andalso (CachedNs =:= Namespace) andalso KeyMatch andalso ValMatch of
+                false ->
+                    {conflict, #{
+                        <<"ok">> => false,
+                        <<"status">> => 409,
+                        <<"error_code">> => <<"ERR_IDEMPOTENCY_KEY_CONFLICT">>,
+                        <<"error">> => <<"request_id already used with different operation parameters">>,
+                        <<"request_id">> => ReqId
+                    }};
+                true ->
+                    Seq = maps:get(<<"seq">>, CachedEntry),
+                    BaseResult = maps:get(<<"result">>, CachedEntry),
+                    WasDurable = maps:get(<<"replicated">>, BaseResult, false),
+                    NowDurable = WasDurable orelse is_quorum_satisfied(Seq, QuorumMode),
+                    CommitStatus = case NowDurable of true -> <<"durable">>; false -> <<"provisional">> end,
+                    WriteStatus = case NowDurable of true -> <<"durable">>; false -> <<"accepted">> end,
+                    UpdatedRes = BaseResult#{
+                        <<"replicated">> => NowDurable,
+                        <<"commit_status">> => CommitStatus,
+                        <<"write_status">> => WriteStatus,
+                        <<"request_id">> => ReqId,
+                        <<"idempotent_replay">> => true
+                    },
+                    ets:insert(?IDEMPOTENCY_TABLE, {ReqId, CachedEntry#{
+                        <<"replicated">> => NowDurable,
+                        <<"commit_status">> => CommitStatus,
+                        <<"write_status">> => WriteStatus,
+                        <<"result">> => UpdatedRes
+                    }}),
+                    if
+                        RequireDurability andalso not NowDurable ->
+                            {cached_error, #{
+                                <<"ok">> => false,
+                                <<"status">> => 504,
+                                <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
+                                <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
+                                <<"commit_status">> => CommitStatus,
+                                <<"write_status">> => WriteStatus,
+                                <<"replicated">> => false,
+                                <<"seq">> => Seq,
+                                <<"request_id">> => ReqId,
+                                <<"idempotent_replay">> => true
+                            }};
+                        true ->
+                            {cached_ok, UpdatedRes}
+                    end
+            end
+    end.
+
+store_idempotency(undefined, _Op, _Namespace, _RawKey, _RawVal, _Seq, _Quorum, Result) ->
+    Result;
+store_idempotency(<<>>, _Op, _Namespace, _RawKey, _RawVal, _Seq, _Quorum, Result) ->
+    Result;
+store_idempotency(ReqId, Op, Namespace, RawKey, RawVal, Seq, QuorumMode, Result) when is_binary(ReqId) ->
+    Replicated = maps:get(<<"replicated">>, Result, false),
+    CommitStatus = maps:get(<<"commit_status">>, Result, <<"provisional">>),
+    WriteStatus = case Replicated of true -> <<"durable">>; false -> <<"accepted">> end,
+    EnrichedResult = Result#{
+        <<"request_id">> => ReqId,
+        <<"write_status">> => WriteStatus
+    },
+    Entry = #{
+        <<"request_id">> => ReqId,
+        <<"op">> => Op,
+        <<"namespace">> => Namespace,
+        <<"raw_key">> => RawKey,
+        <<"raw_val">> => RawVal,
+        <<"seq">> => Seq,
+        <<"quorum">> => QuorumMode,
+        <<"replicated">> => Replicated,
+        <<"commit_status">> => CommitStatus,
+        <<"write_status">> => WriteStatus,
+        <<"result">> => EnrichedResult,
+        <<"timestamp">> => os:system_time(millisecond)
+    },
+    ets:insert(?IDEMPOTENCY_TABLE, {ReqId, Entry}),
+    EnrichedResult.
+
 %% ============================================================================
 %% Field Parsing Utilities
 %% ============================================================================
@@ -679,11 +843,11 @@ parse_raw_field(Key, Req, Default) when is_map(Req) ->
                                 Map when is_map(Map) ->
                                     maps:get(Key, Map, Default);
                                 _ ->
-                                    case hb_ao:get(Key, Req, #{}) of
+                                    case hb_safe_get(Key, Req) of
                                         not_found ->
-                                            case hb_ao:get(QueryKey, Req, #{}) of
+                                            case hb_safe_get(QueryKey, Req) of
                                                 not_found ->
-                                                    case hb_ao:get(BodyKey, Req, #{}) of
+                                                    case hb_safe_get(BodyKey, Req) of
                                                         not_found -> Default;
                                                         V3 -> V3
                                                     end;
@@ -700,6 +864,14 @@ parse_raw_field(Key, Req, Default) when is_map(Req) ->
     end;
 parse_raw_field(_Key, _Req, Default) ->
     Default.
+
+hb_safe_get(Key, Req) ->
+    case erlang:function_exported(hb_ao, get, 3) of
+        true ->
+            try hb_ao:get(Key, Req, #{}) catch _:_ -> not_found end;
+        false ->
+            not_found
+    end.
 
 parse_map_field(Key, Req, Default) ->
     Raw = parse_raw_field(Key, Req, Default),
@@ -805,6 +977,11 @@ init_ets() ->
         undefined ->
             ets:new(hymessage_subscribers, [public, named_table, set]);
         _ -> ok
+    end,
+    case ets:info(?IDEMPOTENCY_TABLE) of
+        undefined ->
+            ets:new(?IDEMPOTENCY_TABLE, [public, named_table, set]);
+        _ -> ok
     end.
 
 init_cluster_membership_ets() ->
@@ -878,31 +1055,41 @@ get_db_dir() ->
     end.
 
 init_wasm(NodeMsg) ->
-    DbDir = get_db_dir(),
-    WasmBinFile = filename:join([DbDir, "hydb/out/hydb.wasm"]),
-    case file:read_file(WasmBinFile) of
-        {ok, WasmBin} when byte_size(WasmBin) >= 4 ->
-            WasmMsg = #{ <<"device">> => <<"wasm-64@1.0">>, <<"body">> => WasmBin },
-            case hb_ao:resolve(WasmMsg, <<"init">>, NodeMsg) of
-                {ok, Base} -> wrap_fast_wasm(Base, NodeMsg);
-                _ -> init_wasm_from_id(NodeMsg)
-            end;
-        _ ->
-            init_wasm_from_id(NodeMsg)
+    case erlang:function_exported(hb_ao, resolve, 3) of
+        false ->
+            undefined;
+        true ->
+            DbDir = get_db_dir(),
+            WasmBinFile = filename:join([DbDir, "hydb/out/hydb.wasm"]),
+            case file:read_file(WasmBinFile) of
+                {ok, WasmBin} when byte_size(WasmBin) >= 4 ->
+                    WasmMsg = #{ <<"device">> => <<"wasm-64@1.0">>, <<"body">> => WasmBin },
+                    case hb_ao:resolve(WasmMsg, <<"init">>, NodeMsg) of
+                        {ok, Base} -> wrap_fast_wasm(Base, NodeMsg);
+                        _ -> init_wasm_from_id(NodeMsg)
+                    end;
+                _ ->
+                    init_wasm_from_id(NodeMsg)
+            end
     end.
 
 init_wasm_from_id(NodeMsg) ->
-    DbDir = get_db_dir(),
-    WasmIdFile = filename:join([DbDir, "hydb/out/wasm_id.txt"]),
-    case file:read_file(WasmIdFile) of
-        {ok, RawId} ->
-            WasmID = string:trim(RawId),
-            WasmMsg = #{ <<"device">> => <<"wasm-64@1.0">>, <<"image">> => WasmID },
-            case hb_ao:resolve(WasmMsg, <<"init">>, NodeMsg) of
-                {ok, Base} -> wrap_fast_wasm(Base, NodeMsg);
+    case erlang:function_exported(hb_ao, resolve, 3) of
+        false ->
+            undefined;
+        true ->
+            DbDir = get_db_dir(),
+            WasmIdFile = filename:join([DbDir, "hydb/out/wasm_id.txt"]),
+            case file:read_file(WasmIdFile) of
+                {ok, RawId} ->
+                    WasmID = string:trim(RawId),
+                    WasmMsg = #{ <<"device">> => <<"wasm-64@1.0">>, <<"image">> => WasmID },
+                    case hb_ao:resolve(WasmMsg, <<"init">>, NodeMsg) of
+                        {ok, Base} -> wrap_fast_wasm(Base, NodeMsg);
+                        _ -> undefined
+                    end;
                 _ -> undefined
-            end;
-        _ -> undefined
+            end
     end.
 
 node_auth_secret() ->
@@ -1508,89 +1695,103 @@ handle_call({contract_register_schema, Namespace, Cfg, ReqEpoch}, _From, State =
                 <<"error">> => <<"fenced_stale_epoch">>
             }}, State};
         {ok, Epoch} ->
-            CleanCfg = maps:remove(<<"wasm_bin">>, Cfg),
-            case hydb_contract:validate_schema_definition(Namespace, CleanCfg) of
-                {error, SchemaErrCode, SchemaStatus, SchemaReason} ->
-                    {reply, {error, #{
-                        <<"ok">> => false,
-                        <<"status">> => SchemaStatus,
-                        <<"error_code">> => SchemaErrCode,
-                        <<"error">> => SchemaReason,
-                        <<"namespace">> => Namespace,
-                        <<"contract_version">> => hydb_contract:contract_version()
-                    }}, State};
-                ok ->
-                    WasmBooted = boot_arweave_wasm_for_namespace(Namespace, Cfg, NodeMsg),
-                    {ok, Entry} = hydb_contract:register_namespace(Namespace, CleanCfg),
-                    {ActiveWasmBase, _IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
-                    case hydb_contract:configure_wasm_contract(Namespace, Entry, {fun wasm_call/5, ActiveWasmBase, NodeMsg}) of
-                        {error, WasmErrCode, WasmStatus, WasmReason} ->
-                            hydb_contract:unregister_namespace(Namespace),
+            ReqId = maps:get(<<"request_id">>, Cfg, undefined),
+            CleanCfg0 = maps:remove(<<"wasm_bin">>, Cfg),
+            CleanCfg = maps:remove(<<"request_id">>, CleanCfg0),
+            case check_idempotency(ReqId, <<"register_schema">>, Namespace, <<"__schema__">>, CleanCfg, <<"single">>, false) of
+                {conflict, ConflictMap} ->
+                    {reply, {error, ConflictMap}, State};
+                {cached_ok, CachedRes} ->
+                    {reply, {ok, CachedRes}, State};
+                not_cached ->
+                    case hydb_contract:validate_schema_definition(Namespace, CleanCfg) of
+                        {error, SchemaErrCode, SchemaStatus, SchemaReason} ->
                             {reply, {error, #{
                                 <<"ok">> => false,
-                                <<"status">> => WasmStatus,
-                                <<"error_code">> => WasmErrCode,
-                                <<"error">> => WasmReason,
+                                <<"status">> => SchemaStatus,
+                                <<"error_code">> => SchemaErrCode,
+                                <<"error">> => SchemaReason,
                                 <<"namespace">> => Namespace,
                                 <<"contract_version">> => hydb_contract:contract_version()
                             }}, State};
                         ok ->
-                            CanonicalSchemaBin = hydb_contract:canonical_encode_schema(Entry),
-                            Seq = ets:update_counter(?TABLE, seq, 1),
-                            [{latest_hash, PrevHash}] = ets:lookup(?TABLE, latest_hash),
-                            [{state_root, StateRoot}] = ets:lookup(?TABLE, state_root),
-                            NewHash = build_event_hash(PrevHash, Seq, <<"24">>, Namespace, <<"__schema__">>, <<"schema">>, CanonicalSchemaBin),
-                            ets:insert(?TABLE, {latest_hash, NewHash}),
+                            WasmBooted = boot_arweave_wasm_for_namespace(Namespace, Cfg, NodeMsg),
+                            {ok, Entry} = hydb_contract:register_namespace(Namespace, CleanCfg),
+                            {ActiveWasmBase, _IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
+                            case hydb_contract:configure_wasm_contract(Namespace, Entry, {fun wasm_call/5, ActiveWasmBase, NodeMsg}) of
+                                {error, WasmErrCode, WasmStatus, WasmReason} ->
+                                    hydb_contract:unregister_namespace(Namespace),
+                                    {reply, {error, #{
+                                        <<"ok">> => false,
+                                        <<"status">> => WasmStatus,
+                                        <<"error_code">> => WasmErrCode,
+                                        <<"error">> => WasmReason,
+                                        <<"namespace">> => Namespace,
+                                        <<"contract_version">> => hydb_contract:contract_version()
+                                    }}, State};
+                                ok ->
+                                    CanonicalSchemaBin = hydb_contract:canonical_encode_schema(Entry),
+                                    Seq = ets:update_counter(?TABLE, seq, 1),
+                                    [{latest_hash, PrevHash}] = ets:lookup(?TABLE, latest_hash),
+                                    [{state_root, StateRoot}] = ets:lookup(?TABLE, state_root),
+                                    NewHash = build_event_hash(PrevHash, Seq, <<"24">>, Namespace, <<"__schema__">>, <<"schema">>, CanonicalSchemaBin),
+                                    ets:insert(?TABLE, {latest_hash, NewHash}),
 
-                            Backend = maps:get(<<"backend">>, Entry),
-                            SchemaVsn = maps:get(<<"schema_version">>, Entry),
-                            [{history, Hist}] = ets:lookup(?TABLE, history),
-                            Event = #{
-                                <<"contract_version">> => hydb_contract:contract_version(),
-                                <<"namespace">> => Namespace,
-                                <<"schema_version">> => SchemaVsn,
-                                <<"backend">> => Backend,
-                                <<"epoch">> => Epoch,
-                                <<"seq">> => Seq,
-                                <<"action">> => <<"register_schema">>,
-                                <<"key">> => <<"__schema__">>,
-                                <<"val">> => Entry,
-                                <<"val_type">> => <<"schema">>,
-                                <<"canonical_val">> => CanonicalSchemaBin,
-                                <<"ver">> => 1,
-                                <<"prev_hash">> => PrevHash,
-                                <<"hash">> => NewHash,
-                                <<"state_root">> => StateRoot
-                            },
-                            NewHist = [Event | lists:sublist(Hist, 49)],
-                            ets:insert(?TABLE, {history, NewHist}),
-                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq),
-                            case Replicated of
-                                true -> hydb_contract:update_namespace_status(Namespace, <<"replicated">>);
-                                false -> ok
-                            end,
-                            Result = #{
-                                <<"ok">> => true,
-                                <<"error_code">> => <<"OK">>,
-                                <<"device">> => <<"hymessage@1.0">>,
-                                <<"contract_version">> => hydb_contract:contract_version(),
-                                <<"epoch">> => Epoch,
-                                <<"seq">> => Seq,
-                                <<"op">> => <<"register_schema">>,
-                                <<"namespace">> => Namespace,
-                                <<"status">> => case Replicated of true -> <<"replicated">>; false -> <<"configured">> end,
-                                <<"contract_status">> => case Replicated of true -> <<"replicated">>; false -> <<"configured">> end,
-                                <<"registered_schema">> => Entry,
-                                <<"canonical_schema">> => CanonicalSchemaBin,
-                                <<"wasm_vm_booted_from_arweave">> => WasmBooted,
-                                <<"wasm_contract_configured">> => (Backend =:= <<"wasm_slot">>),
-                                <<"capabilities">> => hydb_contract:backend_capabilities(Backend),
-                                <<"hash">> => NewHash,
-                                <<"state_root">> => StateRoot,
-                                <<"replicated">> => Replicated,
-                                <<"su_count">> => SuCount
-                            },
-                            {reply, {ok, Result}, State}
+                                    Backend = maps:get(<<"backend">>, Entry),
+                                    SchemaVsn = maps:get(<<"schema_version">>, Entry),
+                                    [{history, Hist}] = ets:lookup(?TABLE, history),
+                                    Event = #{
+                                        <<"contract_version">> => hydb_contract:contract_version(),
+                                        <<"namespace">> => Namespace,
+                                        <<"schema_version">> => SchemaVsn,
+                                        <<"backend">> => Backend,
+                                        <<"epoch">> => Epoch,
+                                        <<"seq">> => Seq,
+                                        <<"action">> => <<"register_schema">>,
+                                        <<"key">> => <<"__schema__">>,
+                                        <<"val">> => Entry,
+                                        <<"val_type">> => <<"schema">>,
+                                        <<"canonical_val">> => CanonicalSchemaBin,
+                                        <<"ver">> => 1,
+                                        <<"prev_hash">> => PrevHash,
+                                        <<"hash">> => NewHash,
+                                        <<"state_root">> => StateRoot
+                                    },
+                                    NewHist = [Event | lists:sublist(Hist, 49)],
+                                    ets:insert(?TABLE, {history, NewHist}),
+                                    {Replicated, SuCount} = broadcast_and_await_su(Event, Seq),
+                                    case Replicated of
+                                        true -> hydb_contract:update_namespace_status(Namespace, <<"replicated">>);
+                                        false -> ok
+                                    end,
+                                    CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
+                                    WriteStatus = case Replicated of true -> <<"durable">>; false -> <<"accepted">> end,
+                                    Result0 = #{
+                                        <<"ok">> => true,
+                                        <<"error_code">> => <<"OK">>,
+                                        <<"device">> => <<"hymessage@1.0">>,
+                                        <<"contract_version">> => hydb_contract:contract_version(),
+                                        <<"epoch">> => Epoch,
+                                        <<"seq">> => Seq,
+                                        <<"op">> => <<"register_schema">>,
+                                        <<"namespace">> => Namespace,
+                                        <<"status">> => case Replicated of true -> <<"replicated">>; false -> <<"configured">> end,
+                                        <<"contract_status">> => case Replicated of true -> <<"replicated">>; false -> <<"configured">> end,
+                                        <<"commit_status">> => CommitStatus,
+                                        <<"write_status">> => WriteStatus,
+                                        <<"registered_schema">> => Entry,
+                                        <<"canonical_schema">> => CanonicalSchemaBin,
+                                        <<"wasm_vm_booted_from_arweave">> => WasmBooted,
+                                        <<"wasm_contract_configured">> => (Backend =:= <<"wasm_slot">>),
+                                        <<"capabilities">> => hydb_contract:backend_capabilities(Backend),
+                                        <<"hash">> => NewHash,
+                                        <<"state_root">> => StateRoot,
+                                        <<"replicated">> => Replicated,
+                                        <<"su_count">> => SuCount
+                                    },
+                                    Result = store_idempotency(ReqId, <<"register_schema">>, Namespace, <<"__schema__">>, CleanCfg, Seq, <<"single">>, Result0),
+                                    {reply, {ok, Result}, State}
+                            end
                     end
             end
     end;
@@ -1665,101 +1866,99 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                         <<"error">> => <<"invalid_session_token">>
                     }}, State};
                 {ok, HasValidSession} ->
-                    {ActiveWasmBase, IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
-                    WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
-                    OptsWithSession = Opts#{ <<"has_valid_session">> => HasValidSession },
-                    %% GUARDRAIL A: Pre-Sequence Contract & Schema Validation BEFORE allocating Seq!
-                    case hydb_contract:validate_pre_sequence(Namespace, <<"put">>, RawKey, RawVal, OptsWithSession, WasmCtx) of
-                        {error, ErrCode, HttpStatus, ReasonBin} ->
-                            {reply, {error, #{
-                                <<"ok">> => false,
-                                <<"status">> => HttpStatus,
-                                <<"error_code">> => ErrCode,
-                                <<"error">> => ReasonBin,
-                                <<"namespace">> => Namespace,
-                                <<"contract_version">> => hydb_contract:contract_version()
-                            }}, State};
-                        {ok, Validated} ->
-                            T_val = os:perf_counter(microsecond),
-                            Backend = maps:get(<<"backend">>, Validated),
-                            SchemaVsn = maps:get(<<"schema_version">>, Validated),
-                            NormKey = maps:get(<<"key">>, Validated),
-                            NormVal = maps:get(<<"val">>, Validated),
-                            ValType = maps:get(<<"val_type">>, Validated),
-                            CanonicalValBin = maps:get(<<"canonical_val">>, Validated),
-
-                            %% Allocate sequence number ONLY after passing contract validation
-                            Seq = ets:update_counter(?TABLE, seq, 1),
-                            [{latest_hash, PrevHash}] = ets:lookup(?TABLE, latest_hash),
-                            WasmRoot0 = case ets:lookup(?TABLE, wasm_root) of [{wasm_root, WR}] -> WR; _ -> 0 end,
-                            DocRoot0 = case ets:lookup(?TABLE, doc_root) of [{doc_root, DR}] -> DR; _ -> 0 end,
-
-                            NewHash = build_event_hash(PrevHash, Seq, <<"20">>, Namespace, NormKey, ValType, CanonicalValBin),
-
-                            {WasmRoot1, DocRoot1, Ver} = case Backend of
-                                <<"wasm_slot">> ->
-                                    {ok, NewInstanceWR, V} = hydb_contract:execute_backend_put(<<"wasm_slot">>, Namespace, NormKey, NormVal, Seq, WasmRoot0, WasmCtx),
-                                    CombinedWR = apply_wasm_root_delta(Namespace, IsCustomWasm, NewInstanceWR, WasmRoot0),
-                                    ets:insert(?TABLE, {wasm_root, CombinedWR}),
-                                    {CombinedWR, DocRoot0, V};
-                                <<"ets_doc">> ->
-                                    {ok, NewDR, V} = hydb_contract:execute_backend_put(<<"ets_doc">>, Namespace, NormKey, NormVal, Seq, DocRoot0, WasmCtx),
-                                    ets:insert(?TABLE, {doc_root, NewDR}),
-                                    {WasmRoot0, NewDR, V}
-                            end,
-                            T_wasm = os:perf_counter(microsecond),
-                            StateRoot = combine_roots(WasmRoot1, DocRoot1),
-                            ets:insert(?TABLE, {latest_hash, NewHash}),
-                            ets:insert(?TABLE, {state_root, StateRoot}),
-
-                            [{history, Hist}] = ets:lookup(?TABLE, history),
-                            Event = #{
-                                <<"contract_version">> => hydb_contract:contract_version(),
-                                <<"namespace">> => Namespace,
-                                <<"schema_version">> => SchemaVsn,
-                                <<"backend">> => Backend,
-                                <<"epoch">> => Epoch,
-                                <<"seq">> => Seq,
-                                <<"action">> => <<"put">>,
-                                <<"key">> => NormKey,
-                                <<"val">> => NormVal,
-                                <<"val_type">> => ValType,
-                                <<"canonical_val">> => CanonicalValBin,
-                                <<"ver">> => Ver,
-                                <<"prev_hash">> => PrevHash,
-                                <<"hash">> => NewHash,
-                                <<"state_root">> => StateRoot
-                            },
-                            NewHist = [Event | lists:sublist(Hist, 49)],
-                            ets:insert(?TABLE, {history, NewHist}),
-                            T_hash = os:perf_counter(microsecond),
-
-                            ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
-                            RequireDurability = maps:get(<<"require_durability">>, Opts, false),
-                            TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
-                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
-                            T_repl = os:perf_counter(microsecond),
-                            T1 = os:perf_counter(nanosecond),
-                            DurationMs = ((T1 - T0) / 1000.0) / 1000.0,
-                            WasmSource = case IsCustomWasm of true -> <<"arweave_tx">>; false -> <<"node_default">> end,
-                            WasmInstanceCount = case {Backend, IsCustomWasm} of
-                                {<<"wasm_slot">>, true} -> wasm_call(ActiveWasmBase, <<"db_count">>, [], NodeMsg, 0);
-                                _ -> 0
-                            end,
-                            CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
-                            if
-                                RequireDurability andalso not Replicated ->
+                    ReqId = maps:get(<<"request_id">>, Opts, undefined),
+                    ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
+                    RequireDurability = maps:get(<<"require_durability">>, Opts, false),
+                    case check_idempotency(ReqId, <<"put">>, Namespace, RawKey, RawVal, ReqQuorum, RequireDurability) of
+                        {conflict, ConflictMap} ->
+                            {reply, {error, ConflictMap}, State};
+                        {cached_ok, CachedRes} ->
+                            {reply, {ok, CachedRes}, State};
+                        {cached_error, CachedErr} ->
+                            {reply, {error, CachedErr}, State};
+                        not_cached ->
+                            {ActiveWasmBase, IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
+                            WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
+                            OptsWithSession = Opts#{ <<"has_valid_session">> => HasValidSession },
+                            %% GUARDRAIL A: Pre-Sequence Contract & Schema Validation BEFORE allocating Seq!
+                            case hydb_contract:validate_pre_sequence(Namespace, <<"put">>, RawKey, RawVal, OptsWithSession, WasmCtx) of
+                                {error, ErrCode, HttpStatus, ReasonBin} ->
                                     {reply, {error, #{
                                         <<"ok">> => false,
-                                        <<"status">> => 504,
-                                        <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
-                                        <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
-                                        <<"commit_status">> => CommitStatus,
-                                        <<"replicated">> => false,
-                                        <<"seq">> => Seq
+                                        <<"status">> => HttpStatus,
+                                        <<"error_code">> => ErrCode,
+                                        <<"error">> => ReasonBin,
+                                        <<"namespace">> => Namespace,
+                                        <<"contract_version">> => hydb_contract:contract_version()
                                     }}, State};
-                                true ->
-                                    Result = #{
+                                {ok, Validated} ->
+                                    T_val = os:perf_counter(microsecond),
+                                    Backend = maps:get(<<"backend">>, Validated),
+                                    SchemaVsn = maps:get(<<"schema_version">>, Validated),
+                                    NormKey = maps:get(<<"key">>, Validated),
+                                    NormVal = maps:get(<<"val">>, Validated),
+                                    ValType = maps:get(<<"val_type">>, Validated),
+                                    CanonicalValBin = maps:get(<<"canonical_val">>, Validated),
+
+                                    %% Allocate sequence number ONLY after passing contract validation
+                                    Seq = ets:update_counter(?TABLE, seq, 1),
+                                    [{latest_hash, PrevHash}] = ets:lookup(?TABLE, latest_hash),
+                                    WasmRoot0 = case ets:lookup(?TABLE, wasm_root) of [{wasm_root, WR}] -> WR; _ -> 0 end,
+                                    DocRoot0 = case ets:lookup(?TABLE, doc_root) of [{doc_root, DR}] -> DR; _ -> 0 end,
+
+                                    NewHash = build_event_hash(PrevHash, Seq, <<"20">>, Namespace, NormKey, ValType, CanonicalValBin),
+
+                                    {WasmRoot1, DocRoot1, Ver} = case Backend of
+                                        <<"wasm_slot">> ->
+                                            {ok, NewInstanceWR, V} = hydb_contract:execute_backend_put(<<"wasm_slot">>, Namespace, NormKey, NormVal, Seq, WasmRoot0, WasmCtx),
+                                            CombinedWR = apply_wasm_root_delta(Namespace, IsCustomWasm, NewInstanceWR, WasmRoot0),
+                                            ets:insert(?TABLE, {wasm_root, CombinedWR}),
+                                            {CombinedWR, DocRoot0, V};
+                                        <<"ets_doc">> ->
+                                            {ok, NewDR, V} = hydb_contract:execute_backend_put(<<"ets_doc">>, Namespace, NormKey, NormVal, Seq, DocRoot0, WasmCtx),
+                                            ets:insert(?TABLE, {doc_root, NewDR}),
+                                            {WasmRoot0, NewDR, V}
+                                    end,
+                                    T_wasm = os:perf_counter(microsecond),
+                                    StateRoot = combine_roots(WasmRoot1, DocRoot1),
+                                    ets:insert(?TABLE, {latest_hash, NewHash}),
+                                    ets:insert(?TABLE, {state_root, StateRoot}),
+
+                                    [{history, Hist}] = ets:lookup(?TABLE, history),
+                                    Event = #{
+                                        <<"contract_version">> => hydb_contract:contract_version(),
+                                        <<"namespace">> => Namespace,
+                                        <<"schema_version">> => SchemaVsn,
+                                        <<"backend">> => Backend,
+                                        <<"epoch">> => Epoch,
+                                        <<"seq">> => Seq,
+                                        <<"action">> => <<"put">>,
+                                        <<"key">> => NormKey,
+                                        <<"val">> => NormVal,
+                                        <<"val_type">> => ValType,
+                                        <<"canonical_val">> => CanonicalValBin,
+                                        <<"ver">> => Ver,
+                                        <<"prev_hash">> => PrevHash,
+                                        <<"hash">> => NewHash,
+                                        <<"state_root">> => StateRoot
+                                    },
+                                    NewHist = [Event | lists:sublist(Hist, 49)],
+                                    ets:insert(?TABLE, {history, NewHist}),
+                                    T_hash = os:perf_counter(microsecond),
+
+                                    TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
+                                    {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
+                                    T_repl = os:perf_counter(microsecond),
+                                    T1 = os:perf_counter(nanosecond),
+                                    DurationMs = ((T1 - T0) / 1000.0) / 1000.0,
+                                    WasmSource = case IsCustomWasm of true -> <<"arweave_tx">>; false -> <<"node_default">> end,
+                                    WasmInstanceCount = case {Backend, IsCustomWasm} of
+                                        {<<"wasm_slot">>, true} -> wasm_call(ActiveWasmBase, <<"db_count">>, [], NodeMsg, 0);
+                                        _ -> 0
+                                    end,
+                                    CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
+                                    WriteStatus = case Replicated of true -> <<"durable">>; false -> <<"accepted">> end,
+                                    Result0 = #{
                                         <<"ok">> => true,
                                         <<"error_code">> => <<"OK">>,
                                         <<"device">> => <<"hymessage@1.0">>,
@@ -1779,6 +1978,7 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                                         <<"state_root">> => StateRoot,
                                         <<"hash">> => NewHash,
                                         <<"commit_status">> => CommitStatus,
+                                        <<"write_status">> => WriteStatus,
                                         <<"replicated">> => Replicated,
                                         <<"su_count">> => SuCount,
                                         <<"duration_ms">> => DurationMs,
@@ -1787,7 +1987,23 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                                         <<"t_hash_us">> => (T_hash - T_wasm),
                                         <<"t_repl_us">> => (T_repl - T_hash)
                                     },
-                                    {reply, {ok, Result}, State}
+                                    Result = store_idempotency(ReqId, <<"put">>, Namespace, RawKey, RawVal, Seq, ReqQuorum, Result0),
+                                    if
+                                        RequireDurability andalso not Replicated ->
+                                            {reply, {error, #{
+                                                <<"ok">> => false,
+                                                <<"status">> => 504,
+                                                <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
+                                                <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
+                                                <<"commit_status">> => CommitStatus,
+                                                <<"write_status">> => WriteStatus,
+                                                <<"replicated">> => false,
+                                                <<"seq">> => Seq,
+                                                <<"request_id">> => ReqId
+                                            }}, State};
+                                        true ->
+                                            {reply, {ok, Result}, State}
+                                    end
                             end
                     end
             end
@@ -1995,85 +2211,83 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                         <<"error">> => <<"invalid_session_token">>
                     }}, State};
                 {ok, HasValidSession} ->
-                    {ActiveWasmBase, IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
-                    WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
-                    OptsWithSession = Opts#{ <<"has_valid_session">> => HasValidSession },
-                    case hydb_contract:validate_pre_sequence(Namespace, <<"del">>, RawKey, 0, OptsWithSession, WasmCtx) of
-                        {error, ErrCode, HttpStatus, ReasonBin} ->
-                            {reply, {error, #{
-                                <<"ok">> => false,
-                                <<"status">> => HttpStatus,
-                                <<"error_code">> => ErrCode,
-                                <<"error">> => ReasonBin,
-                                <<"namespace">> => Namespace,
-                                <<"contract_version">> => hydb_contract:contract_version()
-                            }}, State};
-                        {ok, Validated} ->
-                            Backend = maps:get(<<"backend">>, Validated),
-                            SchemaVsn = maps:get(<<"schema_version">>, Validated),
-                            NormKey = maps:get(<<"key">>, Validated),
-
-                            Seq = ets:update_counter(?TABLE, seq, 1),
-                            [{latest_hash, PrevHash}] = ets:lookup(?TABLE, latest_hash),
-                            WasmRoot0 = case ets:lookup(?TABLE, wasm_root) of [{wasm_root, WR}] -> WR; _ -> 0 end,
-                            DocRoot0 = case ets:lookup(?TABLE, doc_root) of [{doc_root, DR}] -> DR; _ -> 0 end,
-
-                            NewHash = build_event_hash(PrevHash, Seq, <<"22">>, Namespace, NormKey, <<"int64">>, <<"0">>),
-
-                            {WasmRoot1, DocRoot1, DelVer} = case Backend of
-                                <<"wasm_slot">> ->
-                                    {ok, NewInstanceWR, DVer} = hydb_contract:execute_backend_del(<<"wasm_slot">>, Namespace, NormKey, Seq, WasmCtx),
-                                    CombinedWR = apply_wasm_root_delta(Namespace, IsCustomWasm, NewInstanceWR, WasmRoot0),
-                                    ets:insert(?TABLE, {wasm_root, CombinedWR}),
-                                    {CombinedWR, DocRoot0, DVer};
-                                <<"ets_doc">> ->
-                                    {ok, NewDR, DVer} = hydb_contract:execute_backend_del(<<"ets_doc">>, Namespace, NormKey, Seq, {DocRoot0}),
-                                    ets:insert(?TABLE, {doc_root, NewDR}),
-                                    {WasmRoot0, NewDR, DVer}
-                            end,
-                            StateRoot = combine_roots(WasmRoot1, DocRoot1),
-                            ets:insert(?TABLE, {latest_hash, NewHash}),
-                            ets:insert(?TABLE, {state_root, StateRoot}),
-
-                            [{history, Hist}] = ets:lookup(?TABLE, history),
-                            Event = #{
-                                <<"contract_version">> => hydb_contract:contract_version(),
-                                <<"namespace">> => Namespace,
-                                <<"schema_version">> => SchemaVsn,
-                                <<"backend">> => Backend,
-                                <<"epoch">> => Epoch,
-                                <<"seq">> => Seq,
-                                <<"action">> => <<"del">>,
-                                <<"key">> => NormKey,
-                                <<"val">> => 0,
-                                <<"ver">> => DelVer,
-                                <<"prev_hash">> => PrevHash,
-                                <<"hash">> => NewHash,
-                                <<"state_root">> => StateRoot
-                            },
-                            NewHist = [Event | lists:sublist(Hist, 49)],
-                            ets:insert(?TABLE, {history, NewHist}),
-
-                            ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
-                            RequireDurability = maps:get(<<"require_durability">>, Opts, false),
-                            TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
-                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
-                            T1 = os:perf_counter(nanosecond),
-                            DurationMs = ((T1 - T0) / 1000.0) / 1000.0,
-                            CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
-                            if
-                                RequireDurability andalso not Replicated ->
+                    ReqId = maps:get(<<"request_id">>, Opts, undefined),
+                    ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
+                    RequireDurability = maps:get(<<"require_durability">>, Opts, false),
+                    case check_idempotency(ReqId, <<"del">>, Namespace, RawKey, 0, ReqQuorum, RequireDurability) of
+                        {conflict, ConflictMap} ->
+                            {reply, {error, ConflictMap}, State};
+                        {cached_ok, CachedRes} ->
+                            {reply, {ok, CachedRes}, State};
+                        {cached_error, CachedErr} ->
+                            {reply, {error, CachedErr}, State};
+                        not_cached ->
+                            {ActiveWasmBase, IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
+                            WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
+                            OptsWithSession = Opts#{ <<"has_valid_session">> => HasValidSession },
+                            case hydb_contract:validate_pre_sequence(Namespace, <<"del">>, RawKey, 0, OptsWithSession, WasmCtx) of
+                                {error, ErrCode, HttpStatus, ReasonBin} ->
                                     {reply, {error, #{
                                         <<"ok">> => false,
-                                        <<"status">> => 504,
-                                        <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
-                                        <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
-                                        <<"commit_status">> => CommitStatus,
-                                        <<"replicated">> => false,
-                                        <<"seq">> => Seq
+                                        <<"status">> => HttpStatus,
+                                        <<"error_code">> => ErrCode,
+                                        <<"error">> => ReasonBin,
+                                        <<"namespace">> => Namespace,
+                                        <<"contract_version">> => hydb_contract:contract_version()
                                     }}, State};
-                                true ->
-                                    Result = #{
+                                {ok, Validated} ->
+                                    Backend = maps:get(<<"backend">>, Validated),
+                                    SchemaVsn = maps:get(<<"schema_version">>, Validated),
+                                    NormKey = maps:get(<<"key">>, Validated),
+
+                                    Seq = ets:update_counter(?TABLE, seq, 1),
+                                    [{latest_hash, PrevHash}] = ets:lookup(?TABLE, latest_hash),
+                                    WasmRoot0 = case ets:lookup(?TABLE, wasm_root) of [{wasm_root, WR}] -> WR; _ -> 0 end,
+                                    DocRoot0 = case ets:lookup(?TABLE, doc_root) of [{doc_root, DR}] -> DR; _ -> 0 end,
+
+                                    NewHash = build_event_hash(PrevHash, Seq, <<"22">>, Namespace, NormKey, <<"int64">>, <<"0">>),
+
+                                    {WasmRoot1, DocRoot1, DelVer} = case Backend of
+                                        <<"wasm_slot">> ->
+                                            {ok, NewInstanceWR, DVer} = hydb_contract:execute_backend_del(<<"wasm_slot">>, Namespace, NormKey, Seq, WasmCtx),
+                                            CombinedWR = apply_wasm_root_delta(Namespace, IsCustomWasm, NewInstanceWR, WasmRoot0),
+                                            ets:insert(?TABLE, {wasm_root, CombinedWR}),
+                                            {CombinedWR, DocRoot0, DVer};
+                                        <<"ets_doc">> ->
+                                            {ok, NewDR, DVer} = hydb_contract:execute_backend_del(<<"ets_doc">>, Namespace, NormKey, Seq, {DocRoot0}),
+                                            ets:insert(?TABLE, {doc_root, NewDR}),
+                                            {WasmRoot0, NewDR, DVer}
+                                    end,
+                                    StateRoot = combine_roots(WasmRoot1, DocRoot1),
+                                    ets:insert(?TABLE, {latest_hash, NewHash}),
+                                    ets:insert(?TABLE, {state_root, StateRoot}),
+
+                                    [{history, Hist}] = ets:lookup(?TABLE, history),
+                                    Event = #{
+                                        <<"contract_version">> => hydb_contract:contract_version(),
+                                        <<"namespace">> => Namespace,
+                                        <<"schema_version">> => SchemaVsn,
+                                        <<"backend">> => Backend,
+                                        <<"epoch">> => Epoch,
+                                        <<"seq">> => Seq,
+                                        <<"action">> => <<"del">>,
+                                        <<"key">> => NormKey,
+                                        <<"val">> => 0,
+                                        <<"ver">> => DelVer,
+                                        <<"prev_hash">> => PrevHash,
+                                        <<"hash">> => NewHash,
+                                        <<"state_root">> => StateRoot
+                                    },
+                                    NewHist = [Event | lists:sublist(Hist, 49)],
+                                    ets:insert(?TABLE, {history, NewHist}),
+
+                                    TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
+                                    {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
+                                    T1 = os:perf_counter(nanosecond),
+                                    DurationMs = ((T1 - T0) / 1000.0) / 1000.0,
+                                    CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
+                                    WriteStatus = case Replicated of true -> <<"durable">>; false -> <<"accepted">> end,
+                                    Result0 = #{
                                         <<"ok">> => true,
                                         <<"error_code">> => <<"OK">>,
                                         <<"device">> => <<"hymessage@1.0">>,
@@ -2089,11 +2303,28 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                                         <<"state_root">> => StateRoot,
                                         <<"hash">> => NewHash,
                                         <<"commit_status">> => CommitStatus,
+                                        <<"write_status">> => WriteStatus,
                                         <<"replicated">> => Replicated,
                                         <<"su_count">> => SuCount,
                                         <<"duration_ms">> => DurationMs
                                     },
-                                    {reply, {ok, Result}, State}
+                                    Result = store_idempotency(ReqId, <<"del">>, Namespace, RawKey, 0, Seq, ReqQuorum, Result0),
+                                    if
+                                        RequireDurability andalso not Replicated ->
+                                            {reply, {error, #{
+                                                <<"ok">> => false,
+                                                <<"status">> => 504,
+                                                <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
+                                                <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
+                                                <<"commit_status">> => CommitStatus,
+                                                <<"write_status">> => WriteStatus,
+                                                <<"replicated">> => false,
+                                                <<"seq">> => Seq,
+                                                <<"request_id">> => ReqId
+                                            }}, State};
+                                        true ->
+                                            {reply, {ok, Result}, State}
+                                    end
                             end
                     end
             end
@@ -2416,6 +2647,10 @@ handle_call(reset, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMs
     ets:insert(?TABLE, {history, []}),
     ets:insert(?TABLE, {last_su_ack, 0}),
     ets:delete_all_objects(?SESSIONS_TABLE),
+    case ets:info(?IDEMPOTENCY_TABLE) of
+        undefined -> ok;
+        _ -> ets:delete_all_objects(?IDEMPOTENCY_TABLE)
+    end,
     hydb_contract:reset_tables(),
     ActiveBase = case WasmBase of
         undefined -> init_wasm(NodeMsg);
