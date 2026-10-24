@@ -6,9 +6,9 @@
 [![HyDB Contract](https://img.shields.io/badge/Contract-hydb.core%401.0-purple.svg)]()
 [![Protocol](https://img.shields.io/badge/Wire_Protocol-hydb.spec%2F1-indigo.svg)](docs/PROTOCOL_AND_FAILURE_MODEL.md)
 [![AO](https://img.shields.io/badge/AO-Logical%20Security%20Domain-orange.svg)](https://ao.g8way.io/)
-[![Rust](https://img.shields.io/badge/Engine-Rust%20WASM%20(no__std)-red.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Engine-Rust%20WASM%20%28no__std%29-red.svg)](https://www.rust-lang.org/)
 [![Gleam](https://img.shields.io/badge/Device-Gleam%20%2B%20BEAM-pink.svg)](https://gleam.run/)
-[![Status](https://img.shields.io/badge/Roadmap%2000--07-Verified%20 in%20CI-brightgreen.svg)](.github/workflows/ci.yml)
+[![Status](https://img.shields.io/badge/Roadmap%2000--07-Verified%20in%20CI-brightgreen.svg)](.github/workflows/ci.yml)
 
 > [!NOTE]
 > **Catatan Lingkungan Pengujian & Batas Jaminan (Verification & Boundary Disclaimer):**
