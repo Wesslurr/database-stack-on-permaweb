@@ -94,7 +94,7 @@ main(_) ->
     end,
 
     %% ========================================================================
-    %% TEST 2: Clean EOF Truncation (Node Crash Mid-Write at EOF)
+    %% TEST 2: Clean EOF Truncation & Physical Repair + Subsequent Append + Restart
     %% ========================================================================
     TruncContent = [
         ValidContent,
@@ -103,10 +103,37 @@ main(_) ->
     ok = file:write_file(TestWal, TruncContent),
     Restart2 = sd_runtime:simulate_restart_from_wal(),
     case Restart2 of
-        #{ <<"recovered_entries">> := 3, <<"tick">> := 3, <<"truncated_detected">> := true, <<"ready">> := true, <<"health">> := <<"healthy">> } ->
+        #{ <<"ok">> := true, <<"recovered_entries">> := 3, <<"tick">> := 3, <<"truncated_detected">> := true, <<"ready">> := true, <<"health">> := <<"healthy">> } ->
             io:format("PASS: EOF truncation detected cleanly, node recovers up to last valid record and stays healthy~n");
         Other2 ->
             io:format("FAIL: unexpected EOF truncation recovery: ~p~n", [Other2]),
+            halt(1)
+    end,
+
+    %% Now append a 4th event after EOF truncation recovery and restart again:
+    %% Because repair_truncated_wal_file physically removed the corrupt trailing bytes,
+    %% Ev4 must NOT be glued onto the broken line and must survive the next restart!
+    Ev4Data = #{
+        <<"seq">> => 4,
+        <<"epoch">> => 1,
+        <<"action">> => <<"put">>,
+        <<"namespace">> => <<"default">>,
+        <<"key">> => 103,
+        <<"val">> => 900,
+        <<"ver">> => 1,
+        <<"prev_hash">> => Ev3Hash
+    },
+    Ev4Hash = compute_hash(Ev4Data, Ev3Hash),
+    H4 = sd_runtime:canonical_hash_64(103, 900, 1),
+    Ev4Root = to_signed_64(((Ev3Root bxor 0) bxor H4) band 16#FFFFFFFFFFFFFFFF),
+    Ev4 = Ev4Data#{ <<"hash">> => Ev4Hash, <<"state_root">> => Ev4Root },
+    ok = file:write_file(TestWal, [json:encode(Ev4), <<"\n">>], [append]),
+    Restart2B = sd_runtime:simulate_restart_from_wal(),
+    case Restart2B of
+        #{ <<"ok">> := true, <<"recovered_entries">> := 4, <<"tick">> := 4, <<"state_root">> := Ev4Root, <<"ready">> := true, <<"health">> := <<"healthy">> } ->
+            io:format("PASS: physical EOF truncation repair allows subsequent append and restart to recover all 4 records~n");
+        Other2B ->
+            io:format("FAIL: post-truncation append + restart lost data or corrupted WAL: ~p~n", [Other2B]),
             halt(1)
     end,
 
@@ -121,7 +148,7 @@ main(_) ->
     ok = file:write_file(TestWal, MidCorruptContent),
     Restart3 = sd_runtime:simulate_restart_from_wal(),
     case Restart3 of
-        #{ <<"recovered_entries">> := 1, <<"ready">> := false, <<"health">> := <<"degraded">>, <<"wal_corrupted">> := true } ->
+        #{ <<"ok">> := false, <<"status">> := 503, <<"recovered_entries">> := 1, <<"ready">> := false, <<"health">> := <<"degraded">>, <<"wal_corrupted">> := true } ->
             io:format("PASS: mid-file corruption puts node into degraded status and stops write readiness~n");
         Other3 ->
             io:format("FAIL: mid-file corruption did not degrade node: ~p~n", [Other3]),
@@ -197,10 +224,28 @@ main(_) ->
     ok = file:write_file(TestWal, TamperedRootContent),
     Restart7 = sd_runtime:simulate_restart_from_wal(),
     case Restart7 of
-        #{ <<"recovered_entries">> := 1, <<"ready">> := false, <<"health">> := <<"degraded">> } ->
+        #{ <<"ok">> := false, <<"recovered_entries">> := 1, <<"ready">> := false, <<"health">> := <<"degraded">> } ->
             io:format("PASS: forged state_root detected by dynamic recomputation and sets health to degraded~n");
         Other7 ->
             io:format("FAIL: forged state_root not caught: ~p~n", [Other7]),
+            halt(1)
+    end,
+
+    %% ========================================================================
+    %% TEST 8: Missing state_root Field on WAL Record Rejected
+    %% ========================================================================
+    EvMissingRoot = maps:remove(<<"state_root">>, Ev2),
+    MissingRootContent = [
+        json:encode(Ev1), <<"\n">>,
+        json:encode(EvMissingRoot), <<"\n">>
+    ],
+    ok = file:write_file(TestWal, MissingRootContent),
+    Restart8 = sd_runtime:simulate_restart_from_wal(),
+    case Restart8 of
+        #{ <<"ok">> := false, <<"recovered_entries">> := 1, <<"ready">> := false, <<"health">> := <<"degraded">>, <<"wal_corrupted">> := true } ->
+            io:format("PASS: WAL record missing state_root field is rejected and sets health to degraded~n");
+        Other8 ->
+            io:format("FAIL: missing state_root was not rejected: ~p~n", [Other8]),
             halt(1)
     end,
 

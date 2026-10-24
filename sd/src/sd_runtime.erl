@@ -5,17 +5,17 @@
 %% Shared Data Pool (SD) Runtime Engine (~sd@1.0)
 %% ============================================================================
 %% Responsibilities:
-%% 1. Append-Only Disk Write-Ahead-Log (WAL) with group commit fsync.
+%% 1. Append-Only Disk Write-Ahead-Log (WAL) with fail-closed datasync.
 %% 2. In-memory RAM dual-store & secondary query serving.
 %% 3. Real-time TCP streaming subscriber from Hot Node (:8736).
 %% 4. Multi-party batch checkpoint proposal for AO Arbitrator.
-%% 5. Epoch fencing protection against split-brain scenarios.
+%% 5. Durable epoch fencing protection against split-brain scenarios.
 %% ============================================================================
 
 -export([start_link/0, ensure_started/0, reset/0, is_connected/0, get_current_tick/0, get_state_root/0, get_epoch/0]).
 -export([get_tick/0, get_state/0, get_key/1, get_wal/0, get_wal_batch/2, get_status/0, get_status_map/0, fence_epoch/1, recover_wal/0, simulate_restart_from_wal/0]).
 -export([get_tick_from_req/3, get_state_from_req/3, get_key_from_req/3, get_wal_from_req/3, get_wal_batch_from_req/3, get_status_from_req/3, reset_from_req/3, fence_from_req/3, restart_from_req/3, handle_scheduler_http/4]).
--export([verify_admin_req/1, is_test_profile/0, is_degraded/0, canonical_hash_64/3]).
+-export([verify_admin_req/1, is_test_profile/0, is_degraded/0, canonical_hash_64/3, validate_startup_security/0, constant_time_equals/2]).
 -export([compute_event_hash/2, compute_canonical_event_hash/1, compute_canonical_event_hash/2, compute_legacy_event_hash/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
@@ -26,17 +26,51 @@
 -define(GENESIS_HASH, <<"0000000000000000000000000000000000000000000000000000000000000000">>).
 
 get_hot_host() ->
-    case os:getenv("HOT_NODE_HOST") of
-        false -> "127.0.0.1";
+    case os:getenv("HYDB_HOT_HOST") of
+        false ->
+            case os:getenv("HOT_NODE_HOST") of
+                false -> "127.0.0.1";
+                "" -> "127.0.0.1";
+                Host -> Host
+            end;
         "" -> "127.0.0.1";
         Host -> Host
     end.
 
 get_hot_port() ->
-    case os:getenv("HOT_NODE_PORT") of
-        false -> 8736;
+    case os:getenv("HYDB_HOT_PORT") of
+        false ->
+            case os:getenv("HOT_NODE_PORT") of
+                false -> 8736;
+                "" -> 8736;
+                PStr -> list_to_integer(PStr)
+            end;
         "" -> 8736;
         PStr -> list_to_integer(PStr)
+    end.
+
+get_sd_node_id() ->
+    case os:getenv("HYDB_NODE_ID") of
+        false ->
+            case os:getenv("SD_NODE_ID") of
+                false ->
+                    case is_test_profile() of
+                        true -> <<"hb_su">>;
+                        false -> throw({error, missing_node_id_in_production})
+                    end;
+                "" ->
+                    case is_test_profile() of
+                        true -> <<"hb_su">>;
+                        false -> throw({error, missing_node_id_in_production})
+                    end;
+                Id2 -> list_to_binary(string:trim(Id2))
+            end;
+        "" ->
+            case is_test_profile() of
+                true -> <<"hb_su">>;
+                false -> throw({error, missing_node_id_in_production})
+            end;
+        Id1 -> list_to_binary(string:trim(Id1))
     end.
 
 -record(state, {
@@ -58,6 +92,34 @@ wal_path() ->
         "" -> filename:join([get_db_dir(), "sd/wal.log"]);
         P when is_list(P), length(P) > 0 -> P;
         _ -> filename:join([get_db_dir(), "sd/wal.log"])
+    end.
+
+epoch_meta_path() ->
+    wal_path() ++ ".epoch".
+
+persist_epoch_to_disk(Epoch) when is_integer(Epoch) ->
+    Path = epoch_meta_path(),
+    TmpPath = Path ++ ".tmp",
+    _ = filelib:ensure_dir(Path),
+    Bin = integer_to_binary(Epoch),
+    case file:open(TmpPath, [write, raw, binary]) of
+        {ok, Fd} ->
+            WRes = file:write(Fd, Bin),
+            SRes = file:datasync(Fd),
+            _ = file:close(Fd),
+            case {WRes, SRes} of
+                {ok, ok} -> file:rename(TmpPath, Path);
+                _ -> {error, epoch_persist_failed}
+            end;
+        Err -> Err
+    end.
+
+read_persisted_epoch() ->
+    Path = epoch_meta_path(),
+    case file:read_file(Path) of
+        {ok, Bin} ->
+            to_integer(string:trim(Bin), 1);
+        _ -> 1
     end.
 
 is_connected() ->
@@ -102,13 +164,26 @@ ensure_started() ->
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
+validate_startup_security() ->
+    _ = compute_node_auth_secret(),
+    _ = compute_admin_auth_secret(),
+    _ = get_sd_node_id(),
+    ok.
+
 init([]) ->
-    init_ets(),
-    recover_from_wal(wal_path()),
-    SubHost = get_hot_host(),
-    SubPort = get_hot_port(),
-    SubPid = spawn_link(fun() -> subscriber_loop(?SERVER, SubHost, SubPort) end),
-    {ok, #state{sub_pid = SubPid, hot_host = SubHost, hot_port = SubPort}}.
+    case catch validate_startup_security() of
+        ok ->
+            init_ets(),
+            recover_from_wal(wal_path()),
+            SubHost = get_hot_host(),
+            SubPort = get_hot_port(),
+            SubPid = spawn_link(fun() -> subscriber_loop(?SERVER, SubHost, SubPort) end),
+            {ok, #state{sub_pid = SubPid, hot_host = SubHost, hot_port = SubPort}};
+        {error, Reason} ->
+            {stop, {security_configuration_error, Reason}};
+        OtherErr ->
+            {stop, {security_configuration_error, OtherErr}}
+    end.
 
 init_ets() ->
     case ets:info(?TABLE) of
@@ -124,7 +199,8 @@ init_ets() ->
     end.
 
 reset_ets_defaults() ->
-    ets:insert(?TABLE, {epoch, 1}),
+    PersistedEpoch = read_persisted_epoch(),
+    ets:insert(?TABLE, {epoch, max(1, PersistedEpoch)}),
     ets:insert(?TABLE, {tick, 0}),
     ets:insert(?TABLE, {state_root, 0}),
     ets:insert(?TABLE, {latest_hash, ?GENESIS_HASH}),
@@ -138,17 +214,22 @@ reset_ets_defaults() ->
     ets:insert(?TABLE, {node_health, healthy}),
     ets:insert(?TABLE, {wal_recovery_halt_reason, none}),
     ets:insert(?TABLE, {wal_recovery_truncated_detected, false}),
+    ets:insert(?TABLE, {wal_truncated_repaired, false}),
     ets:insert(?TABLE, {history, []}).
 
 get_or_open_wal_fd() ->
     case ets:lookup(?TABLE, wal_fd) of
-        [{wal_fd, Fd}] -> Fd;
+        [{wal_fd, Fd}] -> {ok, Fd};
         [] ->
             Path = wal_path(),
             _ = filelib:ensure_dir(Path),
-            {ok, Fd} = file:open(Path, [append, raw, binary]),
-            ets:insert(?TABLE, {wal_fd, Fd}),
-            Fd
+            case file:open(Path, [append, raw, binary]) of
+                {ok, Fd} ->
+                    ets:insert(?TABLE, {wal_fd, Fd}),
+                    {ok, Fd};
+                {error, Reason} ->
+                    {error, Reason}
+            end
     end.
 
 close_wal_fd() ->
@@ -158,6 +239,56 @@ close_wal_fd() ->
             ets:delete(?TABLE, wal_fd),
             ok;
         [] -> ok
+    end.
+
+write_and_sync_wal(RawData) ->
+    case os:getenv("HYDB_SIMULATE_WAL_IO_ERROR") of
+        "true" ->
+            {error, simulated_wal_io_failure};
+        _ ->
+            case get_or_open_wal_fd() of
+                {ok, WalFd} ->
+                    case file:write(WalFd, [RawData, <<"\n">>]) of
+                        ok ->
+                            case file:datasync(WalFd) of
+                                ok -> ok;
+                                {error, SyncErr} ->
+                                    close_wal_fd(),
+                                    {error, {datasync_failed, SyncErr}}
+                            end;
+                        {error, WriteErr} ->
+                            close_wal_fd(),
+                            {error, {write_failed, WriteErr}}
+                    end;
+                {error, OpenErr} ->
+                    {error, {open_failed, OpenErr}}
+            end
+    end.
+
+repair_truncated_wal_file(Path, ValidLinesRev) ->
+    close_wal_fd(),
+    ValidLines = lists:reverse(ValidLinesRev),
+    CleanContent = iolist_to_binary([[L, <<"\n">>] || L <- ValidLines]),
+    TmpPath = Path ++ ".repair.tmp",
+    case file:open(TmpPath, [write, raw, binary]) of
+        {ok, Fd} ->
+            WRes = file:write(Fd, CleanContent),
+            SRes = file:datasync(Fd),
+            _ = file:close(Fd),
+            case {WRes, SRes} of
+                {ok, ok} ->
+                    case file:rename(TmpPath, Path) of
+                        ok ->
+                            ets:insert(?TABLE, {wal_truncated_repaired, true}),
+                            ok;
+                        Err -> Err
+                    end;
+                _ ->
+                    _ = file:delete(TmpPath),
+                    {error, wal_repair_sync_failed}
+            end;
+        Err ->
+            Err
     end.
 
 is_degraded() ->
@@ -265,17 +396,21 @@ compute_incremental_root(Event, CurrentRoot) ->
     end.
 
 recover_from_wal(Path) ->
+    PersistedEpoch = read_persisted_epoch(),
+    ets:insert(?TABLE, {epoch, max(1, PersistedEpoch)}),
     case file:read_file(Path) of
         {ok, Content} ->
             Lines = binary:split(Content, <<"\n">>, [global, trim_all]),
-            validate_and_apply_wal_lines(Lines, 1, ?GENESIS_HASH, 1, 0, 0);
+            validate_and_apply_wal_lines(Path, Lines, 1, ?GENESIS_HASH, 1, 0, 0, []);
         _ -> 0
     end.
 
-validate_and_apply_wal_lines([], _ExpectedSeq, _LastHash, _LastEpoch, AppliedCount, AccRoot) ->
+validate_and_apply_wal_lines(_Path, [], _ExpectedSeq, _LastHash, LastEpoch, AppliedCount, AccRoot, _ValidLinesRev) ->
+    CurrEpoch = lookup_val(epoch, 1),
+    ets:insert(?TABLE, {epoch, max(CurrEpoch, LastEpoch)}),
     ets:insert(?TABLE, {state_root, AccRoot}),
     AppliedCount;
-validate_and_apply_wal_lines([Line | Rest], ExpectedSeq, LastHash, LastEpoch, AppliedCount, AccRoot) ->
+validate_and_apply_wal_lines(Path, [Line | Rest], ExpectedSeq, LastHash, LastEpoch, AppliedCount, AccRoot, ValidLinesRev) ->
     case catch json:decode(Line) of
         Event when is_map(Event) ->
             Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
@@ -286,7 +421,7 @@ validate_and_apply_wal_lines([Line | Rest], ExpectedSeq, LastHash, LastEpoch, Ap
             HashMatches = (string:uppercase(GivenHash) =:= string:uppercase(ExpectedHash)),
             PrevHashMatches = (string:uppercase(GivenPrevHash) =:= string:uppercase(LastHash)),
 
-            ClaimedRootBin = maps:get(<<"state_root">>, Event, undefined),
+            ClaimedRootBin = maps:get(<<"state_root">>, Event, maps:get(<<"state_root_str">>, Event, undefined)),
             ClaimedRoot = case ClaimedRootBin of
                 undefined -> undefined;
                 RInt when is_integer(RInt) -> RInt;
@@ -294,7 +429,8 @@ validate_and_apply_wal_lines([Line | Rest], ExpectedSeq, LastHash, LastEpoch, Ap
             end,
 
             NewAccRoot = compute_incremental_root(Event, AccRoot),
-            RootMatches = (ClaimedRoot =:= undefined orelse ClaimedRoot =:= NewAccRoot),
+            RootPresent = (ClaimedRoot =/= undefined),
+            RootMatches = (RootPresent andalso ClaimedRoot =:= NewAccRoot),
 
             if
                 Seq =/= ExpectedSeq ->
@@ -309,20 +445,42 @@ validate_and_apply_wal_lines([Line | Rest], ExpectedSeq, LastHash, LastEpoch, Ap
                 not HashMatches ->
                     mark_recovery_failure({hash_mismatch, GivenHash, ExpectedHash}),
                     AppliedCount;
+                not RootPresent ->
+                    mark_recovery_failure({missing_state_root, Seq}),
+                    AppliedCount;
                 not RootMatches ->
                     mark_recovery_failure({state_root_mismatch, ClaimedRoot, NewAccRoot}),
                     AppliedCount;
                 true ->
                     apply_event_to_ets(Event, NewAccRoot),
-                    validate_and_apply_wal_lines(Rest, ExpectedSeq + 1, GivenHash, max(LastEpoch, EvEpoch), AppliedCount + 1, NewAccRoot)
+                    validate_and_apply_wal_lines(
+                        Path,
+                        Rest,
+                        ExpectedSeq + 1,
+                        GivenHash,
+                        max(LastEpoch, EvEpoch),
+                        AppliedCount + 1,
+                        NewAccRoot,
+                        [Line | ValidLinesRev]
+                    )
             end;
         _CorruptOrTruncated ->
             case Rest of
                 [] ->
-                    %% Clean EOF truncation due to crash mid-write
+                    %% Clean EOF truncation due to crash mid-write:
+                    %% physically truncate the corrupt trailing bytes from the WAL file
+                    %% before any subsequent append can occur.
                     ets:insert(?TABLE, {wal_recovery_truncated_detected, true}),
+                    CurrEpoch = lookup_val(epoch, 1),
+                    ets:insert(?TABLE, {epoch, max(CurrEpoch, LastEpoch)}),
                     ets:insert(?TABLE, {state_root, AccRoot}),
-                    AppliedCount;
+                    case repair_truncated_wal_file(Path, ValidLinesRev) of
+                        ok ->
+                            AppliedCount;
+                        RepairErr ->
+                            mark_recovery_failure({eof_truncate_repair_failed, RepairErr}),
+                            AppliedCount
+                    end;
                 _ ->
                     %% Mid-file corruption! Subsequent lines exist after corrupt record
                     mark_recovery_failure({mid_file_corruption, Line}),
@@ -345,7 +503,7 @@ apply_event_to_ets(Event, ComputedRoot) ->
             ets:insert(?TABLE, {latest_hash, Hash}),
             ets:insert(?TABLE, {{event_hash, Seq}, Hash})
     end,
-    ets:insert(?TABLE, {{wal_event, Seq}, Event#{ <<"state_root">> => RootBin }}),
+    ets:insert(?TABLE, {{wal_event, Seq}, Event#{ <<"state_root">> => RootBin, <<"state_root_str">> => RootBin }}),
     ets:update_counter(?TABLE, total_replicated, 1, {total_replicated, 0}),
     Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, <<"put">>)),
     case Op of
@@ -442,18 +600,21 @@ get_status_map() ->
         [{wal_recovery_truncated_detected, T}] -> T;
         _ -> false
     end,
+    Repaired = lookup_val(wal_truncated_repaired, false),
     Health = case WalCorrupted of true -> <<"degraded">>; false -> <<"healthy">> end,
     Ready = not WalCorrupted,
+    NodeId = try get_sd_node_id() catch _:_ -> <<"hb_su">> end,
     #{
         <<"ok">> => true,
         <<"role">> => <<"SD-HyperBEAM-Node">>,
-        <<"node_name">> => <<"hb_su">>,
+        <<"node_name">> => NodeId,
         <<"device">> => <<"sd@1.0">>,
         <<"health">> => Health,
         <<"ready">> => Ready,
         <<"wal_corrupted">> => WalCorrupted,
         <<"halt_reason">> => HaltReason,
         <<"truncated_detected">> => Truncated,
+        <<"truncated_repaired">> => Repaired,
         <<"connected_to_hot">> => Connected,
         <<"epoch">> => Epoch,
         <<"latest_tick_ram">> => Tick,
@@ -527,7 +688,17 @@ restart_from_req(_Base, Req, _Opts) ->
     case verify_admin_req(Req) of
         {error, ErrMap} -> ErrMap;
         ok ->
-            simulate_restart_from_wal()
+            case is_test_profile() of
+                false ->
+                    #{
+                        <<"ok">> => false,
+                        <<"status">> => 403,
+                        <<"error_code">> => <<"ERR_TEST_ENDPOINT_DISABLED">>,
+                        <<"error">> => <<"Simulate restart endpoint is strictly disabled outside test profile">>
+                    };
+                true ->
+                    simulate_restart_from_wal()
+            end
     end.
 
 reset_from_req(_Base, Req, _Opts) ->
@@ -578,8 +749,14 @@ handle_call({fence_epoch, NewEpoch}, _From, State) ->
     if NewEpoch < CurrEpoch ->
         {reply, #{ <<"ok">> => false, <<"error">> => <<"epoch_cannot_decrease">>, <<"epoch">> => CurrEpoch }, State};
        true ->
-        ets:insert(?TABLE, {epoch, NewEpoch}),
-        {reply, #{ <<"ok">> => true, <<"previous_epoch">> => CurrEpoch, <<"epoch">> => NewEpoch }, State}
+        case persist_epoch_to_disk(NewEpoch) of
+            ok ->
+                ets:insert(?TABLE, {epoch, NewEpoch}),
+                {reply, #{ <<"ok">> => true, <<"previous_epoch">> => CurrEpoch, <<"epoch">> => NewEpoch, <<"persisted">> => true }, State};
+            {error, PersistErr} ->
+                mark_recovery_failure({epoch_persist_error, PersistErr}),
+                {reply, #{ <<"ok">> => false, <<"status">> => 503, <<"error">> => <<"epoch_persist_failed">> }, State}
+        end
     end;
 
 handle_call(recover_wal, _From, State) ->
@@ -587,7 +764,24 @@ handle_call(recover_wal, _From, State) ->
     Count = recover_from_wal(wal_path()),
     Tick = lookup_val(tick, 0),
     Root = lookup_val(state_root, 0),
-    {reply, #{ <<"ok">> => true, <<"recovered_entries">> => Count, <<"tick">> => Tick, <<"state_root">> => Root, <<"state_root_str">> => integer_to_binary(Root) }, State};
+    WalCorrupted = lookup_val(wal_corrupted, false),
+    HaltReason = case ets:lookup(?TABLE, wal_recovery_halt_reason) of
+        [{wal_recovery_halt_reason, none}] -> <<"none">>;
+        [{wal_recovery_halt_reason, R}] -> list_to_binary(io_lib:format("~p", [R]));
+        _ -> <<"none">>
+    end,
+    Status = case WalCorrupted of true -> 503; false -> 200 end,
+    {reply, #{
+        <<"ok">> => not WalCorrupted,
+        <<"status">> => Status,
+        <<"ready">> => not WalCorrupted,
+        <<"wal_corrupted">> => WalCorrupted,
+        <<"halt_reason">> => HaltReason,
+        <<"recovered_entries">> => Count,
+        <<"tick">> => Tick,
+        <<"state_root">> => Root,
+        <<"state_root_str">> => integer_to_binary(Root)
+    }, State};
 
 handle_call(simulate_restart_from_wal, _From, State) ->
     close_wal_fd(),
@@ -610,10 +804,13 @@ handle_call(simulate_restart_from_wal, _From, State) ->
         [{wal_recovery_truncated_detected, T}] -> T;
         _ -> false
     end,
+    Repaired = lookup_val(wal_truncated_repaired, false),
     Health = case WalCorrupted of true -> <<"degraded">>; false -> <<"healthy">> end,
     Ready = not WalCorrupted,
+    HttpStatus = case WalCorrupted of true -> 503; false -> 200 end,
     {reply, #{
-        <<"ok">> => true,
+        <<"ok">> => not WalCorrupted,
+        <<"status">> => HttpStatus,
         <<"health">> => Health,
         <<"ready">> => Ready,
         <<"wal_corrupted">> => WalCorrupted,
@@ -625,6 +822,7 @@ handle_call(simulate_restart_from_wal, _From, State) ->
         <<"records_count">> => KVCount,
         <<"halt_reason">> => HaltReason,
         <<"truncated_detected">> => Truncated,
+        <<"truncated_repaired">> => Repaired,
         <<"source">> => <<"WAL_TO_RAM_RECOVERY">>
     }, State};
 
@@ -698,7 +896,7 @@ handle_call({get_wal_batch, FromSeq0, ToSeq0}, _From, State) ->
         end, lists:seq(FromSeq, ToSeq));
        true -> []
     end,
-    SuId = <<"SU_NODE_1">>,
+    NodeId = try get_sd_node_id() catch _:_ -> <<"SU_NODE_1">> end,
     {BatchEpoch, ActualFrom, ActualTo, PropHash, PropRootBin} = case Events of
         [] ->
             {lookup_val(epoch, 1), FromSeq, ToSeq, lookup_val(latest_hash, ?GENESIS_HASH), integer_to_binary(lookup_val(state_root, 0))};
@@ -715,12 +913,12 @@ handle_call({get_wal_batch, FromSeq0, ToSeq0}, _From, State) ->
                      end,
             {Ep, FSeq, TSeq, PHash, PRootB}
     end,
-    BatchSig = compute_batch_sig(SuId, BatchEpoch, ActualFrom, ActualTo, PropHash, PropRootBin),
+    BatchSig = compute_batch_sig(NodeId, BatchEpoch, ActualFrom, ActualTo, PropHash, PropRootBin),
     EventsJson = try iolist_to_binary(json:encode(Events)) catch _:_ -> <<"[]">> end,
     Reply = #{
         <<"ok">> => true,
-        <<"su_id">> => SuId,
-        <<"sd_id">> => <<"SD_NODE_1">>,
+        <<"su_id">> => NodeId,
+        <<"sd_id">> => NodeId,
         <<"epoch">> => BatchEpoch,
         <<"from_seq">> => ActualFrom,
         <<"to_seq">> => ActualTo,
@@ -749,10 +947,11 @@ handle_call(get_status, _From, State) ->
 handle_call(reset, _From, State) ->
     close_wal_fd(),
     Conn = lookup_val(connected_to_hot, false),
+    _ = file:delete(wal_path()),
+    _ = file:delete(epoch_meta_path()),
     ets:delete_all_objects(?TABLE),
     reset_ets_defaults(),
     ets:insert(?TABLE, {connected_to_hot, Conn}),
-    _ = file:delete(wal_path()),
     {reply, #{ <<"ok">> => true, <<"reset">> => true }, State};
 
 handle_call(_Req, _From, State) ->
@@ -771,7 +970,18 @@ terminate(_Reason, _State) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-%% Mutual HMAC-SHA256 Node Authentication
+%% ============================================================================
+%% Security: Cluster Auth Secret vs Independent Admin Token
+%% ============================================================================
+
+constant_time_equals(A, B) when is_binary(A), is_binary(B) ->
+    case byte_size(A) =:= byte_size(B) of
+        false -> false;
+        true ->
+            crypto:hash_equals(crypto:hash(sha256, A), crypto:hash(sha256, B))
+    end;
+constant_time_equals(_, _) ->
+    false.
 
 node_auth_secret() ->
     case ets:info(?TABLE) of
@@ -787,22 +997,55 @@ node_auth_secret() ->
     end.
 
 compute_node_auth_secret() ->
-    WalletPath = case os:getenv("WALLET_PATH") of
-        false -> filename:join([get_db_dir(), "secrets/wallet.json"]);
-        "" -> filename:join([get_db_dir(), "secrets/wallet.json"]);
-        WP -> WP
-    end,
-    case file:read_file(WalletPath) of
-        {ok, Bin} when byte_size(Bin) > 0 ->
-            crypto:hash(sha256, Bin);
+    case os:getenv("HYDB_CLUSTER_SECRET") of
+        EnvSec when is_list(EnvSec), length(EnvSec) >= 16 ->
+            crypto:hash(sha256, list_to_binary(EnvSec));
+        EnvSec when is_list(EnvSec), length(EnvSec) > 0 ->
+            throw({error, weak_cluster_auth_secret});
         _ ->
-            case os:getenv("HYDB_CLUSTER_SECRET") of
+            case is_test_profile() of
                 false ->
                     throw({error, missing_cluster_auth_secret});
-                EnvSec when is_list(EnvSec), length(EnvSec) > 0 ->
-                    crypto:hash(sha256, list_to_binary(EnvSec));
-                _ ->
-                    throw({error, missing_cluster_auth_secret})
+                true ->
+                    WalletPath = case os:getenv("WALLET_PATH") of
+                        false -> filename:join([get_db_dir(), "secrets/wallet.json"]);
+                        "" -> filename:join([get_db_dir(), "secrets/wallet.json"]);
+                        WP -> WP
+                    end,
+                    case file:read_file(WalletPath) of
+                        {ok, Bin} when byte_size(Bin) >= 16 ->
+                            crypto:hash(sha256, Bin);
+                        _ ->
+                            throw({error, missing_cluster_auth_secret})
+                    end
+            end
+    end.
+
+admin_auth_secret() ->
+    compute_admin_auth_secret().
+
+compute_admin_auth_secret() ->
+    case os:getenv("HYDB_ADMIN_TOKEN") of
+        AdminTok when is_list(AdminTok), length(AdminTok) >= 16 ->
+            case is_test_profile() of
+                false ->
+                    case os:getenv("HYDB_CLUSTER_SECRET") of
+                        AdminTok ->
+                            throw({error, admin_token_must_differ_from_cluster_secret});
+                        _ ->
+                            list_to_binary(AdminTok)
+                    end;
+                true ->
+                    list_to_binary(AdminTok)
+            end;
+        AdminTok when is_list(AdminTok), length(AdminTok) > 0 ->
+            throw({error, weak_admin_token});
+        _ ->
+            case is_test_profile() of
+                false ->
+                    throw({error, missing_admin_token});
+                true ->
+                    string:uppercase(binary:encode_hex(node_auth_secret()))
             end
     end.
 
@@ -842,7 +1085,7 @@ sd_perform_handshake(Socket) ->
         {tcp, Socket, Data} ->
             try json:decode(Data) of
                 #{ <<"type">> := <<"AUTH_CHALLENGE">>, <<"nonce">> := Nonce } when is_binary(Nonce) ->
-                    NodeId = <<"hb_su">>,
+                    NodeId = try get_sd_node_id() catch _:_ -> <<"hb_su">> end,
                     Msg = <<Nonce/binary, ":", NodeId/binary>>,
                     Sig = binary:encode_hex(crypto:mac(hmac, sha256, node_auth_secret(), Msg)),
                     Resp = iolist_to_binary(json:encode(#{
@@ -937,19 +1180,25 @@ handle_incoming_event(Socket, RawData) ->
                         ets:update_counter(?TABLE, hash_rejections, 1, {hash_rejections, 0}),
                         ok;
                        true ->
-                        WalFd = get_or_open_wal_fd(),
-                        ok = file:write(WalFd, [RawData, <<"\n">>]),
-                        ok = file:datasync(WalFd),
-                        CurrRoot = lookup_val(state_root, 0),
-                        ComputedRoot = compute_incremental_root(Event, CurrRoot),
-                        apply_event_to_ets(Event, ComputedRoot),
-                        gen_tcp:send(Socket, <<Seq:32/big>>),
-                        ok
+                        case write_and_sync_wal(RawData) of
+                            ok ->
+                                CurrRoot = lookup_val(state_root, 0),
+                                ComputedRoot = compute_incremental_root(Event, CurrRoot),
+                                apply_event_to_ets(Event, ComputedRoot),
+                                gen_tcp:send(Socket, <<Seq:32/big>>),
+                                ok;
+                            {error, IoReason} ->
+                                mark_recovery_failure({wal_io_error, IoReason}),
+                                ets:update_counter(?TABLE, degraded_rejections, 1, {degraded_rejections, 0}),
+                                ok
+                        end
                     end
                 end
         end
     catch
-        _:_Err ->
+        _:Err ->
+            mark_recovery_failure({unexpected_event_exception, Err}),
+            ets:update_counter(?TABLE, degraded_rejections, 1, {degraded_rejections, 0}),
             ok
     end.
 
@@ -1256,17 +1505,26 @@ parse_bin_field(_Key, _Req, Default) ->
     Default.
 
 extract_admin_token(Req) ->
-    case parse_bin_field(<<"admin_token">>, Req, undefined) of
+    HeadersMap = case maps:get(<<"headers">>, Req, undefined) of
+        M when is_map(M) -> M;
+        _ -> #{}
+    end,
+    case parse_bin_field(<<"headers/x-admin-token">>, Req, undefined) of
         undefined ->
-            case parse_bin_field(<<"authorization">>, Req, undefined) of
+            case parse_bin_field(<<"x-admin-token">>, Req, maps:get(<<"x-admin-token">>, HeadersMap, undefined)) of
                 undefined ->
                     case parse_bin_field(<<"headers/authorization">>, Req, undefined) of
-                        undefined -> undefined;
+                        undefined ->
+                            case parse_bin_field(<<"authorization">>, Req, maps:get(<<"authorization">>, HeadersMap, undefined)) of
+                                undefined ->
+                                    parse_bin_field(<<"admin_token">>, Req, undefined);
+                                AuthVal -> parse_bearer_token(AuthVal)
+                            end;
                         AuthHdr -> parse_bearer_token(AuthHdr)
                     end;
-                AuthVal -> parse_bearer_token(AuthVal)
+                XTok -> string:trim(XTok)
             end;
-        Tok -> Tok
+        XHdrTok -> string:trim(XHdrTok)
     end.
 
 parse_bearer_token(<<"Bearer ", Token/binary>>) -> string:trim(Token);
@@ -1276,7 +1534,8 @@ parse_bearer_token(_) -> undefined.
 
 verify_admin_req(Req) ->
     GivenToken = extract_admin_token(Req),
-    ExpectedHex = string:uppercase(binary:encode_hex(node_auth_secret())),
+    ExpectedAdminToken = admin_auth_secret(),
+    ExpectedAdminHex = string:uppercase(binary:encode_hex(crypto:hash(sha256, ExpectedAdminToken))),
     case GivenToken of
         undefined ->
             {error, #{
@@ -1286,7 +1545,10 @@ verify_admin_req(Req) ->
                 <<"error">> => <<"Missing operator admin_token for protected administrative action">>
             }};
         TokenBin when is_binary(TokenBin) ->
-            case string:uppercase(TokenBin) =:= ExpectedHex of
+            ExactMatch = constant_time_equals(TokenBin, ExpectedAdminToken),
+            CaseInsensitiveMatch = constant_time_equals(string:uppercase(TokenBin), string:uppercase(ExpectedAdminToken)),
+            ShaHexMatch = constant_time_equals(string:uppercase(TokenBin), ExpectedAdminHex),
+            case ExactMatch orelse CaseInsensitiveMatch orelse ShaHexMatch of
                 true -> ok;
                 false ->
                     {error, #{
@@ -1303,18 +1565,28 @@ is_test_profile() ->
         "prod" -> false;
         "production" -> false;
         "test" -> true;
-        _ ->
-            case os:getenv("NODE_ENV") of
+        false ->
+            case os:getenv("HYDB_ENV") of
+                "prod" -> false;
                 "production" -> false;
                 "test" -> true;
-                _ ->
-                    case os:getenv("HYDB_ENV") of
-                        "prod" -> false;
-                        "production" -> false;
+                false ->
+                    case os:getenv("NODE_ENV") of
                         "test" -> true;
-                        _ -> true
+                        _ -> false
+                    end;
+                _ -> false
+            end;
+        "" ->
+            case os:getenv("HYDB_ENV") of
+                "test" -> true;
+                _ ->
+                    case os:getenv("NODE_ENV") of
+                        "test" -> true;
+                        _ -> false
                     end
-            end
+            end;
+        _ -> false
     end.
 
 parse_int_field(Key, Req, Default) when is_map(Req) ->

@@ -26,6 +26,11 @@ jobs:
           node-version: 22
           cache: 'npm'
 
+      - name: Setup Rust & wasm32-unknown-unknown Target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
       - name: Setup Lua
         uses: leafo/gh-actions-lua@v10
         with:
@@ -39,6 +44,12 @@ jobs:
 
       - name: Install Dependencies (Reproducible)
         run: npm ci
+
+      - name: Build Rust WASM Engine (hydb.wasm) from Source
+        run: npm run build:wasm
+
+      - name: Verify Golden Vector Provenance
+        run: npm run verify:vectors
 
       - name: Generate Ephemeral Test Wallets
         run: |

@@ -176,7 +176,44 @@ main(_) ->
     assert_true(hymessage_runtime:is_quorum_satisfied(3, <<"single">>),
         "Single quorum (1 ACK) still succeeds with 1 connected node"),
 
-    %% 4. Explicit membership change requires admin authorization
+    %% 4. CRITICAL TEST: Single node opening multiple sockets MUST be deduplicated by NodeId (counts as 1 ACK, not 3)
+    ets:insert(hymessage_subscribers, {sock1, <<"su-node-1">>, 1000, 10}),
+    ets:insert(hymessage_subscribers, {sock1_dup2, <<"su-node-1">>, 1001, 10}),
+    ets:insert(hymessage_subscribers, {sock1_dup3, <<"su-node-1">>, 1002, 10}),
+    ets:insert(hymessage_subscribers, {sock_rogue, <<"unconfigured-rogue-node">>, 1003, 10}),
+    assert_eq(hymessage_runtime:count_acked_subscribers(10), 1,
+        "Duplicate sockets for same NodeId and unconfigured NodeIds are deduplicated/filtered to 1 ACK"),
+    assert_true(not hymessage_runtime:is_quorum_satisfied(10, <<"majority">>),
+        "Single NodeId with 3 duplicate sockets CANNOT spoof 2/3 majority quorum"),
+
+    %% 5. CRITICAL TEST: Handshake rejects valid-HMAC node if NodeId is not in configured cluster_members
+    Nonce = <<"ABCDEF0123456789">>,
+    SecretKey = crypto:hash(sha256, <<"phase03-quorum-test-secret-999">>),
+    ValidNodeMsg = <<Nonce/binary, ":su-node-2">>,
+    ValidNodeSig = binary:encode_hex(crypto:mac(hmac, sha256, SecretKey, ValidNodeMsg)),
+    ValidHandshakePayload = iolist_to_binary(json:encode(#{
+        <<"type">> => <<"AUTH_RESPONSE">>,
+        <<"node_id">> => <<"su-node-2">>,
+        <<"sig">> => ValidNodeSig,
+        <<"last_tick">> => 5
+    })),
+    assert_eq(hymessage_runtime:verify_su_handshake(ValidHandshakePayload, Nonce),
+        {ok, <<"su-node-2">>, 5},
+        "verify_su_handshake accepts valid HMAC for configured cluster member su-node-2"),
+
+    RogueNodeMsg = <<Nonce/binary, ":rogue-node-99">>,
+    RogueNodeSig = binary:encode_hex(crypto:mac(hmac, sha256, SecretKey, RogueNodeMsg)),
+    RogueHandshakePayload = iolist_to_binary(json:encode(#{
+        <<"type">> => <<"AUTH_RESPONSE">>,
+        <<"node_id">> => <<"rogue-node-99">>,
+        <<"sig">> => RogueNodeSig,
+        <<"last_tick">> => 5
+    })),
+    assert_eq(hymessage_runtime:verify_su_handshake(RogueHandshakePayload, Nonce),
+        {error, not_in_cluster_members},
+        "verify_su_handshake rejects valid HMAC when NodeId is not in configured cluster_members"),
+
+    %% 6. Explicit membership change requires admin authorization
     ets:insert(hymessage_store, {cluster_size, 1}),
     ets:insert(hymessage_store, {cluster_members, [<<"su-node-1">>]}),
     assert_true(hymessage_runtime:is_quorum_satisfied(3, <<"majority">>),

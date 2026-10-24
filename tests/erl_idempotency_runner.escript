@@ -9,8 +9,17 @@ main(_) ->
         D -> D
     end,
     os:putenv("DB_DIR", DbDir),
+    os:putenv("HYDB_PROFILE", "test"),
     os:putenv("HYDB_CLUSTER_SECRET", "phase04-idempotency-secret-888"),
+    os:putenv("HYDB_ADMIN_TOKEN", "phase04-distinct-admin-token-999"),
     os:putenv("HYDB_CLUSTER_SIZE", "1"),
+    os:putenv("HYDB_CLUSTER_MEMBERS", "su-node-1"),
+    HotWalFile = filename:join([DbDir, "hymessage/test_phase04_hot_wal.log"]),
+    HotEpochFile = filename:join([DbDir, "hymessage/test_phase04_hot_epoch.meta"]),
+    _ = file:delete(HotWalFile),
+    _ = file:delete(HotEpochFile),
+    os:putenv("HYDB_HOT_WAL_PATH", HotWalFile),
+    os:putenv("HYDB_HOT_EPOCH_PATH", HotEpochFile),
 
     HotOutDir = filename:join([DbDir, "hymessage/out/ebin"]),
     filelib:ensure_dir(filename:join([HotOutDir, "dummy"])),
@@ -129,6 +138,94 @@ main(_) ->
     assert_eq(maps:get(<<"seq">>, SchemaResRetry), 3, "Retried schema registration returns original seq 3"),
     assert_eq(maps:get(<<"idempotent_replay">>, SchemaResRetry), true, "Retried schema registration is marked idempotent_replay=true"),
 
+    %% ========================================================================
+    %% 6. Cold Restart Durability: Epoch, State & Idempotency Survive Restart
+    %% ========================================================================
+    {ok, PromRes} = hymessage_runtime:promote_epoch(3),
+    assert_eq(maps:get(<<"epoch">>, PromRes), 3, "Epoch promoted to 3 before restart"),
+
+    PutReqBeforeRestart = #{
+        <<"namespace">> => <<"app.docs">>,
+        <<"key">> => <<"doc:survive-restart">>,
+        <<"val">> => <<"durable-across-hot-restart">>,
+        <<"request_id">> => <<"req-restart-004">>,
+        <<"epoch">> => 3,
+        <<"timeout_ms">> => 20
+    },
+    ResBeforeRestart = hymessage_runtime:put_from_req(#{}, PutReqBeforeRestart, #{}),
+    assert_eq(maps:get(<<"ok">>, ResBeforeRestart), true, "PUT at epoch 3 before restart succeeds"),
+    assert_eq(maps:get(<<"seq">>, ResBeforeRestart), 4, "PUT allocated seq 4 before restart"),
+    StateBeforeRestart = hymessage_runtime:get_state_from_req(#{}, #{}, #{}),
+    RootBeforeRestart = maps:get(<<"db_root_hash">>, StateBeforeRestart),
+
+    %% Simulate full Hot Node process crash/restart (stop gen_server & wipe ETS tables)
+    ok = gen_server:stop(hymessage_runtime),
+    catch ets:delete(hymessage_store),
+    catch ets:delete(hymessage_idempotency_cache),
+    catch ets:delete(hymessage_sessions),
+    hydb_contract:reset_tables(),
+
+    %% Start Hot Node again — production init([]) reconciles epoch, WAL, and idempotency cache!
+    {ok, _NewPid} = hymessage_runtime:ensure_started(),
+    StateAfterRestart = hymessage_runtime:get_state_from_req(#{}, #{}, #{}),
+    assert_eq(maps:get(<<"epoch">>, StateAfterRestart), 3, "Hot Node init([]) restores promoted epoch 3 from disk"),
+    assert_eq(maps:get(<<"seq">>, StateAfterRestart), 4, "Hot Node init([]) restores seq 4 from hot_wal.log"),
+    assert_eq(maps:get(<<"db_root_hash">>, StateAfterRestart), RootBeforeRestart, "Hot Node init([]) restores exact state_root from hot_wal.log"),
+
+    %% Verify stale epoch is still fenced after restart
+    StaleAfterRestart = hymessage_runtime:put_from_req(#{}, #{
+        <<"namespace">> => <<"app.docs">>,
+        <<"key">> => <<"doc:stale">>,
+        <<"val">> => <<"should-fail">>,
+        <<"request_id">> => <<"req-stale-after-restart">>,
+        <<"epoch">> => 2
+    }, #{}),
+    assert_eq(maps:get(<<"error_code">>, StaleAfterRestart), <<"FENCED_STALE_EPOCH">>,
+        "Stale epoch write rejected with FENCED_STALE_EPOCH after Hot Node restart"),
+
+    %% Verify idempotency lookup & retry survive Hot Node restart
+    LookupAfterRestart = hymessage_runtime:request_status_from_req(#{}, #{ <<"request_id">> => <<"req-restart-004">> }, #{}),
+    assert_eq(maps:get(<<"found">>, LookupAfterRestart), true, "request_status lookup finds req-restart-004 after Hot Node restart"),
+    assert_eq(maps:get(<<"seq">>, LookupAfterRestart), 4, "request_status preserves seq 4 after Hot Node restart"),
+
+    RetryAfterRestart = hymessage_runtime:put_from_req(#{}, PutReqBeforeRestart, #{}),
+    assert_eq(maps:get(<<"ok">>, RetryAfterRestart), true, "Retried PUT after Hot Node restart succeeds"),
+    assert_eq(maps:get(<<"seq">>, RetryAfterRestart), 4, "Retried PUT after Hot Node restart returns original seq 4 without re-sequencing"),
+    assert_eq(maps:get(<<"idempotent_replay">>, RetryAfterRestart), true, "Retried PUT after Hot Node restart sets idempotent_replay=true"),
+
+    %% ========================================================================
+    %% 7. Production Mandatory request_id & Bounded Idempotency Table Eviction
+    %% ========================================================================
+    os:putenv("HYDB_PROFILE", "production"),
+    MissingReqIdRes = hymessage_runtime:put_from_req(#{}, #{
+        <<"namespace">> => <<"app.docs">>,
+        <<"key">> => <<"doc:no-req-id">>,
+        <<"val">> => <<"rejected-in-prod">>,
+        <<"epoch">> => 3
+    }, #{}),
+    assert_eq(maps:get(<<"status">>, MissingReqIdRes), 400, "Missing request_id returns HTTP 400 in production profile"),
+    assert_eq(maps:get(<<"error_code">>, MissingReqIdRes), <<"ERR_MISSING_REQUEST_ID">>,
+        "Missing request_id rejected with ERR_MISSING_REQUEST_ID in production profile"),
+    os:putenv("HYDB_PROFILE", "test"),
+
+    os:putenv("HYDB_IDEMPOTENCY_MAX_ENTRIES", "3"),
+    ets:delete_all_objects(hymessage_idempotency_cache),
+    lists:foreach(fun(I) ->
+        IBin = integer_to_binary(I),
+        _ = hymessage_runtime:put_from_req(#{}, #{
+            <<"namespace">> => <<"app.docs">>,
+            <<"key">> => <<"doc:bounded-", IBin/binary>>,
+            <<"val">> => <<"val-", IBin/binary>>,
+            <<"request_id">> => <<"req-bounded-", IBin/binary>>,
+            <<"epoch">> => 3,
+            <<"timeout_ms">> => 10
+        }, #{})
+    end, [1, 2, 3, 4, 5]),
+    CacheSize = ets:info(hymessage_idempotency_cache, size),
+    assert_eq(CacheSize =< 3, true, "Idempotency cache size is bounded by HYDB_IDEMPOTENCY_MAX_ENTRIES"),
+
+    _ = file:delete(HotWalFile),
+    _ = file:delete(HotEpochFile),
     io:format("ALL_PHASE_04_ERL_TESTS_PASSED~n").
 
 assert_eq(Actual, Expected, Label) ->

@@ -11,7 +11,6 @@ main([RoleStr, HttpPortStr]) ->
             load_mod(filename:join([RootDir, "hymessage/src/hydb_contract.erl"])),
             load_mod(filename:join([RootDir, "hymessage/src/hymessage_runtime.erl"])),
             {ok, _} = hymessage_runtime:ensure_started(),
-            maybe_reconcile_hot_from_wal(),
             {ok, ListenSock} = gen_tcp:listen(HttpPort, [
                 binary, {packet, raw}, {active, false}, {reuseaddr, true}, {nodelay, true}, {backlog, 256}
             ]),
@@ -36,38 +35,6 @@ load_mod(Path) ->
         Err ->
             io:format(standard_error, "Compile error for ~p: ~p~n", [Path, Err]),
             halt(1)
-    end.
-
-maybe_reconcile_hot_from_wal() ->
-    case os:getenv("HYDB_RECONCILE_WAL_PATH") of
-        false -> ok;
-        "" -> ok;
-        WalPath ->
-            case file:read_file(WalPath) of
-                {ok, Content} when byte_size(Content) > 0 ->
-                    Lines = binary:split(Content, <<"\n">>, [global, trim_all]),
-                    Events = lists:filtermap(fun(Line) ->
-                        try {true, json:decode(Line)} catch _:_ -> false end
-                    end, Lines),
-                    case Events of
-                        [] -> ok;
-                        _ ->
-                            {ok, _} = hymessage_runtime:replay(Events),
-                            ok
-                    end;
-                _ -> ok
-            end
-    end,
-    case os:getenv("HYDB_RECONCILE_EPOCH") of
-        false -> ok;
-        "" -> ok;
-        EpStr ->
-            case catch list_to_integer(EpStr) of
-                TargetEp when is_integer(TargetEp), TargetEp > 1 ->
-                    _ = hymessage_runtime:promote_epoch(TargetEp),
-                    ok;
-                _ -> ok
-            end
     end.
 
 accept_loop(ListenSock, Role) ->

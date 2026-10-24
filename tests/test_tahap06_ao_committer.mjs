@@ -25,7 +25,9 @@ import {
   computeBatchId,
   detectAoEnvironment,
   commitCheckpointBatch,
-  queryOfficialAoState
+  queryOfficialAoState,
+  verifyArbitratorEvaluation,
+  verifyArweaveL1Finality
 } from '../ao_process/committer.mjs';
 
 import {
@@ -310,11 +312,49 @@ async function runPhase06Tests() {
   assert(verifiedArLocalRes.finalized === false, 'arlocal_local simulation does NOT claim L1 finalized=true');
   assert(verifiedArLocalRes.idempotent_replay === false, 'First commit is not an idempotent replay');
 
-  // Retry the exact same batch 1..3 (idempotent retry)
-  const retrySameBatchRes = await commitCheckpointBatch(batch1to3, {
+  // Retry the exact same batch 1..3 with raw unverified finalityProof -> must NOT grant finalized: true without L1 gateway verification!
+  const unverifiedL1ProofRes = await commitCheckpointBatch(batch1to3, {
     useAoConnect: true,
     environment: 'ao_network',
     finalityProof: { block_height: 1550000, confirmations: 12 },
+    processId: 'PROC_TEST_01',
+    messageFn: async () => 'msg_batch_1_3_unverified_l1',
+    evaluatorFn: (m) => luaArbit.evaluate(m)
+  });
+  assert(
+    unverifiedL1ProofRes.verified === true && unverifiedL1ProofRes.finalized === false,
+    'Raw caller-injected finalityProof without gateway verification is NOT accepted as finalized=true'
+  );
+
+  // Retry the exact same batch 1..3 with authoritative Arweave L1 gateway verification (/tx/<id>/status & /tx/<id> Batch-Id tag)
+  const retrySameBatchRes = await commitCheckpointBatch(batch1to3, {
+    useAoConnect: true,
+    environment: 'ao_network',
+    minConfirmations: 5,
+    l1GatewayFetchFn: async (url) => {
+      if (url.endsWith('/status')) {
+        return {
+          status: 200,
+          json: async () => ({
+            block_height: 1550000,
+            number_of_confirmations: 12,
+            block_indep_hash: 'B'.repeat(48)
+          })
+        };
+      }
+      return {
+        status: 200,
+        json: async () => ({
+          id: 'msg_batch_1_3_retry',
+          tags: [
+            {
+              name_decoded: 'Batch-Id',
+              value_decoded: verifiedArLocalRes.batch_id
+            }
+          ]
+        })
+      };
+    },
     processId: 'PROC_TEST_01',
     messageFn: async () => 'msg_batch_1_3_retry',
     evaluatorFn: (m) => luaArbit.evaluate(m)
@@ -325,9 +365,29 @@ async function runPhase06Tests() {
   assert(retrySameBatchRes.idempotent_replay === true, 'idempotent_replay is TRUE on duplicate batch retry');
   assert(retrySameBatchRes.verified === true, 'Duplicate batch is verified');
   assert(retrySameBatchRes.confirmed === true, 'Duplicate batch is confirmed');
-  assert(retrySameBatchRes.finalized === true, 'With ao_network + finalityProof, finalized is TRUE');
+  assert(retrySameBatchRes.finalized === true, 'With ao_network + gateway-verified L1 proof & Batch-Id tag, finalized is TRUE');
   assert(retrySameBatchRes.settlement_status === 'finalized', 'settlement_status is "finalized"');
   assert(retrySameBatchRes.batch_id === verifiedArLocalRes.batch_id, 'Batch-Id is deterministic and identical across retries');
+
+  // Verify Arbitrator response missing OfficialHash or OfficialStateRoot is rejected (no silent fallback to proposed values)
+  const missingProofFieldsRes = verifyArbitratorEvaluation(
+    {
+      Messages: [
+        {
+          Status: 'COMMITTED',
+          OfficialSeq: '3'
+          // Missing OfficialHash and OfficialStateRoot!
+        }
+      ]
+    },
+    batch1to3
+  );
+  assert(
+    missingProofFieldsRes.verified === false &&
+      missingProofFieldsRes.confirmed === false &&
+      missingProofFieldsRes.verdict === 'MISSING_ARBITRATOR_PROOF_FIELDS',
+    'Arbitrator evaluation missing OfficialHash or OfficialStateRoot is rejected with MISSING_ARBITRATOR_PROOF_FIELDS'
+  );
 
   // Verify CheckpointsCount in Arbitrator is still 1 (no duplicate checkpoint created!)
   const officialAfterRetry = await queryOfficialAoState({
@@ -461,6 +521,37 @@ async function runPhase06Tests() {
   });
   assert(reconciled.last_committed_seq === 5, 'reconcileCursorWithAO synchronized stale disk cursor (2) up to AO OfficialSeq (5)');
   assert(reconciled.source === 'ao_official_reconciled', 'Reconciliation source marked as ao_official_reconciled');
+
+  // 3E: Simulate diverged local cursor ahead of AO OfficialSeq (e.g., disk has seq=99, AO has seq=5)
+  saveDurableCursor(
+    {
+      last_committed_seq: 99,
+      last_committed_hash: events1to3[1].hash,
+      last_state_root: events1to3[1].state_root_str,
+      epoch: 1
+    },
+    cursorFile
+  );
+  setCommittedCursor(null);
+  const divergedReconcile = await reconcileCursorWithAO({
+    cursorPath: cursorFile,
+    evaluatorFn: (m) => daemonLuaArbit.evaluate(m)
+  });
+  assert(
+    divergedReconcile.mismatch_detected === true &&
+      divergedReconcile.reconciliation_status === 'diverged_local_ahead_of_ao',
+    'reconcileCursorWithAO detects and flags when local disk cursor (99) is ahead of AO OfficialSeq (5)'
+  );
+  setCommittedCursor(null);
+  const divergedCycle = await processCommitterCycle({
+    cursorPath: cursorFile,
+    fetchFn: mockSuFetch,
+    evaluatorFn: (m) => daemonLuaArbit.evaluate(m)
+  });
+  assert(
+    divergedCycle.ok === false && divergedCycle.error_code === 'ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ',
+    'processCommitterCycle halts with ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ when local cursor is ahead of AO'
+  );
 
   console.log('\n========================================================================');
   console.log(` Phase 06 AO Settlement & Cursor Results: ${passed} PASSED, ${failed} FAILED`);

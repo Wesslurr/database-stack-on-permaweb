@@ -53,6 +53,9 @@ assert(erlOut.includes('PASS: valid WAL recovers exact 3 entries and matching dy
 assert(erlOut.includes('PASS: EOF truncation detected cleanly, node recovers up to last valid record and stays healthy'),
   'Crash mid-write (EOF truncation) recovers valid prefix and preserves healthy status');
 
+assert(erlOut.includes('PASS: physical EOF truncation repair allows subsequent append and restart to recover all 4 records'),
+  'Physical EOF truncation repair allows subsequent append + restart to recover all 4 records without losing data');
+
 assert(erlOut.includes('PASS: mid-file corruption puts node into degraded status and stops write readiness'),
   'Mid-file corruption immediately marks node degraded and stops write readiness');
 
@@ -67,6 +70,9 @@ assert(erlOut.includes('PASS: tampered record value detected via hash mismatch a
 
 assert(erlOut.includes('PASS: forged state_root detected by dynamic recomputation and sets health to degraded'),
   'Forged state_root in WAL detected by dynamic recomputation and sets health to degraded');
+
+assert(erlOut.includes('PASS: WAL record missing state_root field is rejected and sets health to degraded'),
+  'WAL record missing state_root field is rejected and sets health to degraded');
 
 console.log('\n========================================================================');
 console.log(` Phase 02 Recovery Verification Results: ${passed} PASSED, ${failed} FAILED`);

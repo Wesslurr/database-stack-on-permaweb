@@ -7,7 +7,8 @@
 -export([submit_from_req/3, get_state_from_req/3, reset_from_req/3, join_from_req/3, sync_from_req/3, replay_from_req/3, promote_from_req/3]).
 -export([put_from_req/3, get_from_req/3, del_from_req/3, exists_from_req/3, schema_from_req/3, scan_from_req/3, snapshot_from_req/3, restore_from_req/3, cluster_membership_from_req/3, request_status_from_req/3]).
 -export([compute_event_hash/2, compute_canonical_event_hash/1, compute_canonical_event_hash/2, compute_legacy_event_hash/2]).
--export([get_cluster_membership/0, set_cluster_membership/1, set_cluster_membership/2, get_configured_cluster_size/0, get_configured_cluster_members/0, is_quorum_satisfied/2, is_quorum_satisfied/3, get_request_status/1]).
+-export([get_cluster_membership/0, set_cluster_membership/1, set_cluster_membership/2, get_configured_cluster_size/0, get_configured_cluster_members/0, is_quorum_satisfied/2, is_quorum_satisfied/3, count_acked_subscribers/1, verify_su_handshake/2, get_request_status/1]).
+-export([is_test_profile/0, validate_startup_security/0, constant_time_equals/2, verify_admin_req/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {
@@ -340,18 +341,36 @@ is_trusted_arweave_gateway(GatewayBin) when is_binary(GatewayBin) ->
     end;
 is_trusted_arweave_gateway(_) -> false.
 
+constant_time_equals(A, B) when is_binary(A), is_binary(B) ->
+    case byte_size(A) =:= byte_size(B) of
+        false -> false;
+        true ->
+            crypto:hash_equals(crypto:hash(sha256, A), crypto:hash(sha256, B))
+    end;
+constant_time_equals(_, _) ->
+    false.
+
 extract_admin_token(Req) ->
-    case parse_bin_field(<<"admin_token">>, Req, undefined) of
+    HeadersMap = case maps:get(<<"headers">>, Req, undefined) of
+        M when is_map(M) -> M;
+        _ -> #{}
+    end,
+    case parse_bin_field(<<"headers/x-admin-token">>, Req, undefined) of
         undefined ->
-            case parse_bin_field(<<"authorization">>, Req, undefined) of
+            case parse_bin_field(<<"x-admin-token">>, Req, maps:get(<<"x-admin-token">>, HeadersMap, undefined)) of
                 undefined ->
                     case parse_bin_field(<<"headers/authorization">>, Req, undefined) of
-                        undefined -> undefined;
+                        undefined ->
+                            case parse_bin_field(<<"authorization">>, Req, maps:get(<<"authorization">>, HeadersMap, undefined)) of
+                                undefined ->
+                                    parse_bin_field(<<"admin_token">>, Req, undefined);
+                                AuthVal -> parse_bearer_token(AuthVal)
+                            end;
                         AuthHdr -> parse_bearer_token(AuthHdr)
                     end;
-                AuthVal -> parse_bearer_token(AuthVal)
+                XTok -> string:trim(XTok)
             end;
-        Tok -> Tok
+        XHdrTok -> string:trim(XHdrTok)
     end.
 
 parse_bearer_token(<<"Bearer ", Token/binary>>) -> string:trim(Token);
@@ -364,18 +383,28 @@ is_test_profile() ->
         "prod" -> false;
         "production" -> false;
         "test" -> true;
-        _ ->
-            case os:getenv("NODE_ENV") of
+        false ->
+            case os:getenv("HYDB_ENV") of
+                "prod" -> false;
                 "production" -> false;
                 "test" -> true;
-                _ ->
-                    case os:getenv("HYDB_ENV") of
-                        "prod" -> false;
-                        "production" -> false;
+                false ->
+                    case os:getenv("NODE_ENV") of
                         "test" -> true;
-                        _ -> true
+                        _ -> false
+                    end;
+                _ -> false
+            end;
+        "" ->
+            case os:getenv("HYDB_ENV") of
+                "test" -> true;
+                _ ->
+                    case os:getenv("NODE_ENV") of
+                        "test" -> true;
+                        _ -> false
                     end
-            end
+            end;
+        _ -> false
     end.
 
 verify_admin_req(Req, ForceRequire) ->
@@ -384,8 +413,8 @@ verify_admin_req(Req, ForceRequire) ->
         [{admin_locked, true}] -> true;
         _ -> false
     end,
-    ExpectedHex = string:uppercase(binary:encode_hex(node_auth_secret())),
-    case {GivenToken, ForceRequire orelse IsLocked} of
+    MustAuthenticate = ForceRequire orelse IsLocked orelse (not is_test_profile()),
+    case {GivenToken, MustAuthenticate} of
         {undefined, false} ->
             ok;
         {undefined, true} ->
@@ -396,7 +425,12 @@ verify_admin_req(Req, ForceRequire) ->
                 <<"error">> => <<"Missing operator admin_token for protected administrative action">>
             }};
         {TokenBin, _} when is_binary(TokenBin) ->
-            case string:uppercase(TokenBin) =:= ExpectedHex of
+            ExpectedAdminToken = admin_auth_secret(),
+            ExpectedAdminHex = string:uppercase(binary:encode_hex(crypto:hash(sha256, ExpectedAdminToken))),
+            ExactMatch = constant_time_equals(TokenBin, ExpectedAdminToken),
+            CaseInsensitiveMatch = constant_time_equals(string:uppercase(TokenBin), string:uppercase(ExpectedAdminToken)),
+            ShaHexMatch = constant_time_equals(string:uppercase(TokenBin), ExpectedAdminHex),
+            case ExactMatch orelse CaseInsensitiveMatch orelse ShaHexMatch of
                 true -> ok;
                 false ->
                     {error, #{
@@ -719,17 +753,67 @@ get_request_status(ReqId) when is_binary(ReqId) ->
     end.
 
 extract_request_id(ReqOrOpts) when is_map(ReqOrOpts) ->
-    case parse_bin_field(<<"request_id">>, ReqOrOpts, undefined) of
-        undefined -> parse_bin_field(<<"idempotency_key">>, ReqOrOpts, undefined);
-        <<>> -> parse_bin_field(<<"idempotency_key">>, ReqOrOpts, undefined);
-        RId -> RId
+    case parse_bin_field(<<"headers/x-request-id">>, ReqOrOpts, undefined) of
+        undefined ->
+            case parse_bin_field(<<"x-request-id">>, ReqOrOpts, undefined) of
+                undefined ->
+                    case parse_bin_field(<<"request_id">>, ReqOrOpts, undefined) of
+                        undefined -> parse_bin_field(<<"idempotency_key">>, ReqOrOpts, undefined);
+                        <<>> -> parse_bin_field(<<"idempotency_key">>, ReqOrOpts, undefined);
+                        RId -> string:trim(RId)
+                    end;
+                XRId -> string:trim(XRId)
+            end;
+        HdrRId -> string:trim(HdrRId)
     end;
 extract_request_id(_) -> undefined.
 
+is_request_id_required() ->
+    case os:getenv("HYDB_REQUIRE_REQUEST_ID") of
+        "true" -> true;
+        "false" -> false;
+        _ -> not is_test_profile()
+    end.
+
+get_max_idempotency_entries() ->
+    case os:getenv("HYDB_IDEMPOTENCY_MAX_ENTRIES") of
+        false -> 10000;
+        "" -> 10000;
+        Str -> max(1, to_integer(Str, 10000))
+    end.
+
+evict_oldest_idempotency_if_needed() ->
+    MaxEntries = get_max_idempotency_entries(),
+    case ets:info(?IDEMPOTENCY_TABLE, size) of
+        Sz when is_integer(Sz), Sz >= MaxEntries ->
+            All = ets:tab2list(?IDEMPOTENCY_TABLE),
+            case All of
+                [] -> ok;
+                _ ->
+                    {OldestKey, _} = lists:foldl(fun({K, V}, {MinK, MinSeq}) ->
+                        S = maps:get(<<"seq">>, V, 0),
+                        if S < MinSeq -> {K, S}; true -> {MinK, MinSeq} end
+                    end, hd([ {K0, maps:get(<<"seq">>, V0, 0)} || {K0, V0} <- [hd(All)] ]), tl(All)),
+                    ets:delete(?IDEMPOTENCY_TABLE, OldestKey),
+                    ok
+            end;
+        _ -> ok
+    end.
+
 check_idempotency(undefined, _Op, _Namespace, _RawKey, _RawVal, _QuorumMode, _RequireDurability) ->
-    not_cached;
-check_idempotency(<<>>, _Op, _Namespace, _RawKey, _RawVal, _QuorumMode, _RequireDurability) ->
-    not_cached;
+    case is_request_id_required() of
+        true ->
+            {conflict, #{
+                <<"ok">> => false,
+                <<"status">> => 400,
+                <<"error_code">> => <<"ERR_MISSING_REQUEST_ID">>,
+                <<"error">> => <<"request_id or idempotency_key is mandatory in production profile">>
+            }};
+        false ->
+            not_cached
+    end;
+check_idempotency(<<>>, Op, Namespace, RawKey, RawVal, QuorumMode, RequireDurability) ->
+    check_idempotency(undefined, Op, Namespace, RawKey, RawVal, QuorumMode, RequireDurability);
 check_idempotency(ReqId, Op, Namespace, RawKey, RawVal, QuorumMode, RequireDurability) when is_binary(ReqId) ->
     case ets:lookup(?IDEMPOTENCY_TABLE, ReqId) of
         [] ->
@@ -795,6 +879,7 @@ store_idempotency(undefined, _Op, _Namespace, _RawKey, _RawVal, _Seq, _Quorum, R
 store_idempotency(<<>>, _Op, _Namespace, _RawKey, _RawVal, _Seq, _Quorum, Result) ->
     Result;
 store_idempotency(ReqId, Op, Namespace, RawKey, RawVal, Seq, QuorumMode, Result) when is_binary(ReqId) ->
+    evict_oldest_idempotency_if_needed(),
     Replicated = maps:get(<<"replicated">>, Result, false),
     CommitStatus = maps:get(<<"commit_status">>, Result, <<"provisional">>),
     WriteStatus = case Replicated of true -> <<"durable">>; false -> <<"accepted">> end,
@@ -935,22 +1020,199 @@ parse_events_field(Req) when is_map(Req) ->
 parse_events_field(_) -> [].
 
 %% ============================================================================
-%% GenServer Lifecycle & ETS Setup
+%% GenServer Lifecycle, Startup Security, & Production WAL/Epoch Reconciliation
 %% ============================================================================
 
+hot_wal_path() ->
+    case os:getenv("HYDB_HOT_WAL_PATH") of
+        P1 when is_list(P1), length(P1) > 0 -> P1;
+        _ ->
+            case os:getenv("HYDB_RECONCILE_WAL_PATH") of
+                P2 when is_list(P2), length(P2) > 0 -> P2;
+                _ -> filename:join([get_db_dir(), "hymessage/hot_wal.log"])
+            end
+    end.
+
+hot_wal_enabled() ->
+    case os:getenv("HYDB_HOT_WAL_PATH") of
+        P1 when is_list(P1), length(P1) > 0 -> true;
+        _ ->
+            case os:getenv("HYDB_ENABLE_HOT_WAL") of
+                "true" -> true;
+                "false" -> false;
+                _ -> not is_test_profile()
+            end
+    end.
+
+append_hot_wal_event(Event) ->
+    case hot_wal_enabled() of
+        false -> ok;
+        true ->
+            Path = hot_wal_path(),
+            _ = filelib:ensure_dir(Path),
+            Line = iolist_to_binary([json:encode(Event), <<"\n">>]),
+            case file:open(Path, [append, raw, binary]) of
+                {ok, Fd} ->
+                    _ = file:write(Fd, Line),
+                    _ = file:datasync(Fd),
+                    _ = file:close(Fd),
+                    ok;
+                _ -> ok
+            end
+    end.
+
+hot_epoch_path() ->
+    case os:getenv("HYDB_HOT_EPOCH_PATH") of
+        P when is_list(P), length(P) > 0 -> P;
+        _ -> hot_wal_path() ++ ".epoch"
+    end.
+
+persist_hot_epoch(Epoch) when is_integer(Epoch) ->
+    Path = hot_epoch_path(),
+    Tmp = Path ++ ".tmp",
+    _ = filelib:ensure_dir(Path),
+    case file:open(Tmp, [write, raw, binary]) of
+        {ok, Fd} ->
+            _ = file:write(Fd, integer_to_binary(Epoch)),
+            _ = file:datasync(Fd),
+            _ = file:close(Fd),
+            _ = file:rename(Tmp, Path),
+            ok;
+        _ -> ok
+    end.
+
+read_persisted_hot_epoch() ->
+    EnvEpoch = case os:getenv("HYDB_RECONCILE_EPOCH") of
+        false -> 1;
+        "" -> 1;
+        EStr -> to_integer(EStr, 1)
+    end,
+    DiskEpoch = case file:read_file(hot_epoch_path()) of
+        {ok, Bin} -> to_integer(string:trim(Bin), 1);
+        _ -> 1
+    end,
+    max(1, max(EnvEpoch, DiskEpoch)).
+
+membership_meta_path() ->
+    case os:getenv("HYDB_MEMBERSHIP_PATH") of
+        P when is_list(P), length(P) > 0 -> P;
+        _ -> hot_wal_path() ++ ".membership.json"
+    end.
+
+persist_membership_to_disk(Members, Size) ->
+    Path = membership_meta_path(),
+    Tmp = Path ++ ".tmp",
+    _ = filelib:ensure_dir(Path),
+    Payload = iolist_to_binary(json:encode(#{
+        <<"cluster_members">> => Members,
+        <<"cluster_size">> => Size
+    })),
+    case file:open(Tmp, [write, raw, binary]) of
+        {ok, Fd} ->
+            _ = file:write(Fd, Payload),
+            _ = file:datasync(Fd),
+            _ = file:close(Fd),
+            _ = file:rename(Tmp, Path),
+            ok;
+        _ -> ok
+    end.
+
+read_persisted_membership() ->
+    case file:read_file(membership_meta_path()) of
+        {ok, Bin} when byte_size(Bin) > 0 ->
+            try json:decode(Bin) of
+                #{ <<"cluster_members">> := M0, <<"cluster_size">> := S0 } when is_list(M0), is_integer(S0), S0 > 0 ->
+                    {[to_bin_spec(M) || M <- M0], S0};
+                _ -> undefined
+            catch _:_ -> undefined
+            end;
+        _ -> undefined
+    end.
+
+validate_startup_security() ->
+    case ets:info(?TABLE) of
+        undefined -> ok;
+        _ ->
+            ets:delete(?TABLE, cached_auth_secret),
+            ets:delete(?TABLE, cached_admin_secret)
+    end,
+    _ = node_auth_secret(),
+    _ = admin_auth_secret(),
+    case is_test_profile() of
+        true -> ok;
+        false ->
+            case env_cluster_members() =/= [] orelse read_persisted_membership() =/= undefined of
+                true -> ok;
+                false -> throw({error, missing_cluster_membership_in_production})
+            end
+    end.
+
+startup_reconcile_from_disk(WasmBase, NodeMsg) ->
+    PersistedEpoch0 = read_persisted_hot_epoch(),
+    EnvEpoch = case os:getenv("HYDB_RECONCILE_EPOCH") of
+        false -> 1;
+        "" -> 1;
+        EpStr -> try list_to_integer(EpStr) catch _:_ -> 1 end
+    end,
+    PersistedEpoch = max(PersistedEpoch0, EnvEpoch),
+    CurrEp = case ets:lookup(?TABLE, epoch) of [{epoch, E}] -> E; _ -> 1 end,
+    ets:insert(?TABLE, {epoch, max(CurrEp, PersistedEpoch)}),
+    CandidatePaths = case {os:getenv("HYDB_RECONCILE_WAL_PATH"), os:getenv("HYDB_HOT_WAL_PATH")} of
+        {P1, _} when is_list(P1), length(P1) > 0 -> [P1];
+        {_, P2} when is_list(P2), length(P2) > 0 -> [P2];
+        _ ->
+            case hot_wal_enabled() of
+                true -> [hot_wal_path(), filename:join([get_db_dir(), "sd/wal.log"])];
+                false -> []
+            end
+    end,
+    Events = read_first_available_wal(CandidatePaths),
+    case Events of
+        [] -> ok;
+        _ ->
+            _ = replay_events_internal(Events, WasmBase, NodeMsg),
+            FinalEp = case ets:lookup(?TABLE, epoch) of [{epoch, FE}] -> FE; _ -> 1 end,
+            ets:insert(?TABLE, {epoch, max(FinalEp, PersistedEpoch)}),
+            ok
+    end.
+
+read_first_available_wal([]) -> [];
+read_first_available_wal([Path | Rest]) ->
+    case file:read_file(Path) of
+        {ok, Content} when byte_size(Content) > 0 ->
+            Lines = binary:split(Content, <<"\n">>, [global, trim_all]),
+            Decoded = lists:filtermap(fun(L) ->
+                try {true, json:decode(L)} catch _:_ -> false end
+            end, Lines),
+            case Decoded of
+                [] -> read_first_available_wal(Rest);
+                _ -> Decoded
+            end;
+        _ ->
+            read_first_available_wal(Rest)
+    end.
+
 init([]) ->
-    init_ets(),
-    hydb_contract:init_tables(),
-    start_stream_hub(),
-    NodeMsg = get_node_msg(),
-    WasmBase = init_wasm(NodeMsg),
-    {ok, #state{wasm_base = WasmBase, node_msg = NodeMsg}}.
+    case catch validate_startup_security() of
+        ok ->
+            init_ets(),
+            hydb_contract:init_tables(),
+            start_stream_hub(),
+            NodeMsg = get_node_msg(),
+            WasmBase = init_wasm(NodeMsg),
+            startup_reconcile_from_disk(WasmBase, NodeMsg),
+            {ok, #state{wasm_base = WasmBase, node_msg = NodeMsg}};
+        {error, Reason} ->
+            {stop, {security_configuration_error, Reason}};
+        OtherErr ->
+            {stop, {security_configuration_error, OtherErr}}
+    end.
 
 init_ets() ->
     case ets:info(?TABLE) of
         undefined ->
             ets:new(?TABLE, [public, named_table, set]),
-            ets:insert(?TABLE, {epoch, 1}),
+            ets:insert(?TABLE, {epoch, read_persisted_hot_epoch()}),
             ets:insert(?TABLE, {seq, 0}),
             ets:insert(?TABLE, {latest_hash, ?GENESIS_HASH}),
             ets:insert(?TABLE, {state_root, 0}),
@@ -980,10 +1242,16 @@ init_ets() ->
     end.
 
 init_cluster_membership_ets() ->
-    InitialMembers = env_cluster_members(),
-    InitialSize = env_cluster_size(InitialMembers),
-    ets:insert(?TABLE, {cluster_members, InitialMembers}),
-    ets:insert(?TABLE, {cluster_size, InitialSize}).
+    case read_persisted_membership() of
+        {PersistedMembers, PersistedSize} ->
+            ets:insert(?TABLE, {cluster_members, PersistedMembers}),
+            ets:insert(?TABLE, {cluster_size, PersistedSize});
+        undefined ->
+            InitialMembers = env_cluster_members(),
+            InitialSize = env_cluster_size(InitialMembers),
+            ets:insert(?TABLE, {cluster_members, InitialMembers}),
+            ets:insert(?TABLE, {cluster_size, InitialSize})
+    end.
 
 env_cluster_members() ->
     case os:getenv("HYDB_CLUSTER_MEMBERS") of
@@ -1092,21 +1360,26 @@ node_auth_secret() ->
         [{cached_auth_secret, Sec}] ->
             Sec;
         _ ->
-            WalletPath = case os:getenv("WALLET_PATH") of
-                false -> filename:join([get_db_dir(), "secrets/wallet.json"]);
-                "" -> filename:join([get_db_dir(), "secrets/wallet.json"]);
-                WP -> WP
-            end,
-            Sec = case file:read_file(WalletPath) of
-                {ok, Bin} when byte_size(Bin) > 0 ->
-                    crypto:hash(sha256, Bin);
+            Sec = case os:getenv("HYDB_CLUSTER_SECRET") of
+                EnvSec when is_list(EnvSec), length(EnvSec) >= 16 ->
+                    crypto:hash(sha256, list_to_binary(EnvSec));
+                EnvSec when is_list(EnvSec), length(EnvSec) > 0 ->
+                    throw({error, cluster_secret_too_short});
                 _ ->
-                    case os:getenv("HYDB_CLUSTER_SECRET") of
+                    case is_test_profile() of
+                        true ->
+                            WalletPath = case os:getenv("WALLET_PATH") of
+                                false -> filename:join([get_db_dir(), "secrets/wallet.json"]);
+                                "" -> filename:join([get_db_dir(), "secrets/wallet.json"]);
+                                WP -> WP
+                            end,
+                            case file:read_file(WalletPath) of
+                                {ok, Bin} when byte_size(Bin) >= 16 ->
+                                    crypto:hash(sha256, Bin);
+                                _ ->
+                                    throw({error, missing_cluster_auth_secret})
+                            end;
                         false ->
-                            throw({error, missing_cluster_auth_secret});
-                        EnvSec when is_list(EnvSec), length(EnvSec) > 0 ->
-                            crypto:hash(sha256, list_to_binary(EnvSec));
-                        _ ->
                             throw({error, missing_cluster_auth_secret})
                     end
             end,
@@ -1115,6 +1388,24 @@ node_auth_secret() ->
                 _ -> ets:insert(?TABLE, {cached_auth_secret, Sec})
             end,
             Sec
+    end.
+
+admin_auth_secret() ->
+    case os:getenv("HYDB_ADMIN_TOKEN") of
+        AdminEnv when is_list(AdminEnv), length(AdminEnv) >= 16 ->
+            case not is_test_profile() andalso os:getenv("HYDB_CLUSTER_SECRET") =:= AdminEnv of
+                true -> throw({error, admin_token_must_differ_from_cluster_secret});
+                false -> list_to_binary(AdminEnv)
+            end;
+        AdminEnv when is_list(AdminEnv), length(AdminEnv) > 0 ->
+            throw({error, admin_token_too_short});
+        _ ->
+            case is_test_profile() of
+                true ->
+                    string:uppercase(binary:encode_hex(node_auth_secret()));
+                false ->
+                    throw({error, missing_admin_auth_token})
+            end
     end.
 
 start_stream_hub() ->
@@ -1163,6 +1454,7 @@ stream_socket_authenticate(Socket, Nonce) ->
         {tcp, Socket, Bin} when is_binary(Bin) ->
             case verify_su_handshake(Bin, Nonce) of
                 {ok, NodeId, SubLastTick} ->
+                    evict_duplicate_node_sockets(NodeId, Socket),
                     ets:insert(hymessage_subscribers, {Socket, NodeId, os:system_time(millisecond), SubLastTick}),
                     AckPayload = iolist_to_binary(json:encode(#{
                         <<"type">> => <<"AUTH_OK">>,
@@ -1172,6 +1464,14 @@ stream_socket_authenticate(Socket, Nonce) ->
                     _ = gen_tcp:send(Socket, AckPayload),
                     catch_up_subscriber(Socket, SubLastTick),
                     stream_socket_worker(Socket);
+                {error, not_in_cluster_members} ->
+                    ets:update_counter(?TABLE, unauthorized_tcp_rejections, 1, {unauthorized_tcp_rejections, 0}),
+                    RejPayload = iolist_to_binary(json:encode(#{
+                        <<"type">> => <<"AUTH_REJECTED">>,
+                        <<"error_code">> => <<"ERR_NODE_NOT_IN_CLUSTER_MEMBERS">>
+                    })),
+                    _ = gen_tcp:send(Socket, RejPayload),
+                    gen_tcp:close(Socket);
                 error ->
                     ets:update_counter(?TABLE, unauthorized_tcp_rejections, 1, {unauthorized_tcp_rejections, 0}),
                     RejPayload = iolist_to_binary(json:encode(#{
@@ -1188,6 +1488,19 @@ stream_socket_authenticate(Socket, Nonce) ->
     after 3000 ->
         ets:update_counter(?TABLE, unauthorized_tcp_rejections, 1, {unauthorized_tcp_rejections, 0}),
         gen_tcp:close(Socket)
+    end.
+
+evict_duplicate_node_sockets(NodeId, NewSocket) ->
+    case ets:info(hymessage_subscribers) of
+        undefined -> ok;
+        _ ->
+            Subs = ets:tab2list(hymessage_subscribers),
+            lists:foreach(fun
+                ({OldSock, ExistingNodeId, _ConnAt, _AckSeq}) when ExistingNodeId =:= NodeId andalso OldSock =/= NewSocket ->
+                    ets:delete(hymessage_subscribers, OldSock),
+                    catch gen_tcp:close(OldSock);
+                (_) -> ok
+            end, Subs)
     end.
 
 catch_up_subscriber(Socket, SubLastTick) when is_integer(SubLastTick) ->
@@ -1213,13 +1526,19 @@ catch_up_subscriber(_Socket, _SubLastTick) ->
 verify_su_handshake(Bin, Nonce) ->
     try json:decode(Bin) of
         #{ <<"type">> := <<"AUTH_RESPONSE">>, <<"node_id">> := NodeId, <<"sig">> := GivenSig } = Decoded
-          when is_binary(NodeId), is_binary(GivenSig) ->
+          when is_binary(NodeId), byte_size(NodeId) > 0, is_binary(GivenSig) ->
             Msg = <<Nonce/binary, ":", NodeId/binary>>,
             ExpectedSig = binary:encode_hex(crypto:mac(hmac, sha256, node_auth_secret(), Msg)),
-            case string:uppercase(GivenSig) =:= string:uppercase(ExpectedSig) of
+            case constant_time_equals(string:uppercase(GivenSig), string:uppercase(ExpectedSig)) of
                 true ->
-                    SubLastTick = to_integer(maps:get(<<"last_tick">>, Decoded, 0), 0),
-                    {ok, NodeId, SubLastTick};
+                    Members = get_configured_cluster_members(),
+                    case lists:member(NodeId, Members) of
+                        true ->
+                            SubLastTick = to_integer(maps:get(<<"last_tick">>, Decoded, 0), 0),
+                            {ok, NodeId, SubLastTick};
+                        false ->
+                            {error, not_in_cluster_members}
+                    end;
                 false -> error
             end;
         _ ->
@@ -1262,10 +1581,8 @@ update_subscriber_ack(Socket, AckSeq) ->
     case ets:lookup(hymessage_subscribers, Socket) of
         [{Socket, NodeId, ConnAt, _OldAck}] ->
             ets:insert(hymessage_subscribers, {Socket, NodeId, ConnAt, AckSeq});
-        [{Socket, ConnAt, _OldAck}] ->
-            ets:insert(hymessage_subscribers, {Socket, <<"hb_su">>, ConnAt, AckSeq});
         _ ->
-            ets:insert(hymessage_subscribers, {Socket, <<"hb_su">>, os:system_time(millisecond), AckSeq})
+            ok
     end.
 
 broadcast_and_await_su(Event, Seq) ->
@@ -1301,18 +1618,32 @@ broadcast_and_await_su(Event, Seq, QuorumMode, TimeoutMs) ->
 
 count_acked_subscribers(Seq) ->
     Subs = ets:tab2list(hymessage_subscribers),
-    lists:foldl(fun
-        ({_Sock, _NodeId, _ConnAt, AckSeq}, Acc) when AckSeq >= Seq -> Acc + 1;
-        ({_Sock, _ConnAt, AckSeq}, Acc) when AckSeq >= Seq -> Acc + 1;
+    Members = get_configured_cluster_members(),
+    AckedNodeIds = lists:foldl(fun
+        ({_Sock, NodeId, _ConnAt, AckSeq}, Acc) when is_binary(NodeId), AckSeq >= Seq ->
+            case lists:member(NodeId, Members) of
+                true ->
+                    case lists:member(NodeId, Acc) of
+                        true -> Acc;
+                        false -> [NodeId | Acc]
+                    end;
+                false -> Acc
+            end;
         (_, Acc) -> Acc
-    end, 0, Subs).
+    end, [], Subs),
+    length(AckedNodeIds).
 
 check_targeted_su_acked(Seq, TargetNodeId) when is_binary(TargetNodeId) ->
-    Subs = ets:tab2list(hymessage_subscribers),
-    lists:any(fun
-        ({_Sock, NodeId, _ConnAt, AckSeq}) when NodeId =:= TargetNodeId andalso AckSeq >= Seq -> true;
-        (_) -> false
-    end, Subs).
+    Members = get_configured_cluster_members(),
+    case lists:member(TargetNodeId, Members) of
+        false -> false;
+        true ->
+            Subs = ets:tab2list(hymessage_subscribers),
+            lists:any(fun
+                ({_Sock, NodeId, _ConnAt, AckSeq}) when NodeId =:= TargetNodeId andalso AckSeq >= Seq -> true;
+                (_) -> false
+            end, Subs)
+    end.
 
 is_quorum_satisfied(Seq, QuorumMode) ->
     ClusterSize = get_configured_cluster_size(),
@@ -1899,8 +2230,10 @@ handle_call({contract_register_schema, Namespace, Cfg, ReqEpoch}, _From, State =
                                         <<"prev_hash">> => PrevHash,
                                         <<"hash">> => NewHash,
                                         <<"state_root">> => StateRoot,
-                                        <<"state_root_str">> => integer_to_binary(StateRoot)
+                                        <<"state_root_str">> => integer_to_binary(StateRoot),
+                                        <<"request_id">> => case ReqId of undefined -> <<"">>; _ -> ReqId end
                                     },
+                                    append_hot_wal_event(Event),
                                     NewHist = [Event | lists:sublist(Hist, 49)],
                                     ets:insert(?TABLE, {history, NewHist}),
                                     {Replicated, SuCount} = broadcast_and_await_su(Event, Seq),
@@ -1949,6 +2282,7 @@ handle_call({promote_epoch, NewEpoch}, _From, State) ->
         {reply, {error, invalid_epoch_transition}, State};
        true ->
         ets:insert(?TABLE, {epoch, NewEpoch}),
+        persist_hot_epoch(NewEpoch),
         [{seq, Seq}] = ets:lookup(?TABLE, seq),
         [{state_root, Root}] = ets:lookup(?TABLE, state_root),
         Result = #{
@@ -2085,8 +2419,10 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                                         <<"prev_hash">> => PrevHash,
                                         <<"hash">> => NewHash,
                                         <<"state_root">> => StateRoot,
-                                        <<"state_root_str">> => integer_to_binary(StateRoot)
+                                        <<"state_root_str">> => integer_to_binary(StateRoot),
+                                        <<"request_id">> => case ReqId of undefined -> <<"">>; _ -> ReqId end
                                     },
+                                    append_hot_wal_event(Event),
                                     NewHist = [Event | lists:sublist(Hist, 49)],
                                     ets:insert(?TABLE, {history, NewHist}),
                                     T_hash = os:perf_counter(microsecond),
@@ -2422,8 +2758,10 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                                         <<"prev_hash">> => PrevHash,
                                         <<"hash">> => NewHash,
                                         <<"state_root">> => StateRoot,
-                                        <<"state_root_str">> => integer_to_binary(StateRoot)
+                                        <<"state_root_str">> => integer_to_binary(StateRoot),
+                                        <<"request_id">> => case ReqId of undefined -> <<"">>; _ -> ReqId end
                                     },
+                                    append_hot_wal_event(Event),
                                     NewHist = [Event | lists:sublist(Hist, 49)],
                                     ets:insert(?TABLE, {history, NewHist}),
 
@@ -2615,6 +2953,99 @@ handle_call({sync_events, SinceSeq}, _From, State) ->
     {reply, {ok, Result}, State};
 
 handle_call({replay, Events}, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMsg}) ->
+    {ok, Result} = replay_events_internal(Events, WasmBase, NodeMsg),
+    {reply, {ok, Result}, State};
+
+handle_call(get_cluster_membership, _From, State) ->
+    Members = get_configured_cluster_members(),
+    Size = get_configured_cluster_size(),
+    ActiveSubscribers = case ets:info(hymessage_subscribers) of
+        undefined -> 0;
+        _ -> length(ets:tab2list(hymessage_subscribers))
+    end,
+    Result = #{
+        <<"ok">> => true,
+        <<"cluster_size">> => Size,
+        <<"cluster_members">> => Members,
+        <<"active_subscribers">> => ActiveSubscribers,
+        <<"majority_threshold">> => (Size div 2) + 1
+    },
+    {reply, {ok, Result}, State};
+
+handle_call({set_cluster_membership, Members, Size}, _From, State) ->
+    ets:insert(?TABLE, {cluster_members, Members}),
+    ets:insert(?TABLE, {cluster_size, Size}),
+    persist_membership_to_disk(Members, Size),
+    ActiveSubscribers = case ets:info(hymessage_subscribers) of
+        undefined -> 0;
+        _ -> length(ets:tab2list(hymessage_subscribers))
+    end,
+    Result = #{
+        <<"ok">> => true,
+        <<"cluster_size">> => Size,
+        <<"cluster_members">> => Members,
+        <<"active_subscribers">> => ActiveSubscribers,
+        <<"majority_threshold">> => (Size div 2) + 1
+    },
+    {reply, {ok, Result}, State};
+
+handle_call(reset, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMsg}) ->
+    _ = file:delete(hot_wal_path()),
+    _ = file:delete(hot_epoch_path()),
+    _ = file:delete(membership_meta_path()),
+    ets:insert(?TABLE, {epoch, 1}),
+    ets:insert(?TABLE, {seq, 0}),
+    ets:insert(?TABLE, {latest_hash, ?GENESIS_HASH}),
+    ets:insert(?TABLE, {state_root, 0}),
+    ets:insert(?TABLE, {wasm_root, 0}),
+    ets:insert(?TABLE, {default_wasm_root, 0}),
+    ets:insert(?TABLE, {admin_locked, false}),
+    init_cluster_membership_ets(),
+    ets:match_delete(?TABLE, {{ns_wasm_base, '_'}, '_'}),
+    ets:match_delete(?TABLE, {{ns_wasm_root, '_'}, '_'}),
+    ets:match_delete(?TABLE, {{ver, '_', '_'}, '_'}),
+    ets:insert(?TABLE, {doc_root, 0}),
+    ets:insert(?TABLE, {history, []}),
+    ets:insert(?TABLE, {last_su_ack, 0}),
+    ets:delete_all_objects(?SESSIONS_TABLE),
+    case ets:info(?IDEMPOTENCY_TABLE) of
+        undefined -> ok;
+        _ -> ets:delete_all_objects(?IDEMPOTENCY_TABLE)
+    end,
+    hydb_contract:reset_tables(),
+    ActiveBase = case WasmBase of
+        undefined -> init_wasm(NodeMsg);
+        _ ->
+            case wasm_call(WasmBase, <<"db_contract_violations_ns">>, [0], NodeMsg, -999) of
+                -999 -> init_wasm(NodeMsg);
+                _ -> wrap_fast_wasm(WasmBase, NodeMsg)
+            end
+    end,
+    wasm_call(ActiveBase, <<"db_reset">>, [], NodeMsg, 0),
+    {ok, FinCfg} = hydb_contract:get_namespace_config(<<"finance.balances">>),
+    _ = hydb_contract:configure_wasm_contract(<<"finance.balances">>, FinCfg, {fun wasm_call/5, ActiveBase, NodeMsg}),
+    hydb_contract:update_namespace_status(<<"finance.balances">>, <<"replicated">>),
+    {reply, ok, State#state{wasm_base = ActiveBase}};
+
+handle_call(_Request, _From, State) ->
+    {reply, {error, unknown_call}, State}.
+
+handle_cast(_Msg, State) ->
+    {noreply, State}.
+
+handle_info({su_ack, AckSeq}, State) ->
+    ets:insert(?TABLE, {last_su_ack, AckSeq}),
+    {noreply, State};
+handle_info(_Info, State) ->
+    {noreply, State}.
+
+terminate(_Reason, _State) ->
+    ok.
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+replay_events_internal(Events, WasmBase, NodeMsg) ->
     T0 = os:perf_counter(nanosecond),
     SortedEvents = lists:sort(fun(A, B) ->
         to_integer(maps:get(<<"seq">>, A, 0), 0) =< to_integer(maps:get(<<"seq">>, B, 0), 0)
@@ -2628,6 +3059,7 @@ handle_call({replay, Events}, _From, State = #state{wasm_base = WasmBase, node_m
         Op = maps:get(<<"action">>, Ev, maps:get(<<"op">>, Ev, <<"put">>)),
         RawKey = maps:get(<<"key">>, Ev, 1),
         RawVal = maps:get(<<"val">>, Ev, 0),
+        ReqId = maps:get(<<"request_id">>, Ev, undefined),
         Key = case {Op, Backend} of
             {<<"register_schema">>, _} -> <<"__schema__">>;
             {_, <<"wasm_slot">>} -> to_integer(RawKey, 1);
@@ -2702,6 +3134,7 @@ handle_call({replay, Events}, _From, State = #state{wasm_base = WasmBase, node_m
         end,
         StateRoot = combine_roots(WasmRoot1, DocRoot1),
         CurrEpoch = case ets:lookup(?TABLE, epoch) of [{epoch, CE}] -> CE; _ -> 1 end,
+        MaxEpoch = max(CurrEpoch, EvEpoch),
         if EvEpoch > CurrEpoch -> ets:insert(?TABLE, {epoch, EvEpoch}); true -> ok end,
         ets:insert(?TABLE, {seq, Seq}),
         ets:insert(?TABLE, {latest_hash, NewHash}),
@@ -2710,7 +3143,7 @@ handle_call({replay, Events}, _From, State = #state{wasm_base = WasmBase, node_m
             <<"contract_version">> => hydb_contract:contract_version(),
             <<"namespace">> => Namespace,
             <<"backend">> => Backend,
-            <<"epoch">> => max(CurrEpoch, EvEpoch),
+            <<"epoch">> => MaxEpoch,
             <<"seq">> => Seq,
             <<"action">> => Op,
             <<"key">> => Key,
@@ -2720,8 +3153,35 @@ handle_call({replay, Events}, _From, State = #state{wasm_base = WasmBase, node_m
             <<"ver">> => Ver,
             <<"prev_hash">> => PrevHash,
             <<"hash">> => NewHash,
-            <<"state_root">> => StateRoot
+            <<"state_root">> => StateRoot,
+            <<"request_id">> => case ReqId of undefined -> <<"">>; _ -> ReqId end
         },
+        case is_binary(ReqId) andalso byte_size(ReqId) > 0 of
+            true ->
+                ReplayedRes = #{
+                    <<"ok">> => true,
+                    <<"error_code">> => <<"OK">>,
+                    <<"device">> => <<"hymessage@1.0">>,
+                    <<"contract_version">> => hydb_contract:contract_version(),
+                    <<"namespace">> => Namespace,
+                    <<"backend">> => Backend,
+                    <<"epoch">> => MaxEpoch,
+                    <<"seq">> => Seq,
+                    <<"op">> => Op,
+                    <<"key">> => Key,
+                    <<"val">> => Val,
+                    <<"val_type">> => ValType,
+                    <<"ver">> => Ver,
+                    <<"state_root">> => StateRoot,
+                    <<"hash">> => NewHash,
+                    <<"commit_status">> => <<"durable">>,
+                    <<"write_status">> => <<"durable">>,
+                    <<"replicated">> => true
+                },
+                _ = store_idempotency(ReqId, Op, Namespace, Key, Val, Seq, <<"single">>, ReplayedRes);
+            false ->
+                ok
+        end,
         [NewEv | Acc]
     end,
     AppliedReversed = lists:foldl(ApplyFun, [], SortedEvents),
@@ -2745,89 +3205,4 @@ handle_call({replay, Events}, _From, State = #state{wasm_base = WasmBase, node_m
         <<"latest_hash">> => FinalHash,
         <<"duration_ms">> => DurationMs
     },
-    {reply, {ok, Result}, State};
-
-handle_call(get_cluster_membership, _From, State) ->
-    Members = get_configured_cluster_members(),
-    Size = get_configured_cluster_size(),
-    ActiveSubscribers = case ets:info(hymessage_subscribers) of
-        undefined -> 0;
-        _ -> length(ets:tab2list(hymessage_subscribers))
-    end,
-    Result = #{
-        <<"ok">> => true,
-        <<"cluster_size">> => Size,
-        <<"cluster_members">> => Members,
-        <<"active_subscribers">> => ActiveSubscribers,
-        <<"majority_threshold">> => (Size div 2) + 1
-    },
-    {reply, {ok, Result}, State};
-
-handle_call({set_cluster_membership, Members, Size}, _From, State) ->
-    ets:insert(?TABLE, {cluster_members, Members}),
-    ets:insert(?TABLE, {cluster_size, Size}),
-    ActiveSubscribers = case ets:info(hymessage_subscribers) of
-        undefined -> 0;
-        _ -> length(ets:tab2list(hymessage_subscribers))
-    end,
-    Result = #{
-        <<"ok">> => true,
-        <<"cluster_size">> => Size,
-        <<"cluster_members">> => Members,
-        <<"active_subscribers">> => ActiveSubscribers,
-        <<"majority_threshold">> => (Size div 2) + 1
-    },
-    {reply, {ok, Result}, State};
-
-handle_call(reset, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMsg}) ->
-    ets:insert(?TABLE, {epoch, 1}),
-    ets:insert(?TABLE, {seq, 0}),
-    ets:insert(?TABLE, {latest_hash, ?GENESIS_HASH}),
-    ets:insert(?TABLE, {state_root, 0}),
-    ets:insert(?TABLE, {wasm_root, 0}),
-    ets:insert(?TABLE, {default_wasm_root, 0}),
-    ets:insert(?TABLE, {admin_locked, false}),
-    init_cluster_membership_ets(),
-    ets:match_delete(?TABLE, {{ns_wasm_base, '_'}, '_'}),
-    ets:match_delete(?TABLE, {{ns_wasm_root, '_'}, '_'}),
-    ets:match_delete(?TABLE, {{ver, '_', '_'}, '_'}),
-    ets:insert(?TABLE, {doc_root, 0}),
-    ets:insert(?TABLE, {history, []}),
-    ets:insert(?TABLE, {last_su_ack, 0}),
-    ets:delete_all_objects(?SESSIONS_TABLE),
-    case ets:info(?IDEMPOTENCY_TABLE) of
-        undefined -> ok;
-        _ -> ets:delete_all_objects(?IDEMPOTENCY_TABLE)
-    end,
-    hydb_contract:reset_tables(),
-    ActiveBase = case WasmBase of
-        undefined -> init_wasm(NodeMsg);
-        _ ->
-            case wasm_call(WasmBase, <<"db_contract_violations_ns">>, [0], NodeMsg, -999) of
-                -999 -> init_wasm(NodeMsg);
-                _ -> wrap_fast_wasm(WasmBase, NodeMsg)
-            end
-    end,
-    wasm_call(ActiveBase, <<"db_reset">>, [], NodeMsg, 0),
-    {ok, FinCfg} = hydb_contract:get_namespace_config(<<"finance.balances">>),
-    _ = hydb_contract:configure_wasm_contract(<<"finance.balances">>, FinCfg, {fun wasm_call/5, ActiveBase, NodeMsg}),
-    hydb_contract:update_namespace_status(<<"finance.balances">>, <<"replicated">>),
-    {reply, ok, State#state{wasm_base = ActiveBase}};
-
-handle_call(_Request, _From, State) ->
-    {reply, {error, unknown_call}, State}.
-
-handle_cast(_Msg, State) ->
-    {noreply, State}.
-
-handle_info({su_ack, AckSeq}, State) ->
-    ets:insert(?TABLE, {last_su_ack, AckSeq}),
-    {noreply, State};
-handle_info(_Info, State) ->
-    {noreply, State}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+    {ok, Result}.

@@ -75,6 +75,17 @@ assert(
   'Retrying schema registration with identical request_id is strictly idempotent'
 );
 assert(
+  erlOut.includes('PASS: Hot Node init([]) restores promoted epoch 3 from disk') &&
+  erlOut.includes('PASS: Hot Node init([]) restores seq 4 from hot_wal.log') &&
+  erlOut.includes('PASS: Retried PUT after Hot Node restart returns original seq 4 without re-sequencing'),
+  'Hot Node production init([]) restores epoch, state, and request_id idempotency across process restarts'
+);
+assert(
+  erlOut.includes('PASS: Missing request_id rejected with ERR_MISSING_REQUEST_ID in production profile') &&
+  erlOut.includes('PASS: Idempotency cache size is bounded by HYDB_IDEMPOTENCY_MAX_ENTRIES'),
+  'Production profile enforces mandatory request_id and bounds idempotency table memory growth'
+);
+assert(
   erlOut.includes('ALL_PHASE_04_ERL_TESTS_PASSED'),
   'All Erlang Phase 04 idempotency and write status assertions passed'
 );

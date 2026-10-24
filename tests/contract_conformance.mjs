@@ -339,6 +339,7 @@ spec.applyEvent(st, ev6);
 const jsCommitment = spec.stateCommitment(st);
 assertEq(erl.state_commitment, jsCommitment, '256-bit State Commitment JS == Erlang');
 assertEq(lua.state_commitment, jsCommitment, '256-bit State Commitment JS == Lua');
+assertEq(jsCommitment, golden.state_commitment_256, 'Golden Vector: 256-bit State Commitment');
 
 // ============================================================================
 // Suite 4: Rust WASM (wasm_slot) Execution & Semantics

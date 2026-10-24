@@ -115,13 +115,17 @@ const erlOut = execFileSync('escript', [escriptPath], {
   encoding: 'utf8'
 });
 
+assert(erlOut.includes('PASS: default profile is fail-closed (production) when profile env vars are unset'), 'Default profile is fail-closed (production) when profile env vars are unset');
+assert(erlOut.includes('PASS: production startup rejects missing HYDB_CLUSTER_SECRET without falling back to wallet'), 'Production startup rejects missing HYDB_CLUSTER_SECRET without wallet fallback');
+assert(erlOut.includes('PASS: startup rejects HYDB_CLUSTER_SECRET shorter than 16 bytes'), 'Startup rejects HYDB_CLUSTER_SECRET shorter than 16 bytes');
+assert(erlOut.includes('PASS: production startup rejects HYDB_ADMIN_TOKEN identical to HYDB_CLUSTER_SECRET'), 'Production startup enforces distinct HYDB_ADMIN_TOKEN and HYDB_CLUSTER_SECRET');
 assert(erlOut.includes('PASS: unauthenticated verify_admin_req returns 401'), 'Erlang rejects unauthenticated requests with 401');
-assert(erlOut.includes('PASS: forged admin_token returns 403'), 'Erlang rejects forged tokens with 403');
-assert(erlOut.includes('PASS: valid admin_token returns ok'), 'Erlang accepts valid admin token');
+assert(erlOut.includes('PASS: forged admin_token and cluster secret rejected with 403'), 'Erlang rejects forged tokens and cluster secrets with 403');
+assert(erlOut.includes('PASS: valid admin_token and x-admin-token headers return ok'), 'Erlang accepts valid admin token and x-admin-token header');
 assert(erlOut.includes('PASS: valid Authorization: Bearer token returns ok'), 'Erlang accepts Authorization: Bearer header');
 assert(erlOut.includes('PASS: unauthenticated fence_epoch rejected and epoch unchanged'), 'Unauthenticated fence_epoch rejected and preserves epoch');
 assert(erlOut.includes('PASS: authenticated fence_epoch updated epoch'), 'Authenticated fence_epoch succeeds');
-assert(erlOut.includes('PASS: reset rejected in production profile with ERR_RESET_DISABLED'), 'Reset rejected in production profile with ERR_RESET_DISABLED');
+assert(erlOut.includes('PASS: reset and simulate_restart rejected in production profile'), 'Reset and simulate_restart rejected in production profile');
 assert(erlOut.includes('PASS: reset succeeds in test profile with valid admin token'), 'Reset succeeds in test profile with valid admin token');
 
 // ============================================================================

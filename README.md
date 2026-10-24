@@ -107,14 +107,14 @@ flowchart LR
 
 ## 4. Matriks Jaminan & Rangkaian Pengujian Otomatis (CI Release Gate)
 
-Setiap jaminan dalam stack ini diklasifikasikan sebagai **`Implemented`**, **`Tested`**, atau **`Proven under model`** (lihat rincian lengkap di [`docs/PROTOCOL_AND_FAILURE_MODEL.md`](docs/PROTOCOL_AND_FAILURE_MODEL.md)) dan dieksekusi secara reproducible di GitHub Actions (`.github/workflows/ci.yml`):
+Setiap jaminan dalam stack ini diklasifikasikan sebagai **`Implemented`**, **`Tested`**, atau **`Cross-Language Golden-Vector Tested`** (lihat rincian lengkap di [`docs/PROTOCOL_AND_FAILURE_MODEL.md`](docs/PROTOCOL_AND_FAILURE_MODEL.md)) dan dieksekusi secara reproducible di GitHub Actions (`.github/workflows/ci.yml`):
 
 | Fase Roadmap | Rangkaian Uji | Script NPM / Berkas Pengujian | Klasifikasi Jaminan |
 | :---: | :--- | :--- | :---: |
-| **00** | **Cross-Language Golden Conformance** | `npm run test:conformance` ([`tests/contract_conformance.mjs`](tests/contract_conformance.mjs)) | `Proven under model` & `Tested` |
+| **00** | **Cross-Language Golden Conformance** | `npm run test:conformance` ([`tests/contract_conformance.mjs`](tests/contract_conformance.mjs)) | `Cross-Language Golden-Vector Tested` & `Tested` |
 | **01** | **Control Endpoint & Secret Security** | `npm run test:security` ([`tests/test_tahap01_security.mjs`](tests/test_tahap01_security.mjs)) | `Implemented` & `Tested` |
 | **02** | **Fail-Closed WAL Recovery & Integrity** | `npm run test:recovery` ([`tests/test_tahap02_wal_recovery.mjs`](tests/test_tahap02_wal_recovery.mjs)) | `Implemented` & `Tested` |
-| **03** | **Canonical Hash & Non-Shrinking Quorum** | `npm run test:quorum` ([`tests/test_tahap03_quorum_hash.mjs`](tests/test_tahap03_quorum_hash.mjs)) | `Proven under model` & `Tested` |
+| **03** | **Canonical Hash & Non-Shrinking Quorum** | `npm run test:quorum` ([`tests/test_tahap03_quorum_hash.mjs`](tests/test_tahap03_quorum_hash.mjs)) | `Cross-Language Golden-Vector Tested` & `Tested` |
 | **04** | **Write Idempotency & Provisional Status** | `npm run test:idempotency` ([`tests/test_tahap04_idempotency.mjs`](tests/test_tahap04_idempotency.mjs)) | `Implemented` & `Tested` |
 | **05** | **Real Multi-Process Chaos & Fault Injection** | `npm run test:chaos` ([`tests/fault_injection_chaos.mjs`](tests/fault_injection_chaos.mjs)) | `Implemented` & `Tested` |
 | **06** | **Evidence-Based AO Committer & Cursor** | `npm run test:committer` ([`tests/test_tahap06_ao_committer.mjs`](tests/test_tahap06_ao_committer.mjs)) | `Implemented` & `Tested` |

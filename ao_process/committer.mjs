@@ -155,22 +155,43 @@ export function verifyArbitratorEvaluation(evalPayload, batchData, options = {})
     };
   }
 
-  const officialSeq = Number(officialSeqRaw ?? -1);
+  const hasSeqField =
+    officialSeqRaw !== undefined && officialSeqRaw !== null && String(officialSeqRaw).trim() !== '';
+  const hasHashField =
+    officialHashRaw !== undefined && officialHashRaw !== null && String(officialHashRaw).trim() !== '';
+  const hasRootField =
+    officialRootRaw !== undefined && officialRootRaw !== null && String(officialRootRaw).trim() !== '';
+
+  if (!hasSeqField || !hasHashField || !hasRootField) {
+    return {
+      evaluation_status: 'evaluated',
+      settlement_status: 'rejected',
+      verdict: 'MISSING_ARBITRATOR_PROOF_FIELDS',
+      verified: false,
+      finalized: false,
+      confirmed: false,
+      idempotent_replay: false,
+      official_seq: hasSeqField ? Number(officialSeqRaw) : undefined,
+      reason: `Arbitrator response is missing mandatory proof fields (hasSeq=${hasSeqField}, hasHash=${hasHashField}, hasRoot=${hasRootField})`
+    };
+  }
+
+  const officialSeq = Number(officialSeqRaw);
   const expectedToSeq = Number(batchData.to_seq);
-  const seqVerified = officialSeq >= expectedToSeq;
+  const seqVerified = Number.isInteger(officialSeq) && officialSeq >= expectedToSeq;
 
   const expectedHash = String(batchData.proposed_hash || '').toUpperCase();
-  const actualHash = officialHashRaw !== undefined ? String(officialHashRaw).toUpperCase() : expectedHash;
+  const actualHash = String(officialHashRaw).toUpperCase();
   const hashVerified =
     status === 'DUPLICATE_BATCH_IDEMPOTENT' && officialSeq > expectedToSeq
-      ? true
-      : actualHash === expectedHash;
+      ? actualHash.length === 64
+      : expectedHash.length > 0 && actualHash === expectedHash;
 
   const expectedRoot = String(batchData.proposed_state_root ?? '0');
-  const actualRoot = officialRootRaw !== undefined ? String(officialRootRaw) : expectedRoot;
+  const actualRoot = String(officialRootRaw);
   const rootVerified =
     status === 'DUPLICATE_BATCH_IDEMPOTENT' && officialSeq > expectedToSeq
-      ? true
+      ? actualRoot.length > 0
       : actualRoot === expectedRoot;
 
   const verified = seqVerified && hashVerified && rootVerified;
@@ -188,13 +209,19 @@ export function verifyArbitratorEvaluation(evalPayload, batchData, options = {})
     };
   }
 
-  // Finality check: only `ao_network` with verified L1 block height & confirmations is `finalized`.
-  // Local `arlocal_local` simulated blocks are `verified`, never misrepresented as L1 `finalized`.
+  // Finality check: only `ao_network` with gateway-verified L1 block_indep_hash, block_height,
+  // confirmations, and matching Batch-Id tag is `finalized`.
+  // Local `arlocal_local` simulated blocks or unverified caller-injected finalityProof objects
+  // are never accepted as L1 `finalized`.
+  const l1Proof = options.verifiedL1Finality;
   const hasL1FinalityProof =
     env === 'ao_network' &&
-    options.finalityProof &&
-    Number(options.finalityProof.block_height) > 0 &&
-    Number(options.finalityProof.confirmations ?? 0) >= Number(options.minConfirmations ?? 1);
+    l1Proof &&
+    l1Proof.verified === true &&
+    typeof l1Proof.block_indep_hash === 'string' &&
+    l1Proof.block_indep_hash.length >= 32 &&
+    Number(l1Proof.block_height) > 0 &&
+    Number(l1Proof.number_of_confirmations ?? 0) >= Number(options.minConfirmations ?? 1);
 
   return {
     evaluation_status: 'evaluated',
@@ -207,8 +234,80 @@ export function verifyArbitratorEvaluation(evalPayload, batchData, options = {})
     official_seq: officialSeq,
     official_state_root: actualRoot,
     official_hash: actualHash,
-    official_commitment_256: officialCommitment256 || null
+    official_commitment_256: officialCommitment256 || null,
+    l1_finality: hasL1FinalityProof ? l1Proof : null
   };
+}
+
+/**
+ * Verify authoritative Arweave L1 transaction finality and tag binding via an L1 gateway.
+ */
+export async function verifyArweaveL1Finality(l1TxId, batchData, options = {}) {
+  const env = detectAoEnvironment(options.gatewayUrl || gatewayUrl, options);
+  if (env !== 'ao_network' || !l1TxId) {
+    return { verified: false, reason: 'Not ao_network or missing l1TxId' };
+  }
+  const gw = (options.gatewayUrl || gatewayUrl).replace(/\/$/, '');
+  const fetchImpl = options.l1GatewayFetchFn || (typeof options.verifyL1Gateway === 'boolean' && !options.verifyL1Gateway ? null : fetch);
+  if (!fetchImpl) {
+    return { verified: false, reason: 'No L1 gateway verifier configured' };
+  }
+  try {
+    const statusRes = await fetchImpl(`${gw}/tx/${l1TxId}/status`);
+    if (!statusRes || statusRes.status !== 200) {
+      return { verified: false, reason: `L1 tx status returned HTTP ${statusRes?.status ?? 0}` };
+    }
+    const statusBody = await statusRes.json();
+    const blockHeight = Number(statusBody?.block_height ?? 0);
+    const confirmations = Number(statusBody?.number_of_confirmations ?? 0);
+    const blockIndepHash = String(statusBody?.block_indep_hash ?? '');
+    const minConf = Number(options.minConfirmations ?? 1);
+
+    if (blockHeight <= 0 || confirmations < minConf || blockIndepHash.length < 32) {
+      return {
+        verified: false,
+        reason: `Insufficient L1 finality proof (height=${blockHeight}, confirmations=${confirmations}, min=${minConf})`
+      };
+    }
+
+    const txRes = await fetchImpl(`${gw}/tx/${l1TxId}`);
+    if (!txRes || txRes.status !== 200) {
+      return { verified: false, reason: `L1 tx metadata lookup failed with HTTP ${txRes?.status ?? 0}` };
+    }
+    const txBody = await txRes.json();
+    const expectedBatchId = options.batchId || computeBatchId(batchData);
+    const rawTags = Array.isArray(txBody?.tags) ? txBody.tags : [];
+    const decodeTag = (str) => {
+      try {
+        return Buffer.from(str, 'base64url').toString('utf-8');
+      } catch {
+        return String(str || '');
+      }
+    };
+    const hasMatchingBatchTag = rawTags.some((t) => {
+      const name = t.name_decoded || decodeTag(t.name) || t.name;
+      const value = t.value_decoded || decodeTag(t.value) || t.value;
+      return name === 'Batch-Id' && value === expectedBatchId;
+    });
+
+    if (!hasMatchingBatchTag) {
+      return {
+        verified: false,
+        reason: `L1 transaction ${l1TxId} does not carry matching Batch-Id tag (${expectedBatchId})`
+      };
+    }
+
+    return {
+      verified: true,
+      tx_id: l1TxId,
+      block_height: blockHeight,
+      number_of_confirmations: confirmations,
+      block_indep_hash: blockIndepHash,
+      batch_id: expectedBatchId
+    };
+  } catch (err) {
+    return { verified: false, reason: `L1 gateway verification error: ${err.message}` };
+  }
 }
 
 async function getWallet(walletPath = WALLET_PATH) {
@@ -361,9 +460,19 @@ export async function commitCheckpointBatch(batchData, options = {}) {
       }
     }
 
+    let verifiedL1Finality = null;
+    if (env === 'ao_network' && (options.l1TxId || msgId) && (options.l1GatewayFetchFn || options.verifyL1Gateway)) {
+      verifiedL1Finality = await verifyArweaveL1Finality(options.l1TxId || msgId, batchData, {
+        ...options,
+        batchId,
+        processId
+      });
+    }
+
     const verification = verifyArbitratorEvaluation(evalPayload, batchData, {
       ...options,
-      environment: env
+      environment: env,
+      verifiedL1Finality
     });
 
     return {
@@ -444,9 +553,19 @@ export async function commitCheckpointBatch(batchData, options = {}) {
     }
   }
 
+  let verifiedL1Finality = null;
+  if (env === 'ao_network' && (options.l1TxId || txId) && (options.l1GatewayFetchFn || options.verifyL1Gateway)) {
+    verifiedL1Finality = await verifyArweaveL1Finality(options.l1TxId || txId, batchData, {
+      ...options,
+      batchId,
+      processId
+    });
+  }
+
   const verification = verifyArbitratorEvaluation(evalPayload, batchData, {
     ...options,
-    environment: env
+    environment: env,
+    verifiedL1Finality
   });
 
   return {

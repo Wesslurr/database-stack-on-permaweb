@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # 1. Hot Node: Ultra-fast in-memory execution (sub-15ms)
+  # 1. Hot Node: Ultra-fast in-memory execution & canonical sequencer (~hymessage@1.0)
   hot-node:
     image: erlang:27-slim
     container_name: hydb-hot-node
@@ -15,46 +15,117 @@ services:
       - "${HOT_TCP_PORT:-8736}:8736"
     environment:
       - DB_DIR=/app
+      - HYDB_PROFILE=${HYDB_PROFILE:-production}
+      - HYDB_CLUSTER_SECRET=${HYDB_CLUSTER_SECRET:?HYDB_CLUSTER_SECRET_must_be_set_min_16_chars}
+      - HYDB_ADMIN_TOKEN=${HYDB_ADMIN_TOKEN:?HYDB_ADMIN_TOKEN_must_be_set_min_16_chars}
+      - HYDB_CLUSTER_MEMBERS=${HYDB_CLUSTER_MEMBERS:-sd-node-1,sd-node-2,sd-node-3}
+      - HYDB_CLUSTER_SIZE=${HYDB_CLUSTER_SIZE:-3}
+      - HYDB_HOT_WAL_PATH=/app/data/node/hot_wal.log
+      - HYDB_HOT_EPOCH_PATH=/app/data/node/hot_epoch.meta
+      - HYDB_MEMBERSHIP_PATH=/app/data/node/cluster_membership.meta
       - HOT_PORT=8734
       - HOT_TCP_PORT=8736
       - ARWEAVE_GATEWAY=${ARWEAVE_GATEWAY:-http://arlocal:1984}
       - TRUSTED_ARWEAVE_GATEWAYS=http://127.0.0.1:1984,http://arlocal:1984,https://arweave.net,https://ar-io.dev
     command: bash -c "./scripts/start-node.sh && tail -f /dev/null"
 
-  # 2. Storage Unit (SU): Durability worker & append-only disk WAL
-  storage-unit:
+  # 2A. State Durability Worker Replica 1 (~sd@1.0)
+  sd-node-1:
     image: erlang:27-slim
-    container_name: hydb-storage-unit
+    container_name: hydb-sd-node-1
     restart: unless-stopped
     working_dir: /app
     depends_on:
       - hot-node
     volumes:
       - .:/app
-      - su_wal_data:/app/data/node_sd
+      - sd_node_1_data:/app/data/node_sd_1
     ports:
-      - "${SU_PORT:-8735}:8735"
+      - "${SU_PORT_1:-8735}:8735"
     environment:
       - DB_DIR=/app
+      - HYDB_PROFILE=${HYDB_PROFILE:-production}
+      - HYDB_NODE_ID=sd-node-1
+      - HYDB_CLUSTER_SECRET=${HYDB_CLUSTER_SECRET:?HYDB_CLUSTER_SECRET_must_be_set_min_16_chars}
+      - HYDB_ADMIN_TOKEN=${HYDB_ADMIN_TOKEN:?HYDB_ADMIN_TOKEN_must_be_set_min_16_chars}
       - SU_PORT=8735
       - HOT_NODE_HOST=hot-node
       - HOT_NODE_PORT=8736
-      - HYDB_WAL_PATH=/app/data/node_sd/wal.log
+      - HYDB_WAL_PATH=/app/data/node_sd_1/wal.log
+      - HYDB_EPOCH_PATH=/app/data/node_sd_1/epoch.meta
     command: bash -c "./scripts/start-sd-node.sh && tail -f /dev/null"
 
-  # 3. Autonomous Committer Daemon: Storage Unit -> AO Process Bridge
+  # 2B. State Durability Worker Replica 2 (~sd@1.0)
+  sd-node-2:
+    image: erlang:27-slim
+    container_name: hydb-sd-node-2
+    restart: unless-stopped
+    working_dir: /app
+    depends_on:
+      - hot-node
+    volumes:
+      - .:/app
+      - sd_node_2_data:/app/data/node_sd_2
+    ports:
+      - "${SU_PORT_2:-8745}:8735"
+    environment:
+      - DB_DIR=/app
+      - HYDB_PROFILE=${HYDB_PROFILE:-production}
+      - HYDB_NODE_ID=sd-node-2
+      - HYDB_CLUSTER_SECRET=${HYDB_CLUSTER_SECRET:?HYDB_CLUSTER_SECRET_must_be_set_min_16_chars}
+      - HYDB_ADMIN_TOKEN=${HYDB_ADMIN_TOKEN:?HYDB_ADMIN_TOKEN_must_be_set_min_16_chars}
+      - SU_PORT=8735
+      - HOT_NODE_HOST=hot-node
+      - HOT_NODE_PORT=8736
+      - HYDB_WAL_PATH=/app/data/node_sd_2/wal.log
+      - HYDB_EPOCH_PATH=/app/data/node_sd_2/epoch.meta
+    command: bash -c "./scripts/start-sd-node.sh && tail -f /dev/null"
+
+  # 2C. State Durability Worker Replica 3 (~sd@1.0)
+  sd-node-3:
+    image: erlang:27-slim
+    container_name: hydb-sd-node-3
+    restart: unless-stopped
+    working_dir: /app
+    depends_on:
+      - hot-node
+    volumes:
+      - .:/app
+      - sd_node_3_data:/app/data/node_sd_3
+    ports:
+      - "${SU_PORT_3:-8755}:8735"
+    environment:
+      - DB_DIR=/app
+      - HYDB_PROFILE=${HYDB_PROFILE:-production}
+      - HYDB_NODE_ID=sd-node-3
+      - HYDB_CLUSTER_SECRET=${HYDB_CLUSTER_SECRET:?HYDB_CLUSTER_SECRET_must_be_set_min_16_chars}
+      - HYDB_ADMIN_TOKEN=${HYDB_ADMIN_TOKEN:?HYDB_ADMIN_TOKEN_must_be_set_min_16_chars}
+      - SU_PORT=8735
+      - HOT_NODE_HOST=hot-node
+      - HOT_NODE_PORT=8736
+      - HYDB_WAL_PATH=/app/data/node_sd_3/wal.log
+      - HYDB_EPOCH_PATH=/app/data/node_sd_3/epoch.meta
+    command: bash -c "./scripts/start-sd-node.sh && tail -f /dev/null"
+
+  # 3. Autonomous Committer Daemon: State Durability Worker (~sd@1.0) -> AO Process Bridge
   committer-daemon:
     image: node:22-slim
     container_name: hydb-committer-daemon
     restart: unless-stopped
     working_dir: /app
     depends_on:
-      - storage-unit
+      - sd-node-1
+      - sd-node-2
+      - sd-node-3
     volumes:
       - .:/app
+      - committer_data:/app/data/committer
     environment:
       - DB_DIR=/app
-      - SU_URL=http://storage-unit:8735/~scheduler@1.0
+      - HYDB_PROFILE=${HYDB_PROFILE:-production}
+      - HYDB_CLUSTER_SECRET=${HYDB_CLUSTER_SECRET:?HYDB_CLUSTER_SECRET_must_be_set_min_16_chars}
+      - HYDB_COMMITTER_CURSOR_PATH=/app/data/committer/committer_cursor.json
+      - SU_URL=http://sd-node-1:8735/~sd@1.0
       - HOT_URL=http://hot-node:8734/~hymessage@1.0
       - ARWEAVE_GATEWAY=${ARWEAVE_GATEWAY:-http://arlocal:1984}
       - AO_PROCESS_ID=${AO_PROCESS_ID:-}
@@ -79,5 +150,8 @@ services:
 
 volumes:
   hot_node_data:
-  su_wal_data:
+  sd_node_1_data:
+  sd_node_2_data:
+  sd_node_3_data:
+  committer_data:
   arlocal_data:

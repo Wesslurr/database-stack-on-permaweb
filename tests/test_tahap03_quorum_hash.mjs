@@ -119,6 +119,16 @@ assert(
   'Legacy 3-arity quorum check also enforces configured cluster size'
 );
 assert(
+  erlOut.includes('PASS: Duplicate sockets for same NodeId and unconfigured NodeIds are deduplicated/filtered to 1 ACK') &&
+  erlOut.includes('PASS: Single NodeId with 3 duplicate sockets CANNOT spoof 2/3 majority quorum'),
+  'Duplicate sockets for the same NodeId and unconfigured NodeIds are deduplicated/rejected from quorum count'
+);
+assert(
+  erlOut.includes('PASS: verify_su_handshake accepts valid HMAC for configured cluster member su-node-2') &&
+  erlOut.includes('PASS: verify_su_handshake rejects valid HMAC when NodeId is not in configured cluster_members'),
+  'TCP handshake enforces configured cluster membership list even when caller possesses shared secret'
+);
+assert(
   erlOut.includes('PASS: After explicit admin membership change to 1, majority quorum succeeds with 1 node'),
   'Explicit administrative membership reconfiguration updates quorum threshold safely'
 );

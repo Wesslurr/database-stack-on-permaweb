@@ -19,7 +19,16 @@
  *    - Retries use deterministic `(from_seq, to_seq, proposed_hash)` batch identity.
  */
 
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  fsyncSync,
+  closeSync
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join, basename } from 'node:path';
 import crypto from 'node:crypto';
@@ -38,7 +47,7 @@ function getArg(flag, envKey, def) {
   return process.env[envKey] || def;
 }
 
-const SU_SCHEDULER_URL = getArg('--su-url', 'SU_URL', 'http://127.0.0.1:8735/~scheduler@1.0');
+const SU_SCHEDULER_URL = getArg('--su-url', 'SU_URL', 'http://127.0.0.1:8735/~sd@1.0');
 const INTERVAL_MS = parseInt(getArg('--interval', 'INTERVAL_MS', '3000'), 10);
 const BATCH_MAX = parseInt(getArg('--batch-max', 'BATCH_MAX', '100'), 10);
 const RUN_ONCE = args.includes('--once') || process.env.ONCE === 'true';
@@ -106,8 +115,24 @@ export function saveDurableCursor(cursorState, cursorPath = DEFAULT_CURSOR_PATH)
     updated_at: new Date().toISOString()
   };
   const tmpPath = `${cursorPath}.tmp.${process.pid}`;
-  writeFileSync(tmpPath, JSON.stringify(payload, null, 2), 'utf-8');
+  const fd = openSync(tmpPath, 'w');
+  try {
+    writeFileSync(fd, JSON.stringify(payload, null, 2), 'utf-8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(tmpPath, cursorPath);
+  try {
+    const dirFd = openSync(dir, 'r');
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    // Directory fsync may not be supported on all platforms/filesystems
+  }
   return payload;
 }
 
@@ -136,13 +161,35 @@ export async function reconcileCursorWithAO(options = {}) {
       return {
         ...reconciled,
         source: 'ao_official_reconciled',
+        reconciliation_status: 'advanced_from_ao',
+        mismatch_detected: false,
         previous_disk_seq: diskCursor.last_committed_seq
       };
+    }
+
+    if (diskCursor.last_committed_seq > aoState.official_seq) {
+      lastCommittedSeq = diskCursor.last_committed_seq;
+      const diverged = {
+        ...diskCursor,
+        reconciliation_status: 'diverged_local_ahead_of_ao',
+        mismatch_detected: true,
+        ao_official_seq: aoState.official_seq,
+        local_disk_seq: diskCursor.last_committed_seq,
+        reason: `Local cursor seq (${diskCursor.last_committed_seq}) is ahead of AO OfficialSeq (${aoState.official_seq})`
+      };
+      if (options.throwOnDivergence === true) {
+        throw new Error(diverged.reason);
+      }
+      return diverged;
     }
   }
 
   lastCommittedSeq = diskCursor.last_committed_seq;
-  return diskCursor;
+  return {
+    ...diskCursor,
+    reconciliation_status: 'in_sync',
+    mismatch_detected: false
+  };
 }
 
 export function getCommittedCursor() {
@@ -191,7 +238,19 @@ export async function processCommitterCycle(options = {}) {
 
   // Ensure cursor is initialized from durable storage or AO state before first cycle
   if (lastCommittedSeq === null || options.forceReconcile) {
-    await reconcileCursorWithAO({ ...options, cursorPath });
+    const reconcileRes = await reconcileCursorWithAO({ ...options, cursorPath });
+    if (reconcileRes && reconcileRes.mismatch_detected && !options.allowLocalAhead) {
+      return {
+        ok: false,
+        skipped: true,
+        error_code: 'ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ',
+        mismatch_detected: true,
+        reconciliation_status: reconcileRes.reconciliation_status,
+        ao_official_seq: reconcileRes.ao_official_seq,
+        lastCommitted: lastCommittedSeq,
+        reason: reconcileRes.reason
+      };
+    }
   }
 
   const suStatus = await fetchFn(`${suUrl}/status`);
