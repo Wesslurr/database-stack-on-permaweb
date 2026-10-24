@@ -65,6 +65,12 @@ jobs:
             fi
             sleep 1
           done
+          if [ -f secrets/address.txt ]; then
+            curl -sf "http://127.0.0.1:1984/mint/$(cat secrets/address.txt | tr -d '\n\r')/1000000000000000000000" || true
+          fi
+          if [ -f secrets/address_su.txt ]; then
+            curl -sf "http://127.0.0.1:1984/mint/$(cat secrets/address_su.txt | tr -d '\n\r')/1000000000000000000000" || true
+          fi
 
       - name: Run SDK Canonical Manifest & Arweave Publication Tests
         run: npm run test:sdk

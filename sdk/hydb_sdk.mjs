@@ -440,6 +440,13 @@ export class HyDBContract {
     const jwk = options.jwk || JSON.parse(readFileSync(options.walletPath || DEFAULT_WALLET_PATH, 'utf-8'));
     const ownerAddress = await arweave.wallets.jwkToAddress(jwk);
 
+    // In local development / test gateways (ArLocal), auto-fund wallet if needed
+    if (gw.host === '127.0.0.1' || gw.host === 'localhost') {
+      try {
+        await fetch(`${gw.protocol}://${gw.host}:${gw.port}/mint/${ownerAddress}/1000000000000000000000`);
+      } catch {}
+    }
+
     // 1. If backend is wasm_slot and we have a WASM binary/file, publish WASM binary TX first
     if (this.backend === 'wasm_slot' && !this.wasmTxId) {
       const wasmBytes = this.wasmBuffer || readFileSync(this.wasmPath);

@@ -183,6 +183,22 @@ assertEq(manifestHash, expectedSpecHash, 'SDK computeCanonicalManifestHash match
 // ============================================================================
 console.log('\n[Test 4] Immutable Arweave Publication & Contract TxID:');
 
+if (!existsSync(WALLET_PATH)) {
+  mkdirSync(dirname(WALLET_PATH), { recursive: true });
+  const Arw = (await import('arweave')).default;
+  const arw = Arw.init({});
+  const jwk = await arw.wallets.generate();
+  writeFileSync(WALLET_PATH, JSON.stringify(jwk));
+}
+
+// Ensure test wallet has balance on local gateway if ArLocal is running
+try {
+  const arw = (await import('arweave')).default.init({});
+  const jwk = JSON.parse(readFileSync(WALLET_PATH, 'utf-8'));
+  const addr = await arw.wallets.jwkToAddress(jwk);
+  await fetch(`http://127.0.0.1:1984/mint/${addr}/1000000000000000000000`).catch(() => {});
+} catch {}
+
 const pubRes = await contract1.publishToArweave({
   gatewayUrl: 'http://127.0.0.1:1984',
   walletPath: WALLET_PATH
@@ -197,14 +213,6 @@ assert(pubRes.wasmSha256 && pubRes.wasmSha256.length === 64, `Generated WASM SHA
 // Test 5: Node Mounting by Contract TxID & Client Binding
 // ============================================================================
 console.log('\n[Test 5] Node Mounting by Contract TxID & Client Binding:');
-
-if (!existsSync(WALLET_PATH)) {
-  mkdirSync(dirname(WALLET_PATH), { recursive: true });
-  const Arw = (await import('arweave')).default;
-  const arw = Arw.init({});
-  const jwk = await arw.wallets.generate();
-  writeFileSync(WALLET_PATH, JSON.stringify(jwk));
-}
 
 let mockServer = null;
 const isHotRunning = await fetch(`${HOT_URL}/~meta@1.0/info`).then(r => r.ok).catch(() => false);
