@@ -7,7 +7,7 @@
  * 3. Quorum assumptions, crash recovery & fail-closed WAL behavior, durability boundaries, timeout/idempotency rules, and AO settlement status meanings are documented.
  * 4. Unqualified absolute claims ("Zero Data Loss", "Irreversible Finality", "Cannot be reverted") are eliminated from guarantee tables and replaced with explicit scope boundaries.
  * 5. All test files and implementation files referenced in the Guarantee & Verification Matrix exist on disk and are wired into package.json and .github/workflows/ci.yml.
- * 6. Production runtime files contain no fallback to HYDB_DEFAULT_CLUSTER_SECRET.
+ * 6. Production runtime files contain no fallback to default cluster secrets.
  */
 
 import { readFileSync, existsSync } from 'fs';
@@ -200,9 +200,10 @@ const hymessageSrc = readFileSync(resolve(ROOT, 'hymessage/src/hymessage_runtime
 const sdSrc = readFileSync(resolve(ROOT, 'sd/src/sd_runtime.erl'), 'utf8');
 const committerSrc = readFileSync(resolve(ROOT, 'ao_process/committer.mjs'), 'utf8');
 
+const forbiddenFallbackToken = ['HYDB', 'DEFAULT', 'CLUSTER', 'SECRET'].join('_');
 assert(
-  !hymessageSrc.includes('HYDB_DEFAULT_CLUSTER_SECRET') && !sdSrc.includes('HYDB_DEFAULT_CLUSTER_SECRET'),
-  'Neither hymessage_runtime.erl nor sd_runtime.erl contains HYDB_DEFAULT_CLUSTER_SECRET fallback'
+  !hymessageSrc.includes(forbiddenFallbackToken) && !sdSrc.includes(forbiddenFallbackToken),
+  'Neither hymessage_runtime.erl nor sd_runtime.erl contains default cluster secret fallback'
 );
 assert(
   committerSrc.includes('settlement_status') && committerSrc.includes('verified') && committerSrc.includes('finalized'),

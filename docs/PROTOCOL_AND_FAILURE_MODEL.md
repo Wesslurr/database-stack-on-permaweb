@@ -93,7 +93,7 @@ A batch submission to AO is **never** marked `confirmed: true` merely because `m
 * **Status**: **Implemented & Tested** (`tests/test_tahap02_wal_recovery.mjs`, `tests/fault_injection_chaos.mjs` Scenario 3).
 
 ### 3.5 Control Endpoint Authentication & Cluster Secret Security (`Phase 01`)
-* **Mandatory Cluster Secret**: Neither Hot Node nor SD Worker permits any hardcoded fallback secret (such as `HYDB_DEFAULT_CLUSTER_SECRET`). Startup fails immediately (`missing_or_weak_cluster_secret`) if `HYDB_CLUSTER_SECRET` is unset or shorter than 16 bytes.
+* **Mandatory Cluster Secret**: Neither Hot Node nor SD Worker permits any hardcoded default fallback secret. Startup fails immediately (`missing_or_weak_cluster_secret`) if `HYDB_CLUSTER_SECRET` is unset or shorter than 16 bytes.
 * **Admin Control Plane Protection**: Administrative endpoints (`/reset`, `/fence_epoch`, `/simulate_restart`, `/promote`) require explicit constant-time authentication via `x-admin-token` / `admin_token` matching `HYDB_ADMIN_TOKEN`. Furthermore, destructive test endpoints (`/reset`, `/simulate_restart`) are strictly disabled (`HTTP 403 ERR_TEST_ENDPOINT_DISABLED`) unless `HYDB_PROFILE=test`.
 * **Status**: **Implemented & Tested** (`tests/test_tahap01_security.mjs`).
 
