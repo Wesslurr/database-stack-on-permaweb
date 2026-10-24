@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # H-0: build device Gleam hymessage -> rename beam -> archive Forge -> trusted_devices -> ping
 set -euo pipefail
-source /home/weslur/database/scripts/env.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../scripts/env.sh"
 export PATH="/home/weslur/.local/bin:/home/weslur/erlang/27.0/bin:$PATH"
 
 HMD="$DB_DIR/hymessage"

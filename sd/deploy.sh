@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Deploy sd device (Shared Data Pool) on HyperBEAM
 set -euo pipefail
-source /home/weslur/database/scripts/env.sh
-export PATH="/home/weslur/.local/bin:/home/weslur/erlang/27.0/bin:/home/weslur/.cargo/bin:$PATH"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../scripts/env.sh"
 
-DB_DIR="/home/weslur/database"
 SDD="$DB_DIR/sd"
 MOD="_hb_device_sd_1_0_sd0"
 OUT="$SDD/out"
-ERL="/home/weslur/erlang/27.0/bin/erl"
-ERLC="/home/weslur/erlang/27.0/bin/erlc"
+ERL="${ERL:-$(command -v erl || echo "$HOME/erlang/27.0/bin/erl")}"
+ERLC="${ERLC:-$(command -v erlc || echo "$HOME/erlang/27.0/bin/erlc")}"
 HB_SD_REL="$DB_DIR/vendor/HyperBEAM_sd/_build/genesis_wasm+rocksdb/rel/hb_sd"
 
 echo '=== 1. Compiling sd_runtime.erl ==='
@@ -53,7 +52,10 @@ ZIP_MOD="$MOD" "$ERL" -noshell -eval '
 cd "$SDD"
 
 echo '=== 5. Deploying gleam_stdlib ==='
-STDLIB_EBIN=$(find "$DB_DIR/hymessage/build/dev/erlang/gleam_stdlib" -type d -name ebin | head -1)
+STDLIB_EBIN=$(find "$DB_DIR/hymessage/build/dev/erlang/gleam_stdlib" -type d -name ebin 2>/dev/null | head -1 || true)
+if [ -z "$STDLIB_EBIN" ]; then
+  STDLIB_EBIN=$(find "$DB_DIR/sd/build/dev/erlang/gleam_stdlib" -type d -name ebin | head -1)
+fi
 mkdir -p "$HB_SD_REL/lib/gleam_stdlib-1.0.0"
 rm -rf "$HB_SD_REL/lib/gleam_stdlib-1.0.0/ebin"
 cp -r "$STDLIB_EBIN" "$HB_SD_REL/lib/gleam_stdlib-1.0.0/ebin"

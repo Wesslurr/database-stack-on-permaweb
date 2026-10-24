@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - main
+      - beta
   pull_request:
 
 jobs:

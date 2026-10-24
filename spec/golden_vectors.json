@@ -1,0 +1,104 @@
+{
+  "spec_version": "hydb.spec/1",
+  "contract_version": "hydb.core@1.0",
+  "values": {
+    "int64_42": "01000000000000002A",
+    "int64_min": "018000000000000000",
+    "int64_max": "017FFFFFFFFFFFFFFF",
+    "bool_true": "0201",
+    "bool_false": "0200",
+    "string_simple": "030000000B68656C6C6F20776F726C64",
+    "string_unicode": "03000000144BC3A4736520F09F9A8020E697A5E69CACE8AA9E",
+    "bytes_raw": "0400000004010203FF",
+    "absent": "08",
+    "null": "05",
+    "sorted_json": "070000000300000005616C70686103000000056669727374000000036D69640600000002010000000000000001010000000000000002000000047A657461010000000000000064"
+  },
+  "manifests": {
+    "finance_balances_hash": "BD850E12B768CA47C0C2838CB5BAF8C0308ABCC78CECDF6D2FD0F85804F34B79",
+    "app_docs_hash": "E56F9A4A508B112A4483369E213AFDB48DFBE6CBA0BB26C830488A7937BA5970"
+  },
+  "events": {
+    "ev1_register_hash": "E561253C5DFCAD802E3BF463634820625D89599C7AAABD00A52AC2503991F091",
+    "ev2_put_hash": "39D70AAD7E1BAD407BFCAA7C9CB9D4FAE0C5E375421F971DE50B40751699AF74",
+    "ev3_del_hash": "7FDF85C153633DC8FC34593EE8BDF295DB4B8768583FE925828DDA3C19299F54",
+    "ev4_reput_hash": "045A706E4E1237BB1075722FFFBD9241E2F524322DD4D41BACBA1C4F8D03CF95"
+  },
+  "state_commitment_256": "461023B0EF7BCB65C959B6FC6E74818D2A1C210890A2A32F97F98740C31CA48A",
+  "errors": {
+    "ERR_ENCODING": "malformed or non-canonical input",
+    "ERR_INVALID_KEY": "key missing, empty, too long or wrong type",
+    "ERR_TYPE_MISMATCH": "value does not match declared type",
+    "ERR_SCHEMA_VIOLATION": "value violates schema rules",
+    "ERR_INVALID_SCHEMA": "schema definition is invalid or unsupported",
+    "ERR_CAPABILITY_UNSUPPORTED": "backend lacks a capability required by the contract",
+    "ERR_NAMESPACE_UNKNOWN": "namespace is not registered",
+    "ERR_NOT_FOUND": "record does not exist or is deleted",
+    "ERR_VERSION_CONFLICT": "expected_ver does not match",
+    "ERR_CAPACITY_EXCEEDED": "namespace record limit reached",
+    "ERR_UNAUTHORIZED": "operation requires authorization",
+    "ERR_STALE_EPOCH": "request epoch is older than current epoch",
+    "ERR_CONTRACT_MISMATCH": "contract or schema version mismatch",
+    "ERR_POLICY_INVALID": "policy circuit configuration is invalid",
+    "ERR_BACKEND_UNAVAILABLE": "required backend is not available"
+  },
+  "policy_allowlist": {
+    "COMMITTED": [
+      "COMMIT_CHECKPOINT_TO_LEDGER"
+    ],
+    "DUPLICATE_BATCH_IDEMPOTENT": [
+      "RECORD_SU_ATTESTATION_IDEMPOTENT",
+      "IGNORE_DUPLICATE"
+    ],
+    "REJECTED_SEQUENCE_GAP": [
+      "REQUEST_CATCHUP_FROM_SU_POOL",
+      "HALT_PROCESSING",
+      "ALERT_OPERATOR"
+    ],
+    "REJECTED_OUT_OF_ORDER_BATCH": [
+      "REJECT_MALFORMED_BATCH",
+      "HALT_PROCESSING",
+      "ALERT_OPERATOR"
+    ],
+    "REJECTED_SCHEMA_VIOLATION": [
+      "CUT_BRANCH_AND_REJECT_INVALID_SCHEMA",
+      "FREEZE_NAMESPACE",
+      "HALT_PROCESSING",
+      "ALERT_OPERATOR"
+    ],
+    "REJECTED_CONTRACT_MISMATCH": [
+      "REJECT_INCOMPATIBLE_CONTRACT_VERSION",
+      "FREEZE_NAMESPACE",
+      "HALT_PROCESSING"
+    ],
+    "REJECTED_HASH_CHAIN_BROKEN": [
+      "CUT_BRANCH_AND_FREEZE_EPOCH",
+      "HALT_PROCESSING"
+    ],
+    "REJECTED_EVENT_HASH_MISMATCH": [
+      "CUT_BRANCH_AND_FREEZE_EPOCH",
+      "HALT_PROCESSING"
+    ],
+    "REJECTED_STATE_ROOT_MISMATCH": [
+      "CUT_BRANCH_AND_SLASH_PROPOSER",
+      "CUT_BRANCH_AND_FREEZE_EPOCH",
+      "HALT_PROCESSING"
+    ],
+    "REJECTED_ENCODING": [
+      "REJECT_MALFORMED_BATCH",
+      "HALT_PROCESSING"
+    ],
+    "EQUIVOCATION_PROVEN": [
+      "FREEZE_EPOCH_AND_PROMOTE_STANDBY_HOT",
+      "HALT_PROCESSING"
+    ],
+    "FENCED_STALE_EPOCH": [
+      "FENCE_AND_DROP_ZOMBIE_HOT",
+      "ALERT_OPERATOR"
+    ],
+    "REJECTED_UNAUTHORIZED_SENDER": [
+      "DROP_UNAUTHORIZED_PACKET",
+      "ALERT_OPERATOR"
+    ]
+  }
+}

@@ -17,14 +17,20 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import * as spec from '../spec/hydb_contract_spec.mjs';
-import AoLoader from '../vendor/HyperBEAM/_build/genesis_wasm/genesis-wasm-server/node_modules/@permaweb/ao-loader/dist/index.cjs';
+import AoLoader from '@permaweb/ao-loader';
 
-const DB_DIR = '/home/weslur/database';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
 const WASM_PATH = join(DB_DIR, 'hydb/out/hydb.wasm');
-const AO_WASM_PATH = join(DB_DIR, 'vendor/HyperBEAM/_build/genesis_wasm/genesis-wasm-server/test/processes/happy/process.wasm');
+const AO_WASM_PATH = process.env.AO_PROCESS_WASM || (
+  existsSync(join(DB_DIR, 'ao_process/process.wasm'))
+    ? join(DB_DIR, 'ao_process/process.wasm')
+    : join(DB_DIR, 'vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb/genesis-wasm-server/test/processes/happy/process.wasm')
+);
 
 let passed = 0;
 let failed = 0;
@@ -83,12 +89,14 @@ const jsJson = spec.encodeValue({
 
 // Erlang Runner Execution
 console.log('  Executing Erlang Conformance Runner...');
-const erlOutputRaw = execFileSync('/home/weslur/database/tests/erl_conformance_runner.escript', { encoding: 'utf-8' }).trim();
+const erlRunner = join(DB_DIR, 'tests/erl_conformance_runner.escript');
+const erlOutputRaw = execFileSync(erlRunner, { encoding: 'utf-8', env: { ...process.env, DB_DIR } }).trim();
 const erl = JSON.parse(erlOutputRaw);
 
 // Lua Runner Execution
 console.log('  Executing Lua Conformance Runner...');
-const luaOutputRaw = execFileSync('lua', ['/home/weslur/database/tests/lua_conformance_runner.lua'], { encoding: 'utf-8' }).trim();
+const luaRunner = join(DB_DIR, 'tests/lua_conformance_runner.lua');
+const luaOutputRaw = execFileSync('lua', [luaRunner], { encoding: 'utf-8', env: { ...process.env, DB_DIR } }).trim();
 const lua = JSON.parse(luaOutputRaw);
 
 // Value Assertions across JS, Erlang, Lua
@@ -124,6 +132,18 @@ assertEq(lua.null, jsNull, 'null tag JS == Lua');
 
 assertEq(erl.json, jsJson, 'Sorted nested JSON JS == Erlang');
 assertEq(lua.json, jsJson, 'Sorted nested JSON JS == Lua');
+
+// Shared Golden Vectors Verification
+const golden = JSON.parse(readFileSync(join(DB_DIR, 'spec/golden_vectors.json'), 'utf-8'));
+assertEq(jsInt42, golden.values.int64_42, 'Golden Vector: int64(42)');
+assertEq(jsIntMin, golden.values.int64_min, 'Golden Vector: int64(INT64_MIN)');
+assertEq(jsIntMax, golden.values.int64_max, 'Golden Vector: int64(INT64_MAX)');
+assertEq(jsBoolTrue, golden.values.bool_true, 'Golden Vector: bool(true)');
+assertEq(jsBoolFalse, golden.values.bool_false, 'Golden Vector: bool(false)');
+assertEq(jsStrSimple, golden.values.string_simple, 'Golden Vector: string("hello world")');
+assertEq(jsStrUnicode, golden.values.string_unicode, 'Golden Vector: Unicode');
+assertEq(jsBytes, golden.values.bytes_raw, 'Golden Vector: bytes');
+assertEq(jsJson, golden.values.sorted_json, 'Golden Vector: Sorted nested JSON');
 
 // ============================================================================
 // Suite 2: Type Rejection & Boundary Checks
@@ -209,6 +229,8 @@ const jsNormDocSchema = spec.validateSchema(docSchema);
 const jsDocManifestHash = spec.manifestHash(jsNormDocSchema);
 assertEq(erl.doc_manifest_hash, jsDocManifestHash, 'app.docs manifest hash JS == Erlang');
 assertEq(lua.doc_manifest_hash, jsDocManifestHash, 'app.docs manifest hash JS == Lua');
+assertEq(jsValidManifestHash, golden.manifests.finance_balances_hash, 'Golden Vector: finance.balances manifest hash');
+assertEq(jsDocManifestHash, golden.manifests.app_docs_hash, 'Golden Vector: app.docs manifest hash');
 
 // Event Hash Chain (Ev1: Register, Ev2: Put, Ev3: Del, Ev4: Put)
 const st = spec.createState();

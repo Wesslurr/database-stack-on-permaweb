@@ -15,6 +15,12 @@
 
 import { readFileSync } from 'node:fs';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
+const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
 
 const HOT_URL = 'http://127.0.0.1:8734/~hymessage@1.0';
 const SU_SCHEDULER_URL = 'http://127.0.0.1:8735/~scheduler@1.0';
@@ -65,7 +71,7 @@ async function main() {
   }
 
   // Setup cluster secrets & reset both nodes
-  const walletRawBytes = readFileSync('/home/weslur/database/secrets/wallet.json');
+  const walletRawBytes = readFileSync(WALLET_PATH);
   const clusterSecret = crypto.createHash('sha256').update(walletRawBytes).digest();
   const validAdminToken = clusterSecret.toString('hex').toUpperCase();
 

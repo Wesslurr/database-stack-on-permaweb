@@ -8,7 +8,14 @@ main(_) ->
     run_action(<<"all">>).
 
 run_action(<<"all">>) ->
-    code:add_path("/home/weslur/database/hymessage/build/dev/erlang/hymessage/ebin"),
+    DbDir = case os:getenv("DB_DIR") of
+        false -> filename:dirname(filename:dirname(escript:script_name()));
+        "" -> filename:dirname(filename:dirname(escript:script_name()));
+        D -> D
+    end,
+    code:add_path(filename:join([DbDir, "hymessage/build/dev/erlang/hymessage/ebin"])),
+    code:add_path(filename:join([DbDir, "hymessage/out/ebin"])),
+    code:add_path(filename:join([DbDir, "vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb/lib/hymessage_runtime-1.0.0/ebin"])),
 
     %% 1. Value encodings
     Int64Enc = binary:encode_hex(hydb_spec:encode_value({int64, 42})),

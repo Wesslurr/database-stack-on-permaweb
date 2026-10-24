@@ -22,6 +22,6 @@ HyDB adalah engine database in-memory *real-time* yang berjalan langsung di dala
 ## Build & Test
 
 ```bash
-cd /home/weslur/database/hydb
+cd hydb
 bash build.sh
 ```

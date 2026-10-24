@@ -5,11 +5,22 @@
   "type": "module",
   "description": "Real-time optimistic database stack (AO + HyperBEAM) — dev environment",
   "scripts": {
-    "wallet": "node scripts/gen-wallet.mjs",
+    "wallet": "node scripts/gen-wallet.mjs && node scripts/gen-wallet-su.mjs",
     "arlocal": "node scripts/start-arlocal.mjs",
-    "smoke": "bash tests/smoke.sh"
+    "smoke": "bash tests/smoke.sh",
+    "test": "node tests/contract_conformance.mjs",
+    "test:conformance": "node tests/contract_conformance.mjs",
+    "test:contract": "node tests/test_tahap3_enforcement.mjs && node tests/test_tahap4_schema.mjs",
+    "test:durability": "node tests/test_tahap5_durability.mjs",
+    "test:ao": "node tests/test_tahap6_ao_arbitrator.mjs && node tests/test_tahap7_policy_circuit.mjs",
+    "test:sdk": "node tests/test_tahap8_sdk_manifest.mjs",
+    "test:business": "node tests/business/financial_ledger_scenario.mjs && node tests/business/gaming_session_scenario.mjs",
+    "test:chaos": "node tests/fault_injection_chaos.mjs",
+    "test:integration": "node tests/test_maximal_poc.mjs",
+    "test:all": "npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:chaos && npm run test:integration"
   },
   "devDependencies": {
+    "@permaweb/ao-loader": "^0.0.49",
     "@permaweb/aoconnect": "^0.0.98",
     "@permaweb/aos": "^2.0.16",
     "arlocal": "^1.1.66",

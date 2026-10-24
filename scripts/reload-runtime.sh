@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source /home/weslur/database/scripts/env.sh
-export PATH="/home/weslur/.local/bin:/home/weslur/erlang/27.0/bin:$PATH"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/env.sh"
 
 echo "=== Compiling hymessage_runtime.erl ==="
-erlc -o "$HB_REL/lib/hymessage_runtime-1.0.0/ebin" /home/weslur/database/hymessage/src/hymessage_runtime.erl
+mkdir -p "$HB_REL/lib/hymessage_runtime-1.0.0/ebin"
+erlc -o "$HB_REL/lib/hymessage_runtime-1.0.0/ebin" "$DB_DIR/hymessage/src/hymessage_runtime.erl"
 
 echo "=== Restarting Node ==="
 "$DB_DIR/scripts/stop-node.sh" || true

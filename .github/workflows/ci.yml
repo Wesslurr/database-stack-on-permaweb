@@ -1,0 +1,59 @@
+name: HyDB CI
+
+on:
+  push:
+    branches:
+      - beta
+      - main
+      - master
+  pull_request:
+    branches:
+      - beta
+      - main
+      - master
+
+jobs:
+  conformance-and-specs:
+    name: Conformance & Security Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Setup Lua
+        uses: leafo/gh-actions-lua@v10
+        with:
+          luaVersion: "5.3"
+
+      - name: Setup Erlang/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.0"
+          rebar3-version: "3.23.0"
+
+      - name: Install Dependencies
+        run: npm ci || npm install
+
+      - name: Generate Ephemeral Test Wallets
+        run: |
+          mkdir -p secrets
+          node scripts/gen-wallet.mjs
+          node scripts/gen-wallet-su.mjs
+
+      - name: Run Cross-Language Conformance Suite (JS, Erlang, Rust, Lua)
+        run: npm run test:conformance
+
+      - name: Run AO Arbitrator & Policy Circuit Verification
+        run: npm run test:ao
+
+      - name: Run SDK Canonical Manifest & Preflight Tests
+        run: npm run test:sdk
+
+      - name: Run Business Scenarios (Financial Ledger & Gaming State)
+        run: npm run test:business

@@ -14,13 +14,15 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import * as spec from '../spec/hydb_contract_spec.mjs';
 import { ArbitratorDomain, resolvePolicyAction } from '../ao_process/real_ao_evaluator.mjs';
 
-const DB_DIR = '/home/weslur/database';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
 
 let passed = 0;
 let failed = 0;

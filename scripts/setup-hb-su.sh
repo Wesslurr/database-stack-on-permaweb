@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DB_DIR="/home/weslur/database"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DB_DIR="${DB_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 HB_SU_REL="$DB_DIR/vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb_su"
 
 # 1. Clean cache and logs

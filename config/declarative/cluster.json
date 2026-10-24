@@ -12,7 +12,7 @@
       "role": "SHARED_DATA_POOL",
       "http_port": 8735,
       "device": "sd@1.0",
-      "wal_path": "/home/weslur/database/sd/wal.log"
+      "wal_path": "sd/wal.log"
     }
   },
   "ao_arbitrator": {

@@ -711,8 +711,16 @@ wrap_fast_wasm(Base, NodeMsg) when is_map(Base) ->
 wrap_fast_wasm(Other, _NodeMsg) ->
     Other.
 
+get_db_dir() ->
+    case os:getenv("DB_DIR") of
+        false -> ".";
+        "" -> ".";
+        Dir -> Dir
+    end.
+
 init_wasm(NodeMsg) ->
-    WasmBinFile = "/home/weslur/database/hydb/out/hydb.wasm",
+    DbDir = get_db_dir(),
+    WasmBinFile = filename:join([DbDir, "hydb/out/hydb.wasm"]),
     case file:read_file(WasmBinFile) of
         {ok, WasmBin} when byte_size(WasmBin) >= 4 ->
             WasmMsg = #{ <<"device">> => <<"wasm-64@1.0">>, <<"body">> => WasmBin },
@@ -725,7 +733,8 @@ init_wasm(NodeMsg) ->
     end.
 
 init_wasm_from_id(NodeMsg) ->
-    WasmIdFile = "/home/weslur/database/hydb/out/wasm_id.txt",
+    DbDir = get_db_dir(),
+    WasmIdFile = filename:join([DbDir, "hydb/out/wasm_id.txt"]),
     case file:read_file(WasmIdFile) of
         {ok, RawId} ->
             WasmID = string:trim(RawId),
@@ -742,7 +751,12 @@ node_auth_secret() ->
         [{cached_auth_secret, Sec}] ->
             Sec;
         _ ->
-            Sec = case file:read_file("/home/weslur/database/secrets/wallet.json") of
+            WalletPath = case os:getenv("WALLET_PATH") of
+                false -> filename:join([get_db_dir(), "secrets/wallet.json"]);
+                "" -> filename:join([get_db_dir(), "secrets/wallet.json"]);
+                WP -> WP
+            end,
+            Sec = case file:read_file(WalletPath) of
                 {ok, Bin} when byte_size(Bin) > 0 ->
                     crypto:hash(sha256, Bin);
                 _ ->

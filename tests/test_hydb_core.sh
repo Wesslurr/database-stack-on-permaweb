@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source /home/weslur/database/scripts/env.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../scripts/env.sh"
 
 "$HB_REL/bin/hb" eval '
-  {ok, WasmIDRaw} = file:read_file("/home/weslur/database/hydb/out/wasm_id.txt"),
+  DbDir = case os:getenv("DB_DIR") of false -> "."; "" -> "."; D -> D end,
+  {ok, WasmIDRaw} = file:read_file(filename:join([DbDir, "hydb/out/wasm_id.txt"])),
   WasmID = string:trim(WasmIDRaw),
   Wallet = hb:wallet(),
   ServerID = hb_util:human_id(ar_wallet:to_address(Wallet)),

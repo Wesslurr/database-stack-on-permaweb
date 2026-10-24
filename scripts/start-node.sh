@@ -3,13 +3,19 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 mkdir -p "$NODE_RUN_DIR"
 cd "$NODE_RUN_DIR"
+
+if [ ! -f "$DB_DIR/secrets/wallet.json" ]; then
+  echo "[node] Generating fresh wallet..."
+  (cd "$DB_DIR" && node "$DB_DIR/scripts/gen-wallet.mjs")
+fi
+
 if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8734/~meta@1.0/info; then
   echo "[node] already running on :8734"
   exit 0
 fi
 # relx selalu cd ke release root dan load config.flat dari sana bila HB_CONFIG
 # tidak terbaca - sinkronkan dulu biar tidak baca config basi.
-cp "$DB_DIR/config/node.flat" "$HB_REL/config.flat"
+sed "s|secrets/wallet.json|$DB_DIR/secrets/wallet.json|g" "$DB_DIR/config/node.flat" > "$HB_REL/config.flat"
 "$HB_REL/bin/hb" daemon
 for i in $(seq 1 45); do
   if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8734/~meta@1.0/info; then

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source /home/weslur/database/scripts/env.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../scripts/env.sh"
 
-DIR="/home/weslur/database/hydb"
+DIR="$SCRIPT_DIR"
 cd "$DIR"
 
 echo "=== 1. Building HyDB (Rust -> wasm32-unknown-unknown) ==="

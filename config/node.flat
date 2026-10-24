@@ -2,7 +2,7 @@
 % Port default untuk HyperBEAM
 port: 8734
 % Wallet operator node (project database)
-priv_key_location: /home/weslur/database/secrets/wallet.json
+priv_key_location: secrets/wallet.json
 % Mode debug untuk development lokal
 mode: debug
 % Eksekusi proses lokal

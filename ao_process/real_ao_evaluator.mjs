@@ -13,20 +13,26 @@
  * 7. Permanent checkpoint commitment to ArLocal (:1984)
  */
 
-import AoLoader from '/home/weslur/database/vendor/HyperBEAM/_build/genesis_wasm/genesis-wasm-server/node_modules/@permaweb/ao-loader/dist/index.cjs';
+import AoLoader from '@permaweb/ao-loader';
 import Arweave from 'arweave';
 import crypto from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
 import {
   DEFAULT_POLICY as SPEC_DEFAULT_POLICY,
   resolvePolicy as specResolvePolicy,
   validatePolicy as specValidatePolicy
 } from '../spec/hydb_contract_spec.mjs';
 
-const DB_DIR = '/home/weslur/database';
-const WALLET_PATH = join(DB_DIR, 'secrets/wallet.json');
-const WASM_PATH = join(DB_DIR, 'vendor/HyperBEAM/_build/genesis_wasm/genesis-wasm-server/test/processes/happy/process.wasm');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
+const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
+const WASM_PATH = process.env.AO_PROCESS_WASM || (
+  existsSync(join(__dirname, 'process.wasm'))
+    ? join(__dirname, 'process.wasm')
+    : join(DB_DIR, 'vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb/genesis-wasm-server/test/processes/happy/process.wasm')
+);
 const PROCESS_ID_FILE = join(DB_DIR, 'ao_process/process_id.txt');
 const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 

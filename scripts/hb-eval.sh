@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source /home/weslur/database/scripts/env.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/env.sh"
 "$HB_REL/bin/hb" eval "$@"

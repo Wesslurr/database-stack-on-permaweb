@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Deploy hymessage device + hywasm compute engine (Rust WASM)
 set -euo pipefail
-source /home/weslur/database/scripts/env.sh
-export PATH="/home/weslur/.local/bin:/home/weslur/erlang/27.0/bin:/home/weslur/.cargo/bin:$PATH"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../scripts/env.sh"
 
 HMD="$DB_DIR/hymessage"
 MOD="_hb_device_hymessage_1_0_h0"
 OUT="$HMD/out"
-ERL="/home/weslur/erlang/27.0/bin/erl"
-ERLC="/home/weslur/erlang/27.0/bin/erlc"
+ERL="${ERL:-$(command -v erl || echo "$HOME/erlang/27.0/bin/erl")}"
+ERLC="${ERLC:-$(command -v erlc || echo "$HOME/erlang/27.0/bin/erlc")}"
 
 echo '=== 1. Building HyDB (Rust -> WASM) ==='
 cd "$DB_DIR/hydb"

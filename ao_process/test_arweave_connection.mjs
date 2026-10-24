@@ -1,5 +1,10 @@
 import Arweave from 'arweave';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
 
 const arweave = Arweave.init({
   host: '127.0.0.1',
@@ -8,7 +13,7 @@ const arweave = Arweave.init({
 });
 
 async function main() {
-  const walletPath = '/home/weslur/database/secrets/wallet.json';
+  const walletPath = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
   const jwk = JSON.parse(readFileSync(walletPath, 'utf-8'));
   const address = await arweave.wallets.jwkToAddress(jwk);
   const balance = await arweave.wallets.getBalance(address);

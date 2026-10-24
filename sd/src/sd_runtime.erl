@@ -20,7 +20,6 @@
 -define(TABLE, sd_ram_store).
 -define(COMPAT_TABLE, su_ram_store).
 -define(SERVER, ?MODULE).
--define(DEFAULT_WAL_PATH, "/home/weslur/database/sd/wal.log").
 -define(HOT_NODE_PORT, 8736).
 -define(GENESIS_HASH, <<"0000000000000000000000000000000000000000000000000000000000000000">>).
 
@@ -30,11 +29,19 @@
     hot_port = ?HOT_NODE_PORT
 }).
 
+get_db_dir() ->
+    case os:getenv("DB_DIR") of
+        false -> ".";
+        "" -> ".";
+        Dir -> Dir
+    end.
+
 wal_path() ->
     case os:getenv("HYDB_WAL_PATH") of
-        false -> ?DEFAULT_WAL_PATH;
+        false -> filename:join([get_db_dir(), "sd/wal.log"]);
+        "" -> filename:join([get_db_dir(), "sd/wal.log"]);
         P when is_list(P), length(P) > 0 -> P;
-        _ -> ?DEFAULT_WAL_PATH
+        _ -> filename:join([get_db_dir(), "sd/wal.log"])
     end.
 
 is_connected() ->
@@ -564,7 +571,12 @@ node_auth_secret() ->
     end.
 
 compute_node_auth_secret() ->
-    case file:read_file("/home/weslur/database/secrets/wallet.json") of
+    WalletPath = case os:getenv("WALLET_PATH") of
+        false -> filename:join([get_db_dir(), "secrets/wallet.json"]);
+        "" -> filename:join([get_db_dir(), "secrets/wallet.json"]);
+        WP -> WP
+    end,
+    case file:read_file(WalletPath) of
         {ok, Bin} when byte_size(Bin) > 0 ->
             crypto:hash(sha256, Bin);
         _ ->

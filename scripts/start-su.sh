@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-DB_DIR="/home/weslur/database"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DB_DIR="${DB_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 # Start HyperBEAM SU Node
 "$DB_DIR/scripts/start-su-node.sh"

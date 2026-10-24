@@ -17,6 +17,8 @@
 import { readFileSync } from 'node:fs';
 import crypto from 'node:crypto';
 import net from 'node:net';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
 import {
   ArbitratorDomain,
   computeBatchSignature,
@@ -26,8 +28,13 @@ import {
 } from '../ao_process/real_ao_evaluator.mjs';
 import { defineContract } from '../sdk/hydb_sdk.mjs';
 
-const HOT_URL = 'http://127.0.0.1:8734/~hymessage@1.0';
-const SU_SCHEDULER_URL = 'http://127.0.0.1:8735/~scheduler@1.0';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
+const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
+const HYDB_WASM_PATH = process.env.HYDB_WASM || join(DB_DIR, 'hydb/out/hydb.wasm');
+
+const HOT_URL = process.env.HOT_URL || 'http://127.0.0.1:8734/~hymessage@1.0';
+const SU_SCHEDULER_URL = process.env.SU_SCHEDULER_URL || 'http://127.0.0.1:8735/~scheduler@1.0';
 
 async function httpGet(url) {
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
@@ -72,7 +79,7 @@ async function main() {
   console.log('>>> RUNNING FULL FAULT-TOLERANT & SECURITY VERIFICATION SUITE (AO + HYPERBEAM) <<<');
   console.log('='.repeat(84));
 
-  const walletRawBytes = readFileSync('/home/weslur/database/secrets/wallet.json');
+  const walletRawBytes = readFileSync(WALLET_PATH);
   const clusterSecret = crypto.createHash('sha256').update(walletRawBytes).digest();
   const validAdminToken = clusterSecret.toString('hex').toUpperCase();
 
@@ -721,7 +728,7 @@ async function main() {
     namespace: 'test.bad_wasm',
     backend: 'wasm_slot',
     wasm: {
-      file: '/home/weslur/database/hydb/out/hydb.wasm',
+      file: HYDB_WASM_PATH,
       exports: { critical_audit_fn: 'non_existent_symbol_123' }
     }
   });
@@ -764,7 +771,7 @@ async function main() {
       maxValue: 500000
     },
     wasm: {
-      file: '/home/weslur/database/hydb/out/hydb.wasm',
+      file: HYDB_WASM_PATH,
       exports: {
         put: 'db_put_ns',
         get: 'db_get_ns',
@@ -966,7 +973,7 @@ async function main() {
       maxRecords: 2
     },
     wasm: {
-      file: '/home/weslur/database/hydb/out/hydb.wasm'
+      file: HYDB_WASM_PATH
     }
   });
   await secureContract.publishToArweave({ gatewayUrl: 'http://127.0.0.1:1984' });

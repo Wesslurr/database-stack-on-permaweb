@@ -22,11 +22,15 @@
 import { readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
 
-const HOT_URL = 'http://127.0.0.1:8734/~hymessage@1.0';
-const SU_SCHEDULER_URL = 'http://127.0.0.1:8735/~scheduler@1.0';
-const WAL_PATH = '/home/weslur/database/sd/wal.log';
-const WALLET_PATH = '/home/weslur/database/secrets/wallet.json';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
+const HOT_URL = process.env.HOT_URL || 'http://127.0.0.1:8734/~hymessage@1.0';
+const SU_SCHEDULER_URL = process.env.SU_SCHEDULER_URL || 'http://127.0.0.1:8735/~scheduler@1.0';
+const WAL_PATH = process.env.HYDB_WAL_PATH || join(DB_DIR, 'sd/wal.log');
+const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
 
 const isTrue = (v) => v === true || String(v).toLowerCase() === 'true';
 const isFalse = (v) => v === false || String(v).toLowerCase() === 'false';

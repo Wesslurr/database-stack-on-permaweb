@@ -1,6 +1,7 @@
 -- Lua Conformance Vector Runner for HyDB hydb.spec/1
 
-local DB_DIR = "/home/weslur/database"
+local script_dir = debug.getinfo(1, "S").source:sub(2):match("(.*/)") or "./"
+local DB_DIR = os.getenv("DB_DIR") or (script_dir .. "..")
 package.path = DB_DIR .. "/ao_process/?.lua;" .. package.path
 
 local hydb_spec = require("hydb_spec")

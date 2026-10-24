@@ -8,10 +8,12 @@
 
 import Arweave from 'arweave';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
 
-const DB_DIR = '/home/weslur/database';
-const WALLET_PATH = join(DB_DIR, 'secrets/wallet.json');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
+const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
 const PROCESS_ID_FILE = join(DB_DIR, 'ao_process/process_id.txt');
 const LUA_PATH = join(DB_DIR, 'ao_process/arbitrator.lua');
 

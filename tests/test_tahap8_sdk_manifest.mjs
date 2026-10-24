@@ -13,7 +13,8 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
 import crypto from 'node:crypto';
 import * as spec from '../spec/hydb_contract_spec.mjs';
 import {
@@ -23,9 +24,10 @@ import {
   computeManifestHash
 } from '../sdk/hydb_sdk.mjs';
 
-const DB_DIR = '/home/weslur/database';
-const HOT_URL = 'http://127.0.0.1:8734';
-const WALLET_PATH = join(DB_DIR, 'secrets/wallet.json');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
+const HOT_URL = process.env.HOT_URL || 'http://127.0.0.1:8734';
+const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
 
 let passed = 0;
 let failed = 0;

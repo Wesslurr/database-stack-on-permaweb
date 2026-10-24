@@ -14,16 +14,22 @@
  * 9. Cross-Environment Verification: JS ArbitratorDomain vs Live AO Process via AoLoader
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import * as spec from '../spec/hydb_contract_spec.mjs';
 import { ArbitratorDomain, computeCommitment256 } from '../ao_process/real_ao_evaluator.mjs';
-import AoLoader from '../vendor/HyperBEAM/_build/genesis_wasm/genesis-wasm-server/node_modules/@permaweb/ao-loader/dist/index.cjs';
+import AoLoader from '@permaweb/ao-loader';
 
-const DB_DIR = '/home/weslur/database';
-const AO_WASM_PATH = join(DB_DIR, 'vendor/HyperBEAM/_build/genesis_wasm/genesis-wasm-server/test/processes/happy/process.wasm');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
+const AO_WASM_PATH = process.env.AO_PROCESS_WASM || (
+  existsSync(join(DB_DIR, 'ao_process/process.wasm'))
+    ? join(DB_DIR, 'ao_process/process.wasm')
+    : join(DB_DIR, 'vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb/genesis-wasm-server/test/processes/happy/process.wasm')
+);
 
 let passed = 0;
 let failed = 0;
