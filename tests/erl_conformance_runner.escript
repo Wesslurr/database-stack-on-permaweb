@@ -14,19 +14,22 @@ run_action(<<"all">>) ->
         D -> D
     end,
     OutDir = filename:join([DbDir, "hymessage/out/ebin"]),
+    SdOutDir = filename:join([DbDir, "sd/out/ebin"]),
     filelib:ensure_dir(filename:join([OutDir, "dummy"])),
-    code:add_path(OutDir),
+    filelib:ensure_dir(filename:join([SdOutDir, "dummy"])),
+    code:add_patha(OutDir),
+    code:add_patha(SdOutDir),
     code:add_path(filename:join([DbDir, "hymessage/build/dev/erlang/hymessage/ebin"])),
     code:add_path(filename:join([DbDir, "vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb/lib/hymessage_runtime-1.0.0/ebin"])),
-    case code:ensure_loaded(hydb_spec) of
-        {module, hydb_spec} -> ok;
-        _ ->
-            Src = filename:join([DbDir, "hymessage/src/hydb_spec.erl"]),
-            case compile:file(Src, [{outdir, OutDir}, return_errors]) of
-                {ok, hydb_spec} -> code:load_file(hydb_spec);
-                _ -> ok
-            end
-    end,
+    SrcSpec = filename:join([DbDir, "hymessage/src/hydb_spec.erl"]),
+    {ok, hydb_spec} = compile:file(SrcSpec, [{outdir, OutDir}, return_errors]),
+    code:load_file(hydb_spec),
+    SrcHot = filename:join([DbDir, "hymessage/src/hymessage_runtime.erl"]),
+    {ok, hymessage_runtime} = compile:file(SrcHot, [{outdir, OutDir}, return_errors]),
+    code:load_file(hymessage_runtime),
+    SrcSd = filename:join([DbDir, "sd/src/sd_runtime.erl"]),
+    {ok, sd_runtime} = compile:file(SrcSd, [{outdir, SdOutDir}, return_errors]),
+    code:load_file(sd_runtime),
 
     %% 1. Value encodings
     Int64Enc = binary:encode_hex(hydb_spec:encode_value({int64, 42})),
@@ -177,6 +180,17 @@ run_action(<<"all">>) ->
     },
     Ev4Hash = hydb_spec:event_hash(Ev4),
 
+    %% Production Write/Replay Event Hashing (Hot Node & SD Worker)
+    SdEv1Hash = sd_runtime:compute_canonical_event_hash(Ev1),
+    SdEv2Hash = sd_runtime:compute_canonical_event_hash(Ev2),
+    SdEv3Hash = sd_runtime:compute_canonical_event_hash(Ev3),
+    SdEv4Hash = sd_runtime:compute_canonical_event_hash(Ev4),
+
+    HotEv1Hash = hymessage_runtime:compute_canonical_event_hash(Ev1),
+    HotEv2Hash = hymessage_runtime:compute_canonical_event_hash(Ev2),
+    HotEv3Hash = hymessage_runtime:compute_canonical_event_hash(Ev3),
+    HotEv4Hash = hymessage_runtime:compute_canonical_event_hash(Ev4),
+
     %% 4. State Commitment
     SchemasState = [
         {<<"finance.balances">>, <<"1.0.0">>, 1, ValidManifestHash},
@@ -200,6 +214,8 @@ run_action(<<"all">>) ->
         "\"valid_manifest_hash\":\"~s\",\"doc_manifest_hash\":\"~s\","
         "\"bad_ns_error\":\"~s\",\"bad_cap_error\":\"~s\",\"bad_type_error\":\"~s\","
         "\"ev1_hash\":\"~s\",\"ev2_hash\":\"~s\",\"ev3_hash\":\"~s\",\"ev4_hash\":\"~s\","
+        "\"sd_ev1_hash\":\"~s\",\"sd_ev2_hash\":\"~s\",\"sd_ev3_hash\":\"~s\",\"sd_ev4_hash\":\"~s\","
+        "\"hot_ev1_hash\":\"~s\",\"hot_ev2_hash\":\"~s\",\"hot_ev3_hash\":\"~s\",\"hot_ev4_hash\":\"~s\","
         "\"state_commitment\":\"~s\"}",
         [
             Int64Enc, Int64MinEnc, Int64MaxEnc,
@@ -208,6 +224,8 @@ run_action(<<"all">>) ->
             ValidManifestHash, DocManifestHash,
             BadNsRes, BadCapRes, BadTypeRes,
             Ev1Hash, Ev2Hash, Ev3Hash, Ev4Hash,
+            SdEv1Hash, SdEv2Hash, SdEv3Hash, SdEv4Hash,
+            HotEv1Hash, HotEv2Hash, HotEv3Hash, HotEv4Hash,
             CommitmentHex
         ]
     ),

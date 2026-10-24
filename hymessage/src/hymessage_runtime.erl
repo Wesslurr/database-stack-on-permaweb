@@ -5,7 +5,9 @@
 -export([join/1, sync_events/1, replay/1, promote_epoch/1]).
 -export([db_put/3, db_put/4, db_get/1, db_del/2, db_del/3, db_snapshot/0, db_restore/0]).
 -export([submit_from_req/3, get_state_from_req/3, reset_from_req/3, join_from_req/3, sync_from_req/3, replay_from_req/3, promote_from_req/3]).
--export([put_from_req/3, get_from_req/3, del_from_req/3, exists_from_req/3, schema_from_req/3, scan_from_req/3, snapshot_from_req/3, restore_from_req/3]).
+-export([put_from_req/3, get_from_req/3, del_from_req/3, exists_from_req/3, schema_from_req/3, scan_from_req/3, snapshot_from_req/3, restore_from_req/3, cluster_membership_from_req/3]).
+-export([compute_event_hash/2, compute_canonical_event_hash/1, compute_canonical_event_hash/2, compute_legacy_event_hash/2]).
+-export([get_cluster_membership/0, set_cluster_membership/1, set_cluster_membership/2, get_configured_cluster_size/0, get_configured_cluster_members/0, is_quorum_satisfied/2, is_quorum_satisfied/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -record(state, {
@@ -58,6 +60,19 @@ replay(Events) when is_list(Events) ->
 promote_epoch(NewEpoch) when is_integer(NewEpoch) ->
     ensure_started(),
     gen_server:call(?SERVER, {promote_epoch, NewEpoch}, 5000).
+
+get_cluster_membership() ->
+    ensure_started(),
+    gen_server:call(?SERVER, get_cluster_membership, 5000).
+
+set_cluster_membership(Size) when is_integer(Size), Size > 0 ->
+    set_cluster_membership(get_configured_cluster_members(), Size);
+set_cluster_membership(Members) when is_list(Members) ->
+    set_cluster_membership(Members, max(1, length(Members))).
+
+set_cluster_membership(Members, Size) when is_list(Members), is_integer(Size), Size > 0 ->
+    ensure_started(),
+    gen_server:call(?SERVER, {set_cluster_membership, Members, Size}, 5000).
 
 db_put(Key, Val, Token) ->
     db_put(Key, Val, Token, undefined).
@@ -609,6 +624,37 @@ reset_from_req(_Base, Req, _Opts) ->
             end
     end.
 
+cluster_membership_from_req(_Base, Req, _Opts) ->
+    ensure_started(),
+    case parse_bin_field(<<"action">>, Req, <<"get">>) of
+        <<"set">> ->
+            case verify_admin_req(Req, true) of
+                ok ->
+                    NewSize = parse_opt_int_field(<<"cluster_size">>, Req),
+                    RawMembers = parse_raw_field(<<"cluster_members">>, Req, []),
+                    MembersList = if is_list(RawMembers) -> [to_bin_spec(M) || M <- RawMembers];
+                                     is_binary(RawMembers) -> [to_bin_spec(string:trim(binary_to_list(M))) || M <- binary:split(RawMembers, [<<",">>, <<" ">>], [global, trim_all])];
+                                     true -> []
+                                  end,
+                    FinalSize = case NewSize of
+                        undefined -> max(1, length(MembersList));
+                        S when is_integer(S), S > 0 -> S;
+                        _ -> max(1, length(MembersList))
+                    end,
+                    case set_cluster_membership(MembersList, FinalSize) of
+                        {ok, Res} -> Res;
+                        {error, Err} -> #{ <<"ok">> => false, <<"status">> => 400, <<"error">> => hb_util:bin(Err) }
+                    end;
+                {error, ErrMap} ->
+                    ErrMap
+            end;
+        _ ->
+            case get_cluster_membership() of
+                {ok, Res} -> Res;
+                {error, Err} -> #{ <<"ok">> => false, <<"status">> => 500, <<"error">> => hb_util:bin(Err) }
+            end
+    end.
+
 %% ============================================================================
 %% Field Parsing Utilities
 %% ============================================================================
@@ -746,7 +792,8 @@ init_ets() ->
             ets:insert(?TABLE, {history, []}),
             ets:insert(?TABLE, {last_su_ack, 0}),
             ets:insert(?TABLE, {unauthorized_tcp_rejections, 0}),
-            ets:insert(?TABLE, {last_snapshot_bytes, 0});
+            ets:insert(?TABLE, {last_snapshot_bytes, 0}),
+            init_cluster_membership_ets();
         _ -> ok
     end,
     case ets:info(?SESSIONS_TABLE) of
@@ -758,6 +805,50 @@ init_ets() ->
         undefined ->
             ets:new(hymessage_subscribers, [public, named_table, set]);
         _ -> ok
+    end.
+
+init_cluster_membership_ets() ->
+    InitialMembers = env_cluster_members(),
+    InitialSize = env_cluster_size(InitialMembers),
+    ets:insert(?TABLE, {cluster_members, InitialMembers}),
+    ets:insert(?TABLE, {cluster_size, InitialSize}).
+
+env_cluster_members() ->
+    case os:getenv("HYDB_CLUSTER_MEMBERS") of
+        false -> [];
+        "" -> [];
+        MStr -> [list_to_binary(string:trim(M)) || M <- string:lexemes(MStr, ", ")]
+    end.
+
+env_cluster_size(Members) ->
+    case os:getenv("HYDB_CLUSTER_SIZE") of
+        false -> max(1, length(Members));
+        "" -> max(1, length(Members));
+        SStr ->
+            case string:to_integer(string:trim(SStr)) of
+                {Int, _} when Int > 0 -> Int;
+                _ -> max(1, length(Members))
+            end
+    end.
+
+get_configured_cluster_size() ->
+    case ets:info(?TABLE) of
+        undefined -> env_cluster_size(env_cluster_members());
+        _ ->
+            case ets:lookup(?TABLE, cluster_size) of
+                [{cluster_size, Size}] when is_integer(Size), Size > 0 -> Size;
+                _ -> env_cluster_size(env_cluster_members())
+            end
+    end.
+
+get_configured_cluster_members() ->
+    case ets:info(?TABLE) of
+        undefined -> env_cluster_members();
+        _ ->
+            case ets:lookup(?TABLE, cluster_members) of
+                [{cluster_members, Members}] when is_list(Members) -> Members;
+                _ -> env_cluster_members()
+            end
     end.
 
 get_node_msg() ->
@@ -1018,24 +1109,33 @@ check_targeted_su_acked(Seq, TargetNodeId) when is_binary(TargetNodeId) ->
         (_) -> false
     end, Subs).
 
-is_quorum_satisfied(Seq, QuorumMode, TotalSubs) ->
+is_quorum_satisfied(Seq, QuorumMode) ->
+    ClusterSize = get_configured_cluster_size(),
+    AckedCount = count_acked_subscribers(Seq),
     case QuorumMode of
         <<"all">> ->
-            count_acked_subscribers(Seq) >= TotalSubs andalso TotalSubs > 0;
+            AckedCount >= ClusterSize andalso ClusterSize > 0;
         all ->
-            count_acked_subscribers(Seq) >= TotalSubs andalso TotalSubs > 0;
+            AckedCount >= ClusterSize andalso ClusterSize > 0;
         <<"majority">> ->
-            count_acked_subscribers(Seq) > (TotalSubs div 2) andalso TotalSubs > 0;
+            Required = (ClusterSize div 2) + 1,
+            AckedCount >= Required andalso AckedCount > 0;
         majority ->
-            count_acked_subscribers(Seq) > (TotalSubs div 2) andalso TotalSubs > 0;
+            Required = (ClusterSize div 2) + 1,
+            AckedCount >= Required andalso AckedCount > 0;
         {target, TargetId} ->
             check_targeted_su_acked(Seq, TargetId);
         <<"target:", Target/binary>> ->
             check_targeted_su_acked(Seq, Target);
         _ ->
             %% Default "single": at least 1 SU ACK
-            count_acked_subscribers(Seq) >= 1
+            AckedCount >= 1
     end.
+
+is_quorum_satisfied(Seq, QuorumMode, _LegacyTotalSubs) ->
+    %% Quorum is strictly anchored to configured cluster membership (get_configured_cluster_size()),
+    %% never dynamically shrinking when subscriber sockets close or drop.
+    is_quorum_satisfied(Seq, QuorumMode).
 
 await_su_ack(Seq, QuorumMode, TotalSubs, TimeoutMs) ->
     T0 = os:perf_counter(millisecond),
@@ -1187,6 +1287,210 @@ build_event_hash(PrevHash, Seq, OpCode, Namespace, Key, ValType, CanonicalValBin
             [PrevHash, integer_to_binary(Seq), <<"20">>, Namespace, <<":">>, KeyBin, <<":">>, CanonicalValBin]
     end,
     binary:encode_hex(crypto:hash(sha256, Payload)).
+
+compute_event_hash(Event, LastHash) ->
+    GivenHash = maps:get(<<"hash">>, Event, maps:get(hash, Event, <<>>)),
+    CanonicalHash = compute_canonical_event_hash(Event, LastHash),
+    case GivenHash of
+        CanonicalHash ->
+            CanonicalHash;
+        _ ->
+            LegacyHash = compute_legacy_event_hash(Event, LastHash),
+            case GivenHash of
+                LegacyHash ->
+                    LegacyHash;
+                _ ->
+                    CanonicalHash
+            end
+    end.
+
+compute_canonical_event_hash(Event) when is_map(Event) ->
+    LastHash = maps:get(prev_hash, Event, maps:get(<<"prev_hash">>, Event, ?GENESIS_HASH)),
+    compute_canonical_event_hash(Event, LastHash).
+
+compute_canonical_event_hash(Event, LastHash) when is_map(Event) ->
+    ContractVsn = maps:get(contract_version, Event, maps:get(<<"contract_version">>, Event, <<"hydb.core@1.0">>)),
+    PrevHashHex = maps:get(prev_hash, Event, maps:get(<<"prev_hash">>, Event, LastHash)),
+    PrevHashBin = hex_to_bin_32(PrevHashHex),
+    Epoch = to_int_spec(maps:get(epoch, Event, maps:get(<<"epoch">>, Event, 1))),
+    Seq = to_int_spec(maps:get(seq, Event, maps:get(<<"seq">>, Event, 1))),
+    RawOp = maps:get(op, Event, maps:get(<<"op">>, Event, maps:get(action, Event, maps:get(<<"action">>, Event, <<"put">>)))),
+    Op = case RawOp of
+        <<"register_schema">> -> <<"register">>;
+        register_schema -> <<"register">>;
+        OtherOp -> to_bin_spec(OtherOp)
+    end,
+    Ns = to_bin_spec(maps:get(namespace, Event, maps:get(<<"namespace">>, Event, <<"default">>))),
+    SchemaVsn = to_bin_spec(maps:get(schema_version, Event, maps:get(<<"schema_version">>, Event, <<"1.0.0">>))),
+    RawKey = maps:get(key, Event, maps:get(<<"key">>, Event, absent)),
+    NormKey = normalize_key_spec(RawKey, Op),
+    ValType = to_bin_spec(maps:get(value_type, Event, maps:get(<<"val_type">>, Event, maps:get(<<"value_type">>, Event, maps:get(val_type, Event, <<"int64">>))))),
+    RawVal = maps:get(value, Event, maps:get(<<"val">>, Event, maps:get(val, Event, maps:get(<<"value">>, Event, absent)))),
+    NormVal = normalize_val_spec(RawVal, ValType, Op),
+    Ver = to_int_spec(maps:get(ver, Event, maps:get(<<"ver">>, Event, 1))),
+
+    FrameHeader = <<"HYDBE", 1>>,
+    Bytes = iolist_to_binary([
+        FrameHeader,
+        encode_spec_val({string, to_bin_spec(ContractVsn)}),
+        encode_spec_val({bytes, PrevHashBin}),
+        encode_spec_val({int64, Epoch}),
+        encode_spec_val({int64, Seq}),
+        encode_spec_val({string, Op}),
+        encode_spec_val({string, Ns}),
+        encode_spec_val({string, SchemaVsn}),
+        encode_spec_val(NormKey),
+        encode_spec_val({string, ValType}),
+        encode_spec_val(NormVal),
+        encode_spec_val({int64, Ver})
+    ]),
+    binary:encode_hex(crypto:hash(sha256, Bytes)).
+
+hex_to_bin_32(Hex) when is_binary(Hex), byte_size(Hex) =:= 64 ->
+    try binary:decode_hex(Hex) catch _:_ -> <<0:256>> end;
+hex_to_bin_32(Bin) when is_binary(Bin), byte_size(Bin) =:= 32 ->
+    Bin;
+hex_to_bin_32(_) ->
+    <<0:256>>.
+
+to_int_spec(I) when is_integer(I) -> I;
+to_int_spec(B) when is_binary(B) ->
+    try binary_to_integer(B) catch _:_ -> 0 end;
+to_int_spec(L) when is_list(L) ->
+    try list_to_integer(L) catch _:_ -> 0 end;
+to_int_spec(_) -> 0.
+
+to_bin_spec(B) when is_binary(B) -> B;
+to_bin_spec(A) when is_atom(A) -> atom_to_binary(A, utf8);
+to_bin_spec(L) when is_list(L) -> list_to_binary(L);
+to_bin_spec(I) when is_integer(I) -> integer_to_binary(I);
+to_bin_spec(_) -> <<>>.
+
+normalize_key_spec(absent, _) -> absent;
+normalize_key_spec(undefined, _) -> absent;
+normalize_key_spec(_, <<"register">>) -> absent;
+normalize_key_spec({int64, I}, _) -> {int64, I};
+normalize_key_spec({string, S}, _) -> {string, S};
+normalize_key_spec(I, _) when is_integer(I) -> {int64, I};
+normalize_key_spec(S, _) when is_binary(S) ->
+    case S of
+        <<"__schema__">> -> absent;
+        _ -> {string, S}
+    end;
+normalize_key_spec(Other, _) -> Other.
+
+normalize_val_spec(absent, _, _) -> absent;
+normalize_val_spec(undefined, _, _) -> absent;
+normalize_val_spec(_, _, <<"del">>) -> absent;
+normalize_val_spec({int64, I}, _, _) -> {int64, I};
+normalize_val_spec({bool, B}, _, _) -> {bool, B};
+normalize_val_spec({string, S}, _, _) -> {string, S};
+normalize_val_spec({object, O}, _, _) -> {object, O};
+normalize_val_spec({array, A}, _, _) -> {array, A};
+normalize_val_spec(I, <<"int64">>, _) when is_integer(I) -> {int64, I};
+normalize_val_spec(B, <<"bool">>, _) when is_boolean(B) -> {bool, B};
+normalize_val_spec(S, <<"string">>, _) when is_binary(S) -> {string, S};
+normalize_val_spec(Map, <<"schema">>, _) when is_map(Map) ->
+    schema_map_to_h(Map);
+normalize_val_spec(Other, _, _) -> Other.
+
+schema_map_to_h(Schema) when is_map(Schema) ->
+    case code:ensure_loaded(hydb_spec) of
+        {module, hydb_spec} ->
+            hydb_spec:schema_to_h(Schema);
+        _ ->
+            Backend = maps:get(<<"backend">>, Schema, maps:get(backend, Schema, <<"ets_doc">>)),
+            KeyType = maps:get(<<"key_type">>, Schema, maps:get(key_type, Schema, <<"string">>)),
+            Ns = maps:get(<<"namespace">>, Schema, maps:get(namespace, Schema, <<"default">>)),
+            RequireAuth = maps:get(<<"require_auth">>, Schema, maps:get(require_auth, Schema, false)),
+            Requires = maps:get(<<"requires">>, Schema, maps:get(requires, Schema, [])),
+            Rules = maps:get(<<"rules">>, Schema, maps:get(rules, Schema, #{})),
+            SchemaVsn = maps:get(<<"schema_version">>, Schema, maps:get(schema_version, Schema, <<"1.0.0">>)),
+            ValType = maps:get(<<"value_type">>, Schema, maps:get(value_type, Schema, <<"int64">>)),
+            ReqSorted = lists:sort([to_bin_spec(R) || R <- Requires]),
+            RulesEntries = lists:map(fun({RK, RV}) ->
+                RKBin = to_bin_spec(RK),
+                RVEnc = if is_integer(RV) -> {int64, RV};
+                           is_boolean(RV) -> {bool, RV};
+                           is_binary(RV) -> {string, RV};
+                           true -> RV
+                        end,
+                {RKBin, RVEnc}
+            end, maps:to_list(Rules)),
+            {object, [
+                {<<"backend">>, {string, to_bin_spec(Backend)}},
+                {<<"key_type">>, {string, to_bin_spec(KeyType)}},
+                {<<"namespace">>, {string, to_bin_spec(Ns)}},
+                {<<"require_auth">>, {bool, RequireAuth}},
+                {<<"requires">>, {array, [{string, R} || R <- ReqSorted]}},
+                {<<"rules">>, {object, RulesEntries}},
+                {<<"schema_version">>, {string, to_bin_spec(SchemaVsn)}},
+                {<<"value_type">>, {string, to_bin_spec(ValType)}}
+            ]}
+    end.
+
+encode_spec_val(absent) -> <<8>>;
+encode_spec_val(undefined) -> <<8>>;
+encode_spec_val(null) -> <<5>>;
+encode_spec_val({null}) -> <<5>>;
+encode_spec_val({int64, Val}) when is_integer(Val) ->
+    <<1, Val:64/big-signed-integer>>;
+encode_spec_val({bool, true}) ->
+    <<2, 1>>;
+encode_spec_val({bool, false}) ->
+    <<2, 0>>;
+encode_spec_val({string, Str}) when is_binary(Str) ->
+    Len = byte_size(Str),
+    <<3, Len:32/big-unsigned-integer, Str/binary>>;
+encode_spec_val({bytes, Bin}) when is_binary(Bin) ->
+    Len = byte_size(Bin),
+    <<4, Len:32/big-unsigned-integer, Bin/binary>>;
+encode_spec_val({array, Elements}) when is_list(Elements) ->
+    Count = length(Elements),
+    EncodedElems = [encode_spec_val(El) || El <- Elements],
+    iolist_to_binary([<<6, Count:32/big-unsigned-integer>>, EncodedElems]);
+encode_spec_val({object, Pairs}) when is_list(Pairs) ->
+    Sorted = lists:sort(fun({K1, _}, {K2, _}) ->
+        to_bin_spec(K1) =< to_bin_spec(K2)
+    end, Pairs),
+    Count = length(Sorted),
+    EncodedEntries = lists:map(fun({K, V}) ->
+        KBin = to_bin_spec(K),
+        KLen = byte_size(KBin),
+        VEnc = encode_spec_val(V),
+        <<KLen:32/big-unsigned-integer, KBin/binary, VEnc/binary>>
+    end, Sorted),
+    iolist_to_binary([<<7, Count:32/big-unsigned-integer>>, EncodedEntries]);
+encode_spec_val(Map) when is_map(Map) ->
+    encode_spec_val({object, maps:to_list(Map)});
+encode_spec_val(I) when is_integer(I) ->
+    encode_spec_val({int64, I});
+encode_spec_val(B) when is_boolean(B) ->
+    encode_spec_val({bool, B});
+encode_spec_val(S) when is_binary(S) ->
+    encode_spec_val({string, S}).
+
+compute_legacy_event_hash(Event, LastHash) ->
+    Seq = to_integer(maps:get(<<"seq">>, Event, maps:get(seq, Event, 0)), 0),
+    Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, maps:get(action, Event, maps:get(op, Event, <<"put">>)))),
+    Namespace = to_bin_spec(maps:get(<<"namespace">>, Event, maps:get(namespace, Event, <<"default">>))),
+    ValType = to_bin_spec(maps:get(<<"val_type">>, Event, maps:get(val_type, Event, maps:get(value_type, Event, <<"int64">>)))),
+    RawKey = maps:get(<<"key">>, Event, maps:get(key, Event, 1)),
+    RawVal = maps:get(<<"val">>, Event, maps:get(val, Event, maps:get(value, Event, 0))),
+    CanonicalValBin = maps:get(<<"canonical_val">>, Event,
+        if is_integer(RawVal) -> integer_to_binary(RawVal);
+           is_binary(RawVal) -> RawVal;
+           true -> <<"0">>
+        end),
+    OpCode = case Op of
+        <<"register_schema">> -> <<"24">>;
+        <<"register">> -> <<"24">>;
+        register -> <<"24">>;
+        <<"del">> -> <<"22">>;
+        del -> <<"22">>;
+        _ -> <<"20">>
+    end,
+    build_event_hash(LastHash, Seq, OpCode, Namespace, RawKey, ValType, CanonicalValBin).
 
 %% ============================================================================
 %% GenServer Callbacks
@@ -2064,6 +2368,38 @@ handle_call({replay, Events}, _From, State = #state{wasm_base = WasmBase, node_m
     },
     {reply, {ok, Result}, State};
 
+handle_call(get_cluster_membership, _From, State) ->
+    Members = get_configured_cluster_members(),
+    Size = get_configured_cluster_size(),
+    ActiveSubscribers = case ets:info(hymessage_subscribers) of
+        undefined -> 0;
+        _ -> length(ets:tab2list(hymessage_subscribers))
+    end,
+    Result = #{
+        <<"ok">> => true,
+        <<"cluster_size">> => Size,
+        <<"cluster_members">> => Members,
+        <<"active_subscribers">> => ActiveSubscribers,
+        <<"majority_threshold">> => (Size div 2) + 1
+    },
+    {reply, {ok, Result}, State};
+
+handle_call({set_cluster_membership, Members, Size}, _From, State) ->
+    ets:insert(?TABLE, {cluster_members, Members}),
+    ets:insert(?TABLE, {cluster_size, Size}),
+    ActiveSubscribers = case ets:info(hymessage_subscribers) of
+        undefined -> 0;
+        _ -> length(ets:tab2list(hymessage_subscribers))
+    end,
+    Result = #{
+        <<"ok">> => true,
+        <<"cluster_size">> => Size,
+        <<"cluster_members">> => Members,
+        <<"active_subscribers">> => ActiveSubscribers,
+        <<"majority_threshold">> => (Size div 2) + 1
+    },
+    {reply, {ok, Result}, State};
+
 handle_call(reset, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMsg}) ->
     ets:insert(?TABLE, {epoch, 1}),
     ets:insert(?TABLE, {seq, 0}),
@@ -2072,6 +2408,7 @@ handle_call(reset, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMs
     ets:insert(?TABLE, {wasm_root, 0}),
     ets:insert(?TABLE, {default_wasm_root, 0}),
     ets:insert(?TABLE, {admin_locked, false}),
+    init_cluster_membership_ets(),
     ets:match_delete(?TABLE, {{ns_wasm_base, '_'}, '_'}),
     ets:match_delete(?TABLE, {{ns_wasm_root, '_'}, '_'}),
     ets:match_delete(?TABLE, {{ver, '_', '_'}, '_'}),

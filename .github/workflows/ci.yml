@@ -52,6 +52,9 @@ jobs:
       - name: Run Phase 02 WAL Recovery & Data Integrity Tests
         run: npm run test:recovery
 
+      - name: Run Phase 03 Canonical Hash & Fixed Quorum Tests
+        run: npm run test:quorum
+
       - name: Run Cross-Language Conformance Suite (JS, Erlang, Rust, Lua)
         run: npm run test:conformance
 

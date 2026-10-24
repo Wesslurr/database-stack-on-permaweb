@@ -247,6 +247,9 @@ spec.applyEvent(st, ev1);
 
 assertEq(erl.ev1_hash, ev1.hash, 'Ev1 (Register) Hash JS == Erlang');
 assertEq(lua.ev1_hash, ev1.hash, 'Ev1 (Register) Hash JS == Lua');
+assertEq(ev1.hash, golden.events.ev1_register_hash, 'Golden Vector: Ev1 (Register) Hash');
+assertEq(erl.sd_ev1_hash, golden.events.ev1_register_hash, 'Production SD Worker Ev1 Hash == Golden Vector');
+assertEq(erl.hot_ev1_hash, golden.events.ev1_register_hash, 'Production Hot Node Ev1 Hash == Golden Vector');
 
 // Verify unauthenticated write rejection
 let unauthRejected = false;
@@ -270,6 +273,9 @@ spec.applyEvent(st, ev2);
 
 assertEq(erl.ev2_hash, ev2.hash, 'Ev2 (Put) Hash JS == Erlang');
 assertEq(lua.ev2_hash, ev2.hash, 'Ev2 (Put) Hash JS == Lua');
+assertEq(ev2.hash, golden.events.ev2_put_hash, 'Golden Vector: Ev2 (Put) Hash');
+assertEq(erl.sd_ev2_hash, golden.events.ev2_put_hash, 'Production SD Worker Ev2 Hash == Golden Vector');
+assertEq(erl.hot_ev2_hash, golden.events.ev2_put_hash, 'Production Hot Node Ev2 Hash == Golden Vector');
 
 const ev3Draft = spec.prepareOp(st, { op: 'del', namespace: 'finance.balances', key: 1001, authorized: true });
 const ev3 = {
@@ -284,6 +290,9 @@ spec.applyEvent(st, ev3);
 
 assertEq(erl.ev3_hash, ev3.hash, 'Ev3 (Del) Hash JS == Erlang');
 assertEq(lua.ev3_hash, ev3.hash, 'Ev3 (Del) Hash JS == Lua');
+assertEq(ev3.hash, golden.events.ev3_del_hash, 'Golden Vector: Ev3 (Del) Hash');
+assertEq(erl.sd_ev3_hash, golden.events.ev3_del_hash, 'Production SD Worker Ev3 Hash == Golden Vector');
+assertEq(erl.hot_ev3_hash, golden.events.ev3_del_hash, 'Production Hot Node Ev3 Hash == Golden Vector');
 
 const ev4Draft = spec.prepareOp(st, { op: 'put', namespace: 'finance.balances', key: 1001, value: 75000, authorized: true });
 const ev4 = {
@@ -298,6 +307,9 @@ spec.applyEvent(st, ev4);
 
 assertEq(erl.ev4_hash, ev4.hash, 'Ev4 (Put on Tombstone) Hash JS == Erlang');
 assertEq(lua.ev4_hash, ev4.hash, 'Ev4 (Put on Tombstone) Hash JS == Lua');
+assertEq(ev4.hash, golden.events.ev4_reput_hash, 'Golden Vector: Ev4 (Put on Tombstone) Hash');
+assertEq(erl.sd_ev4_hash, golden.events.ev4_reput_hash, 'Production SD Worker Ev4 Hash == Golden Vector');
+assertEq(erl.hot_ev4_hash, golden.events.ev4_reput_hash, 'Production Hot Node Ev4 Hash == Golden Vector');
 
 // Record version must be 3 (1 -> 2 on del -> 3 on re-insert)
 assertEq(ev4.ver, 3n, 'Record version monotonically incremented across delete -> reinsert');

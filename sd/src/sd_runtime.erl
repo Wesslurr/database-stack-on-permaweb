@@ -16,6 +16,7 @@
 -export([get_tick/0, get_state/0, get_key/1, get_wal/0, get_wal_batch/2, get_status/0, get_status_map/0, fence_epoch/1, recover_wal/0, simulate_restart_from_wal/0]).
 -export([get_tick_from_req/3, get_state_from_req/3, get_key_from_req/3, get_wal_from_req/3, get_wal_batch_from_req/3, get_status_from_req/3, reset_from_req/3, fence_from_req/3, restart_from_req/3, handle_scheduler_http/4]).
 -export([verify_admin_req/1, is_test_profile/0, is_degraded/0, canonical_hash_64/3]).
+-export([compute_event_hash/2, compute_canonical_event_hash/1, compute_canonical_event_hash/2, compute_legacy_event_hash/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TABLE, sd_ram_store).
@@ -912,16 +913,198 @@ handle_incoming_event(Socket, RawData) ->
     end.
 
 compute_event_hash(Event, LastHash) ->
-    Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
-    Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, <<"put">>)),
-    Namespace = maps:get(<<"namespace">>, Event, <<"default">>),
-    ValType = maps:get(<<"val_type">>, Event, <<"int64">>),
-    RawKey = maps:get(<<"key">>, Event, 1),
+    GivenHash = maps:get(<<"hash">>, Event, maps:get(hash, Event, <<>>)),
+    CanonicalHash = compute_canonical_event_hash(Event, LastHash),
+    case GivenHash of
+        CanonicalHash ->
+            CanonicalHash;
+        _ ->
+            LegacyHash = compute_legacy_event_hash(Event, LastHash),
+            case GivenHash of
+                LegacyHash ->
+                    LegacyHash;
+                _ ->
+                    CanonicalHash
+            end
+    end.
+
+compute_canonical_event_hash(Event) when is_map(Event) ->
+    LastHash = maps:get(prev_hash, Event, maps:get(<<"prev_hash">>, Event, ?GENESIS_HASH)),
+    compute_canonical_event_hash(Event, LastHash).
+
+compute_canonical_event_hash(Event, LastHash) when is_map(Event) ->
+    ContractVsn = maps:get(contract_version, Event, maps:get(<<"contract_version">>, Event, <<"hydb.core@1.0">>)),
+    PrevHashHex = maps:get(prev_hash, Event, maps:get(<<"prev_hash">>, Event, LastHash)),
+    PrevHashBin = hex_to_bin_32(PrevHashHex),
+    Epoch = to_int_spec(maps:get(epoch, Event, maps:get(<<"epoch">>, Event, 1))),
+    Seq = to_int_spec(maps:get(seq, Event, maps:get(<<"seq">>, Event, 1))),
+    RawOp = maps:get(op, Event, maps:get(<<"op">>, Event, maps:get(action, Event, maps:get(<<"action">>, Event, <<"put">>)))),
+    Op = case RawOp of
+        <<"register_schema">> -> <<"register">>;
+        register_schema -> <<"register">>;
+        OtherOp -> to_bin_spec(OtherOp)
+    end,
+    Ns = to_bin_spec(maps:get(namespace, Event, maps:get(<<"namespace">>, Event, <<"default">>))),
+    SchemaVsn = to_bin_spec(maps:get(schema_version, Event, maps:get(<<"schema_version">>, Event, <<"1.0.0">>))),
+    RawKey = maps:get(key, Event, maps:get(<<"key">>, Event, absent)),
+    NormKey = normalize_key_spec(RawKey, Op),
+    ValType = to_bin_spec(maps:get(value_type, Event, maps:get(<<"val_type">>, Event, maps:get(<<"value_type">>, Event, maps:get(val_type, Event, <<"int64">>))))),
+    RawVal = maps:get(value, Event, maps:get(<<"val">>, Event, maps:get(val, Event, maps:get(<<"value">>, Event, absent)))),
+    NormVal = normalize_val_spec(RawVal, ValType, Op),
+    Ver = to_int_spec(maps:get(ver, Event, maps:get(<<"ver">>, Event, 1))),
+
+    FrameHeader = <<"HYDBE", 1>>,
+    Bytes = iolist_to_binary([
+        FrameHeader,
+        encode_spec_val({string, to_bin_spec(ContractVsn)}),
+        encode_spec_val({bytes, PrevHashBin}),
+        encode_spec_val({int64, Epoch}),
+        encode_spec_val({int64, Seq}),
+        encode_spec_val({string, Op}),
+        encode_spec_val({string, Ns}),
+        encode_spec_val({string, SchemaVsn}),
+        encode_spec_val(NormKey),
+        encode_spec_val({string, ValType}),
+        encode_spec_val(NormVal),
+        encode_spec_val({int64, Ver})
+    ]),
+    binary:encode_hex(crypto:hash(sha256, Bytes)).
+
+hex_to_bin_32(Hex) when is_binary(Hex), byte_size(Hex) =:= 64 ->
+    try binary:decode_hex(Hex) catch _:_ -> <<0:256>> end;
+hex_to_bin_32(Bin) when is_binary(Bin), byte_size(Bin) =:= 32 ->
+    Bin;
+hex_to_bin_32(_) ->
+    <<0:256>>.
+
+to_int_spec(I) when is_integer(I) -> I;
+to_int_spec(B) when is_binary(B) ->
+    try binary_to_integer(B) catch _:_ -> 0 end;
+to_int_spec(L) when is_list(L) ->
+    try list_to_integer(L) catch _:_ -> 0 end;
+to_int_spec(_) -> 0.
+
+to_bin_spec(B) when is_binary(B) -> B;
+to_bin_spec(A) when is_atom(A) -> atom_to_binary(A, utf8);
+to_bin_spec(L) when is_list(L) -> list_to_binary(L);
+to_bin_spec(I) when is_integer(I) -> integer_to_binary(I);
+to_bin_spec(_) -> <<>>.
+
+normalize_key_spec(absent, _) -> absent;
+normalize_key_spec(undefined, _) -> absent;
+normalize_key_spec(_, <<"register">>) -> absent;
+normalize_key_spec({int64, I}, _) -> {int64, I};
+normalize_key_spec({string, S}, _) -> {string, S};
+normalize_key_spec(I, _) when is_integer(I) -> {int64, I};
+normalize_key_spec(S, _) when is_binary(S) ->
+    case S of
+        <<"__schema__">> -> absent;
+        _ -> {string, S}
+    end;
+normalize_key_spec(Other, _) -> Other.
+
+normalize_val_spec(absent, _, _) -> absent;
+normalize_val_spec(undefined, _, _) -> absent;
+normalize_val_spec(_, _, <<"del">>) -> absent;
+normalize_val_spec({int64, I}, _, _) -> {int64, I};
+normalize_val_spec({bool, B}, _, _) -> {bool, B};
+normalize_val_spec({string, S}, _, _) -> {string, S};
+normalize_val_spec({object, O}, _, _) -> {object, O};
+normalize_val_spec({array, A}, _, _) -> {array, A};
+normalize_val_spec(I, <<"int64">>, _) when is_integer(I) -> {int64, I};
+normalize_val_spec(B, <<"bool">>, _) when is_boolean(B) -> {bool, B};
+normalize_val_spec(S, <<"string">>, _) when is_binary(S) -> {string, S};
+normalize_val_spec(Map, <<"schema">>, _) when is_map(Map) ->
+    schema_map_to_h(Map);
+normalize_val_spec(Other, _, _) -> Other.
+
+schema_map_to_h(Schema) when is_map(Schema) ->
+    case code:ensure_loaded(hydb_spec) of
+        {module, hydb_spec} ->
+            hydb_spec:schema_to_h(Schema);
+        _ ->
+            Backend = maps:get(<<"backend">>, Schema, maps:get(backend, Schema, <<"ets_doc">>)),
+            KeyType = maps:get(<<"key_type">>, Schema, maps:get(key_type, Schema, <<"string">>)),
+            Ns = maps:get(<<"namespace">>, Schema, maps:get(namespace, Schema, <<"default">>)),
+            RequireAuth = maps:get(<<"require_auth">>, Schema, maps:get(require_auth, Schema, false)),
+            Requires = maps:get(<<"requires">>, Schema, maps:get(requires, Schema, [])),
+            Rules = maps:get(<<"rules">>, Schema, maps:get(rules, Schema, #{})),
+            SchemaVsn = maps:get(<<"schema_version">>, Schema, maps:get(schema_version, Schema, <<"1.0.0">>)),
+            ValType = maps:get(<<"value_type">>, Schema, maps:get(value_type, Schema, <<"int64">>)),
+            ReqSorted = lists:sort([to_bin_spec(R) || R <- Requires]),
+            RulesEntries = lists:map(fun({RK, RV}) ->
+                RKBin = to_bin_spec(RK),
+                RVEnc = if is_integer(RV) -> {int64, RV};
+                           is_boolean(RV) -> {bool, RV};
+                           is_binary(RV) -> {string, RV};
+                           true -> RV
+                        end,
+                {RKBin, RVEnc}
+            end, maps:to_list(Rules)),
+            {object, [
+                {<<"backend">>, {string, to_bin_spec(Backend)}},
+                {<<"key_type">>, {string, to_bin_spec(KeyType)}},
+                {<<"namespace">>, {string, to_bin_spec(Ns)}},
+                {<<"require_auth">>, {bool, RequireAuth}},
+                {<<"requires">>, {array, [{string, R} || R <- ReqSorted]}},
+                {<<"rules">>, {object, RulesEntries}},
+                {<<"schema_version">>, {string, to_bin_spec(SchemaVsn)}},
+                {<<"value_type">>, {string, to_bin_spec(ValType)}}
+            ]}
+    end.
+
+encode_spec_val(absent) -> <<8>>;
+encode_spec_val(undefined) -> <<8>>;
+encode_spec_val(null) -> <<5>>;
+encode_spec_val({null}) -> <<5>>;
+encode_spec_val({int64, Val}) when is_integer(Val) ->
+    <<1, Val:64/big-signed-integer>>;
+encode_spec_val({bool, true}) ->
+    <<2, 1>>;
+encode_spec_val({bool, false}) ->
+    <<2, 0>>;
+encode_spec_val({string, Str}) when is_binary(Str) ->
+    Len = byte_size(Str),
+    <<3, Len:32/big-unsigned-integer, Str/binary>>;
+encode_spec_val({bytes, Bin}) when is_binary(Bin) ->
+    Len = byte_size(Bin),
+    <<4, Len:32/big-unsigned-integer, Bin/binary>>;
+encode_spec_val({array, Elements}) when is_list(Elements) ->
+    Count = length(Elements),
+    EncodedElems = [encode_spec_val(El) || El <- Elements],
+    iolist_to_binary([<<6, Count:32/big-unsigned-integer>>, EncodedElems]);
+encode_spec_val({object, Pairs}) when is_list(Pairs) ->
+    Sorted = lists:sort(fun({K1, _}, {K2, _}) ->
+        to_bin_spec(K1) =< to_bin_spec(K2)
+    end, Pairs),
+    Count = length(Sorted),
+    EncodedEntries = lists:map(fun({K, V}) ->
+        KBin = to_bin_spec(K),
+        KLen = byte_size(KBin),
+        VEnc = encode_spec_val(V),
+        <<KLen:32/big-unsigned-integer, KBin/binary, VEnc/binary>>
+    end, Sorted),
+    iolist_to_binary([<<7, Count:32/big-unsigned-integer>>, EncodedEntries]);
+encode_spec_val(Map) when is_map(Map) ->
+    encode_spec_val({object, maps:to_list(Map)});
+encode_spec_val(I) when is_integer(I) ->
+    encode_spec_val({int64, I});
+encode_spec_val(B) when is_boolean(B) ->
+    encode_spec_val({bool, B});
+encode_spec_val(S) when is_binary(S) ->
+    encode_spec_val({string, S}).
+
+compute_legacy_event_hash(Event, LastHash) ->
+    Seq = to_integer(maps:get(<<"seq">>, Event, maps:get(seq, Event, 0)), 0),
+    Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, maps:get(action, Event, maps:get(op, Event, <<"put">>)))),
+    Namespace = to_bin_spec(maps:get(<<"namespace">>, Event, maps:get(namespace, Event, <<"default">>))),
+    ValType = to_bin_spec(maps:get(<<"val_type">>, Event, maps:get(val_type, Event, maps:get(value_type, Event, <<"int64">>)))),
+    RawKey = maps:get(<<"key">>, Event, maps:get(key, Event, 1)),
     KeyBin = if is_integer(RawKey) -> integer_to_binary(RawKey);
                 is_binary(RawKey) -> RawKey;
                 true -> <<"1">>
              end,
-    RawVal = maps:get(<<"val">>, Event, 0),
+    RawVal = maps:get(<<"val">>, Event, maps:get(val, Event, maps:get(value, Event, 0))),
     CanonicalValBin = maps:get(<<"canonical_val">>, Event,
         if is_integer(RawVal) -> integer_to_binary(RawVal);
            is_binary(RawVal) -> RawVal;
@@ -929,7 +1112,10 @@ compute_event_hash(Event, LastHash) ->
         end),
     ActionCode = case Op of
         <<"register_schema">> -> <<"24">>;
+        <<"register">> -> <<"24">>;
+        register -> <<"24">>;
         <<"del">> -> <<"22">>;
+        del -> <<"22">>;
         _ -> <<"20">>
     end,
     Payload = case {Namespace, ActionCode, ValType} of
