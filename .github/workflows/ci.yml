@@ -61,6 +61,9 @@ jobs:
       - name: Run Phase 05 Real Multi-Process Chaos & Fault-Injection Suite
         run: npm run test:chaos
 
+      - name: Run Phase 06 AO Settlement Verification & Durable Cursor Suite
+        run: npm run test:committer
+
       - name: Run Cross-Language Conformance Suite (JS, Erlang, Rust, Lua)
         run: npm run test:conformance
 

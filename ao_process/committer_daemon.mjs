@@ -1,31 +1,35 @@
 #!/usr/bin/env node
 /**
- * Autonomous Background Committer Daemon — Lapisan 4 / AO Bridge
- * ==============================================================
- * Continuously monitors the Storage Unit for newly durably committed sequences,
- * automatically packages them into signed Checkpoint Batches, and anchors
- * them to the decentralized AO Process on Arweave.
- *
- * Runs completely decoupled and independently as a standalone service / sidecar.
- *
- * Configuration (Environment or CLI arguments):
- *   SU_URL / --su-url            Storage Unit URL (default: http://127.0.0.1:8735/~scheduler@1.0)
- *   HOT_URL / --hot-url          Hot Node URL (default: http://127.0.0.1:8734/~hymessage@1.0)
- *   ARWEAVE_GATEWAY / --gateway  Arweave Gateway URL (default: http://127.0.0.1:1984)
- *   INTERVAL_MS / --interval     Polling interval in milliseconds (default: 3000)
- *   BATCH_MAX / --batch-max      Maximum events per batch (default: 100)
- *   ONCE / --once                Run a single check & commit cycle and exit
+ * Autonomous Background Committer Daemon — Lapisan 4 / AO Bridge (Phase 06)
+ * =========================================================================
+ * Normative Guarantees (Phase 06):
+ * 1. Durable Cursor Persistence:
+ *    - Persists `last_committed_seq`, `last_committed_hash`, `last_state_root`,
+ *      `epoch`, and `last_batch_id` atomically to disk (`HYDB_COMMITTER_CURSOR_PATH`).
+ *    - Never blindly assumes `lastCommittedSeq = 0` on daemon restart.
+ * 2. Startup Reconciliation with AO Official Checkpoint State:
+ *    - Reconciles disk cursor with `GetOfficialState` on the AO Arbitrator process
+ *      upon startup or recovery (`Math.max(diskCursor.last_committed_seq, officialSeq)`).
+ * 3. Strict Verification Gate Before Cursor Advancement:
+ *    - Only advances `lastCommittedSeq` when `commitCheckpointBatch` returns
+ *      `verified: true` (verdict `COMMITTED` or `DUPLICATE_BATCH_IDEMPOTENT`).
+ *    - If settlement status is `submitted` (`evaluation_status: "pending"` / `"unknown"`)
+ *      or `rejected`, the cursor is NOT advanced, preserving batch retry safety.
+ * 4. Idempotent Batch Retry:
+ *    - Retries use deterministic `(from_seq, to_seq, proposed_hash)` batch identity.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve, join } from 'node:path';
+import { dirname, resolve, join, basename } from 'node:path';
 import crypto from 'node:crypto';
-import { commitCheckpointBatch, getOrCreateProcessId } from './committer.mjs';
+import { commitCheckpointBatch, computeBatchId, queryOfficialAoState } from './committer.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
 const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
+const DEFAULT_CURSOR_PATH =
+  process.env.HYDB_COMMITTER_CURSOR_PATH || join(DB_DIR, 'ao_process/committer_cursor.json');
 
 const args = process.argv.slice(2);
 function getArg(flag, envKey, def) {
@@ -35,12 +39,11 @@ function getArg(flag, envKey, def) {
 }
 
 const SU_SCHEDULER_URL = getArg('--su-url', 'SU_URL', 'http://127.0.0.1:8735/~scheduler@1.0');
-const HOT_URL = getArg('--hot-url', 'HOT_URL', 'http://127.0.0.1:8734/~hymessage@1.0');
 const INTERVAL_MS = parseInt(getArg('--interval', 'INTERVAL_MS', '3000'), 10);
 const BATCH_MAX = parseInt(getArg('--batch-max', 'BATCH_MAX', '100'), 10);
 const RUN_ONCE = args.includes('--once') || process.env.ONCE === 'true';
 
-let lastCommittedSeq = 0;
+let lastCommittedSeq = null; // Loaded durably or reconciled before first cycle
 let isRunning = true;
 
 async function httpFetch(url) {
@@ -57,9 +60,102 @@ async function httpFetch(url) {
   }
 }
 
-function computeBatchSig(batch, secretKey) {
+export function loadDurableCursor(cursorPath = DEFAULT_CURSOR_PATH) {
+  if (!existsSync(cursorPath)) {
+    return {
+      last_committed_seq: 0,
+      last_committed_hash: '0000000000000000000000000000000000000000000000000000000000000000',
+      last_state_root: '0',
+      epoch: 1,
+      last_batch_id: null,
+      source: 'default_genesis'
+    };
+  }
+  try {
+    const raw = JSON.parse(readFileSync(cursorPath, 'utf-8'));
+    const seq = Number(raw.last_committed_seq ?? 0);
+    if (!Number.isInteger(seq) || seq < 0) {
+      throw new Error(`Invalid last_committed_seq in cursor file: ${raw.last_committed_seq}`);
+    }
+    return {
+      last_committed_seq: seq,
+      last_committed_hash: String(raw.last_committed_hash || ''),
+      last_state_root: String(raw.last_state_root || '0'),
+      epoch: Number(raw.epoch || 1),
+      last_batch_id: raw.last_batch_id || null,
+      updated_at: raw.updated_at || null,
+      source: 'disk_cursor'
+    };
+  } catch (err) {
+    throw new Error(`Corrupted committer cursor file at ${cursorPath}: ${err.message}`);
+  }
+}
+
+export function saveDurableCursor(cursorState, cursorPath = DEFAULT_CURSOR_PATH) {
+  const dir = dirname(cursorPath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  const payload = {
+    last_committed_seq: Number(cursorState.last_committed_seq ?? 0),
+    last_committed_hash: String(cursorState.last_committed_hash ?? ''),
+    last_state_root: String(cursorState.last_state_root ?? '0'),
+    epoch: Number(cursorState.epoch ?? 1),
+    last_batch_id: cursorState.last_batch_id ?? null,
+    verdict: cursorState.verdict ?? null,
+    updated_at: new Date().toISOString()
+  };
+  const tmpPath = `${cursorPath}.tmp.${process.pid}`;
+  writeFileSync(tmpPath, JSON.stringify(payload, null, 2), 'utf-8');
+  renameSync(tmpPath, cursorPath);
+  return payload;
+}
+
+/**
+ * Reconcile durable local cursor with the authoritative OfficialSeq on the AO Arbitrator.
+ */
+export async function reconcileCursorWithAO(options = {}) {
+  const cursorPath = options.cursorPath || DEFAULT_CURSOR_PATH;
+  const diskCursor = loadDurableCursor(cursorPath);
+  const aoState = await queryOfficialAoState(options);
+
+  if (aoState && aoState.ok && Number.isInteger(aoState.official_seq) && aoState.official_seq >= 0) {
+    if (aoState.official_seq > diskCursor.last_committed_seq) {
+      const reconciled = saveDurableCursor(
+        {
+          last_committed_seq: aoState.official_seq,
+          last_committed_hash: aoState.official_hash || diskCursor.last_committed_hash,
+          last_state_root: aoState.official_state_root || diskCursor.last_state_root,
+          epoch: aoState.current_epoch || diskCursor.epoch,
+          last_batch_id: diskCursor.last_batch_id,
+          verdict: 'RECONCILED_FROM_AO'
+        },
+        cursorPath
+      );
+      lastCommittedSeq = reconciled.last_committed_seq;
+      return {
+        ...reconciled,
+        source: 'ao_official_reconciled',
+        previous_disk_seq: diskCursor.last_committed_seq
+      };
+    }
+  }
+
+  lastCommittedSeq = diskCursor.last_committed_seq;
+  return diskCursor;
+}
+
+export function getCommittedCursor() {
+  return lastCommittedSeq;
+}
+
+export function setCommittedCursor(seq) {
+  lastCommittedSeq = seq === null || seq === undefined ? null : Number(seq);
+}
+
+export function computeBatchSig(batch, secretKey) {
   const events = batch.events || [];
-  const eventHashes = events.map(e => e.hash || '').join(':');
+  const eventHashes = events.map((e) => e.hash || '').join(':');
   const payload = [
     batch.su_id || 'SU_NODE_1',
     batch.epoch || 1,
@@ -87,13 +183,23 @@ export function deriveClusterSecret(walletPath = WALLET_PATH) {
   }
 }
 
-export async function processCommitterCycle() {
-  const suStatus = await httpFetch(`${SU_SCHEDULER_URL}/status`);
-  if (suStatus.status !== 200 || !suStatus.body) {
-    return { skipped: true, reason: 'SU node unreachable' };
+export async function processCommitterCycle(options = {}) {
+  const cursorPath = options.cursorPath || DEFAULT_CURSOR_PATH;
+  const suUrl = options.suUrl || SU_SCHEDULER_URL;
+  const batchMax = options.batchMax || BATCH_MAX;
+  const fetchFn = options.fetchFn || httpFetch;
+
+  // Ensure cursor is initialized from durable storage or AO state before first cycle
+  if (lastCommittedSeq === null || options.forceReconcile) {
+    await reconcileCursorWithAO({ ...options, cursorPath });
   }
 
-  const latestTick = Number(suStatus.body.latest_tick_ram || suStatus.body.tick || 0);
+  const suStatus = await fetchFn(`${suUrl}/status`);
+  if (suStatus.status !== 200 || !suStatus.body) {
+    return { skipped: true, reason: 'SU node unreachable', lastCommitted: lastCommittedSeq };
+  }
+
+  const latestTick = Number(suStatus.body.latest_tick_ram ?? suStatus.body.latest_tick ?? suStatus.body.tick ?? 0);
   const epoch = Number(suStatus.body.epoch || 1);
 
   if (latestTick <= lastCommittedSeq) {
@@ -101,23 +207,40 @@ export async function processCommitterCycle() {
   }
 
   const fromSeq = lastCommittedSeq + 1;
-  const toSeq = Math.min(latestTick, fromSeq + BATCH_MAX - 1);
+  const toSeq = Math.min(latestTick, fromSeq + batchMax - 1);
 
-  const batchRes = await httpFetch(`${SU_SCHEDULER_URL}/wal_batch?from_seq=${fromSeq}&to_seq=${toSeq}`);
-  if (batchRes.status !== 200 || !batchRes.body || !batchRes.body.events || batchRes.body.events.length === 0) {
-    return { skipped: true, reason: 'No events returned in batch window' };
+  const batchRes = await fetchFn(`${suUrl}/wal_batch?from_seq=${fromSeq}&to_seq=${toSeq}`);
+  if (batchRes.status !== 200 || !batchRes.body) {
+    return { skipped: true, reason: 'Failed to fetch batch from SU', lastCommitted: lastCommittedSeq };
   }
 
-  const events = batchRes.body.events;
-  const lastEvent = events[events.length - 1];
-  const proposedStateRoot = String(lastEvent.state_root || lastEvent.db_root_hash || suStatus.body.raw_root_hash || '0');
-  const proposedHash = String(lastEvent.hash || suStatus.body.latest_hash || '');
+  let events = batchRes.body.events;
+  if (!Array.isArray(events) && typeof batchRes.body.events_json === 'string') {
+    try {
+      events = JSON.parse(batchRes.body.events_json);
+    } catch {
+      events = [];
+    }
+  }
 
-  // Derive cluster secret for HMAC signature - NO guessable fallback permitted
-  const secretKey = deriveClusterSecret(WALLET_PATH);
+  if (!Array.isArray(events) || events.length === 0) {
+    return { skipped: true, reason: 'No events returned in batch window', lastCommitted: lastCommittedSeq };
+  }
+
+  const lastEvent = events[events.length - 1];
+  const proposedStateRoot = String(
+    lastEvent.state_root_str ??
+      lastEvent.state_root ??
+      batchRes.body.proposed_state_root ??
+      suStatus.body.state_root_str ??
+      '0'
+  );
+  const proposedHash = String(lastEvent.hash || batchRes.body.proposed_hash || suStatus.body.latest_hash || '');
+
+  const secretKey = deriveClusterSecret(options.walletPath || WALLET_PATH);
 
   const batchData = {
-    su_id: 'SU_NODE_1',
+    su_id: batchRes.body.su_id || 'SU_NODE_1',
     epoch,
     from_seq: fromSeq,
     to_seq: toSeq,
@@ -125,45 +248,97 @@ export async function processCommitterCycle() {
     proposed_hash: proposedHash,
     events
   };
+  batchData.batch_id = computeBatchId(batchData);
   batchData.batch_sig = computeBatchSig(batchData, secretKey);
 
-  console.log(`[CommitterDaemon] Packaging batch Seq ${fromSeq}..${toSeq} (${events.length} events, Epoch ${epoch})...`);
-  const commitRes = await commitCheckpointBatch(batchData);
-  lastCommittedSeq = toSeq;
+  const commitFn = options.commitFn || commitCheckpointBatch;
+  const commitRes = await commitFn(batchData, options);
 
-  console.log(`[CommitterDaemon] Checkpoint Seq ${fromSeq}..${toSeq} committed to AO! TxID: ${commitRes.tx_id}, Block: ${commitRes.block_height}`);
-  return { ok: true, from_seq: fromSeq, to_seq: toSeq, commit: commitRes };
+  // CRITICAL PHASE 06 GATE:
+  // Only advance `lastCommittedSeq` and persist cursor if evaluation proof is VERIFIED!
+  if (commitRes && commitRes.ok && commitRes.verified === true) {
+    const newSeq = Number(commitRes.official_seq ?? toSeq);
+    const updatedCursor = saveDurableCursor(
+      {
+        last_committed_seq: Math.max(toSeq, newSeq),
+        last_committed_hash: proposedHash,
+        last_state_root: proposedStateRoot,
+        epoch,
+        last_batch_id: batchData.batch_id,
+        verdict: commitRes.verdict
+      },
+      cursorPath
+    );
+    lastCommittedSeq = updatedCursor.last_committed_seq;
+    return {
+      ok: true,
+      cursor_advanced: true,
+      settlement_status: commitRes.settlement_status,
+      evaluation_status: commitRes.evaluation_status,
+      verdict: commitRes.verdict,
+      idempotent_replay: Boolean(commitRes.idempotent_replay),
+      from_seq: fromSeq,
+      to_seq: toSeq,
+      last_committed_seq: lastCommittedSeq,
+      commit: commitRes
+    };
+  }
+
+  // Evaluation pending/unknown or rejected -> do NOT advance cursor!
+  return {
+    ok: false,
+    cursor_advanced: false,
+    settlement_status: commitRes?.settlement_status || 'unknown',
+    evaluation_status: commitRes?.evaluation_status || 'unknown',
+    verdict: commitRes?.verdict || null,
+    from_seq: fromSeq,
+    to_seq: toSeq,
+    last_committed_seq: lastCommittedSeq,
+    reason: commitRes?.reason || 'Batch evaluation not verified; cursor held at previous sequence',
+    commit: commitRes
+  };
 }
 
-export async function startCommitterDaemon() {
+export async function startCommitterDaemon(options = {}) {
   console.log('========================================================================');
   console.log(' HyDB Autonomous Committer Daemon (Storage Unit -> AO Settlement)');
   console.log(` SU Endpoint: ${SU_SCHEDULER_URL}`);
+  console.log(` Cursor File: ${options.cursorPath || DEFAULT_CURSOR_PATH}`);
   console.log(` Interval:    ${INTERVAL_MS}ms`);
   console.log(` Run Once:    ${RUN_ONCE}`);
   console.log('========================================================================\n');
 
+  const initialCursor = await reconcileCursorWithAO(options);
+  console.log(
+    `[CommitterDaemon] Initialized cursor at seq=${initialCursor.last_committed_seq} (source=${initialCursor.source})`
+  );
+
   if (RUN_ONCE) {
-    const res = await processCommitterCycle();
+    const res = await processCommitterCycle(options);
     console.log('[CommitterDaemon] Cycle complete:', res);
-    return;
+    return res;
   }
 
   while (isRunning) {
     try {
-      await processCommitterCycle();
+      await processCommitterCycle(options);
     } catch (err) {
       console.error('[CommitterDaemon] Cycle error:', err.message);
     }
-    await new Promise(r => setTimeout(r, INTERVAL_MS));
+    await new Promise((r) => setTimeout(r, INTERVAL_MS));
   }
 }
 
-// Run if called as main script
-if (process.argv[1]?.endsWith('committer_daemon.mjs')) {
-  process.on('SIGINT', () => { isRunning = false; process.exit(0); });
-  process.on('SIGTERM', () => { isRunning = false; process.exit(0); });
-  startCommitterDaemon().catch(err => {
+if (basename(process.argv[1] || '') === 'committer_daemon.mjs') {
+  process.on('SIGINT', () => {
+    isRunning = false;
+    process.exit(0);
+  });
+  process.on('SIGTERM', () => {
+    isRunning = false;
+    process.exit(0);
+  });
+  startCommitterDaemon().catch((err) => {
     console.error('[Fatal CommitterDaemon Error]', err);
     process.exit(1);
   });

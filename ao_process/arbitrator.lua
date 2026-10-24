@@ -946,6 +946,20 @@ Handlers.add(
 
         -- If entire batch was already committed (100% duplicate/overlap)
         if #new_events_to_commit == 0 and deduplicated_count > 0 then
+            local committed_at_last = EventHistory[last_seq]
+            if committed_at_last and proposed_hash ~= "" and committed_at_last.hash ~= proposed_hash then
+                ao.send({
+                    Target = msg.From,
+                    Action = "Audit-Rejected",
+                    Status = "EQUIVOCATION_PROVEN",
+                    PolicyAction = safe_policy_action("on_equivocation", "FREEZE_EPOCH_AND_PROMOTE_STANDBY_HOT"),
+                    Reason = string.format("Conflicting batch proposed_hash at seq %d by %s", last_seq, su_id),
+                    ConflictSeq = tostring(last_seq),
+                    OfficialHashAtSeq = committed_at_last.hash,
+                    ConflictingHashAtSeq = proposed_hash
+                })
+                return
+            end
             for _, ev in ipairs(events) do
                 local s = tonumber(ev.seq)
                 if EventHistory[s] then
@@ -957,10 +971,14 @@ Handlers.add(
                 Action = "Checkpoint-Duplicate-Ack",
                 Status = "DUPLICATE_BATCH_IDEMPOTENT",
                 PolicyAction = PolicyCircuit.on_duplicate_overlap,
+                FromSeq = tostring(first_seq),
+                ToSeq = tostring(last_seq),
                 OfficialSeq = tostring(OfficialSeq),
                 OfficialStateRoot = tostring(OfficialStateRoot),
+                OfficialHash = OfficialHash,
                 OfficialCommitment256 = OfficialCommitment256,
-                DeduplicatedEvents = tostring(deduplicated_count)
+                DeduplicatedEvents = tostring(deduplicated_count),
+                CheckpointsCount = tostring(#Checkpoints)
             })
             return
         end
