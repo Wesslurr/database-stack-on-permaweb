@@ -167,6 +167,8 @@ assert(
     composeDoc.includes('HYDB_CLUSTER_SIZE=${HYDB_CLUSTER_SIZE:-3}') &&
     composeDoc.includes('HYDB_ADMIN_TOKEN') &&
     composeDoc.includes('HYDB_CLUSTER_SECRET') &&
+    composeDoc.includes('sd_node_1_data:/app/data/node_sd_1:ro') &&
+    composeDoc.includes('HYDB_RECONCILE_WAL_PATH=') &&
     composeDoc.includes('~sd@1.0'),
   'docker-compose.yml configures a 3-replica SD cluster with explicit secrets, profile, and ~sd@1.0 endpoints'
 );
@@ -287,6 +289,17 @@ const l1VerifyFail = await verifyArweaveL1Finality('tx_fake_1', fakeBatch, {
   l1GatewayFetchFn: async () => ({ status: 404 })
 });
 assert(l1VerifyFail.verified === false, 'Live verifyArweaveL1Finality rejects unconfirmed L1 transaction');
+
+const l1MultiReqFail = await verifyArweaveL1Finality('tx_fake_1', fakeBatch, {
+  environment: 'ao_network',
+  requireMultiGateway: true,
+  l1Gateways: ['https://arweave.net'],
+  l1GatewayFetchFn: async () => ({ status: 200 })
+});
+assert(
+  l1MultiReqFail.verified === false && l1MultiReqFail.error_code === 'MULTI_GATEWAY_CONSENSUS_REQUIRED',
+  'Live verifyArweaveL1Finality enforces MULTI_GATEWAY_CONSENSUS_REQUIRED when requireMultiGateway=true'
+);
 
 // 7D. Live Erlang BEAM Probe: Fail-Closed Default Profile & Constant-Time Token Check
 const beamProbe = spawnSync(

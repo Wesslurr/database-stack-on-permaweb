@@ -1311,10 +1311,19 @@ candidate_wal_sources() ->
     HotEnv = os:getenv("HYDB_HOT_WAL_PATH"),
     RecEnv = os:getenv("HYDB_RECONCILE_WAL_PATH"),
     SdEnv = os:getenv("HYDB_WAL_PATH"),
+    SplitPaths = fun(EnvVal, Tag) ->
+        case EnvVal of
+            false -> [];
+            "" -> [];
+            Str when is_list(Str) ->
+                Tokens = string:split(Str, ",", all),
+                [{string:trim(T), Tag} || T <- Tokens, length(string:trim(T)) > 0]
+        end
+    end,
     RawCandidates =
-        (if is_list(HotEnv) andalso length(HotEnv) > 0 -> [{HotEnv, <<"hot">>}]; true -> [] end) ++
-        (if is_list(RecEnv) andalso length(RecEnv) > 0 -> [{RecEnv, <<"sd">>}]; true -> [] end) ++
-        (if is_list(SdEnv) andalso length(SdEnv) > 0 -> [{SdEnv, <<"sd">>}]; true -> [] end) ++
+        SplitPaths(HotEnv, <<"hot">>) ++
+        SplitPaths(RecEnv, <<"sd">>) ++
+        SplitPaths(SdEnv, <<"sd">>) ++
         (case hot_wal_enabled() of
             true ->
                 [
@@ -1395,6 +1404,8 @@ select_best_validated_wal(Candidates) ->
             {ok, Pick}
     end.
 
+pick_highest_seq_wal([]) ->
+    [];
 pick_highest_seq_wal([First | Rest]) ->
     {_BestSeq, _BestP, _BestS, BestEvs} = lists:foldl(fun({Seq, P, S, Evs}, {AccSeq, AccP, AccS, AccEvs}) ->
         if Seq > AccSeq -> {Seq, P, S, Evs};
@@ -2538,22 +2549,13 @@ handle_call({contract_register_schema, Namespace, Cfg, ReqEpoch}, _From, State =
                                                 <<"state_root_str">> => integer_to_binary(StateRoot),
                                                 <<"request_id">> => case ReqId of undefined -> <<"">>; _ -> ReqId end
                                             },
-                                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq),
-                                            case Replicated of
-                                                true -> hydb_contract:update_namespace_status(Namespace, <<"replicated">>);
-                                                false -> ok
-                                            end,
-                                            CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
-                                            WriteStatus = case Replicated of true -> <<"durable">>; false -> <<"accepted">> end,
-                                            WalEvent = Event#{
-                                                <<"replicated">> => Replicated,
-                                                <<"commit_status">> => CommitStatus,
-                                                <<"write_status">> => WriteStatus,
+                                            WalEvent0 = Event#{
+                                                <<"replicated">> => false,
+                                                <<"commit_status">> => <<"provisional">>,
+                                                <<"write_status">> => <<"accepted">>,
                                                 <<"quorum">> => <<"single">>
                                             },
-                                            NewHist = [WalEvent | lists:sublist(Hist, 49)],
-                                            ets:insert(?TABLE, {history, NewHist}),
-                                            case append_hot_wal_event(WalEvent) of
+                                            case append_hot_wal_event(WalEvent0) of
                                                 {error, WalErr} ->
                                                     {reply, {error, #{
                                                         <<"ok">> => false,
@@ -2562,7 +2564,9 @@ handle_call({contract_register_schema, Namespace, Cfg, ReqEpoch}, _From, State =
                                                         <<"error">> => to_bin_spec(io_lib:format("~p", [WalErr]))
                                                     }}, State};
                                                 ok ->
-                                                    Result0 = #{
+                                                    NewHist0 = [WalEvent0 | lists:sublist(Hist, 49)],
+                                                    ets:insert(?TABLE, {history, NewHist0}),
+                                                    ResultProv0 = #{
                                                         <<"ok">> => true,
                                                         <<"error_code">> => <<"OK">>,
                                                         <<"device">> => <<"hymessage@1.0">>,
@@ -2571,10 +2575,10 @@ handle_call({contract_register_schema, Namespace, Cfg, ReqEpoch}, _From, State =
                                                         <<"seq">> => Seq,
                                                         <<"op">> => <<"register_schema">>,
                                                         <<"namespace">> => Namespace,
-                                                        <<"status">> => case Replicated of true -> <<"replicated">>; false -> <<"configured">> end,
-                                                        <<"contract_status">> => case Replicated of true -> <<"replicated">>; false -> <<"configured">> end,
-                                                        <<"commit_status">> => CommitStatus,
-                                                        <<"write_status">> => WriteStatus,
+                                                        <<"status">> => <<"configured">>,
+                                                        <<"contract_status">> => <<"configured">>,
+                                                        <<"commit_status">> => <<"provisional">>,
+                                                        <<"write_status">> => <<"accepted">>,
                                                         <<"registered_schema">> => Entry,
                                                         <<"canonical_schema">> => CanonicalSchemaBin,
                                                         <<"wasm_vm_booted_from_arweave">> => WasmBooted,
@@ -2582,11 +2586,29 @@ handle_call({contract_register_schema, Namespace, Cfg, ReqEpoch}, _From, State =
                                                         <<"capabilities">> => hydb_contract:backend_capabilities(Backend),
                                                         <<"hash">> => NewHash,
                                                         <<"state_root">> => StateRoot,
-                                                        <<"replicated">> => Replicated,
-                                                        <<"su_count">> => SuCount
+                                                        <<"replicated">> => false,
+                                                        <<"su_count">> => 0
                                                     },
-                                                    Result = store_idempotency(ReqId, <<"register_schema">>, Namespace, <<"__schema__">>, CleanCfg, Seq, <<"single">>, Result0),
-                                                    {reply, {ok, Result}, State}
+                                                    _ = store_idempotency(ReqId, <<"register_schema">>, Namespace, <<"__schema__">>, CleanCfg, Seq, <<"single">>, ResultProv0),
+                                                    {Replicated, SuCount} = broadcast_and_await_su(Event, Seq),
+                                                    case Replicated of
+                                                        true ->
+                                                            hydb_contract:update_namespace_status(Namespace, <<"replicated">>),
+                                                            _ = promote_hot_wal_event_durable(Seq),
+                                                            ResultDur0 = ResultProv0#{
+                                                                <<"status">> => <<"replicated">>,
+                                                                <<"contract_status">> => <<"replicated">>,
+                                                                <<"commit_status">> => <<"durable">>,
+                                                                <<"write_status">> => <<"durable">>,
+                                                                <<"replicated">> => true,
+                                                                <<"su_count">> => SuCount
+                                                            },
+                                                            FinalRes = store_idempotency(ReqId, <<"register_schema">>, Namespace, <<"__schema__">>, CleanCfg, Seq, <<"single">>, ResultDur0),
+                                                            {reply, {ok, FinalRes}, State};
+                                                        false ->
+                                                            FinalProv = store_idempotency(ReqId, <<"register_schema">>, Namespace, <<"__schema__">>, CleanCfg, Seq, <<"single">>, ResultProv0),
+                                                            {reply, {ok, FinalProv}, State}
+                                                    end
                                             end
                                     end
                             end
@@ -2636,59 +2658,59 @@ handle_call({join, PlayerId}, _From, State = #state{wasm_base = WasmBase, node_m
     {reply, {ok, Result}, State};
 
 handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMsg}) ->
-    case is_hot_wal_corrupted() of
-        true ->
-            {reply, {error, #{
-                <<"ok">> => false,
-                <<"status">> => 503,
-                <<"error_code">> => <<"ERR_HOT_WAL_CORRUPTED">>,
-                <<"error">> => <<"Hot Node WAL is corrupted or degraded (fail-closed)">>
-            }}, State};
-        false ->
-            T0 = os:perf_counter(nanosecond),
-            T_start = os:perf_counter(microsecond),
-            ReqEpoch = maps:get(<<"epoch">>, Opts, undefined),
-            Token = maps:get(<<"token">>, Opts, undefined),
-            CurrentEpoch = case ets:lookup(?TABLE, epoch) of [{epoch, Ep}] -> Ep; _ -> 1 end,
-
-            case check_epoch(ReqEpoch, CurrentEpoch) of
-                {error, fenced_stale_epoch} ->
+    ReqId = maps:get(<<"request_id">>, Opts, undefined),
+    ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
+    RequireDurability = maps:get(<<"require_durability">>, Opts, false),
+    case check_idempotency(ReqId, <<"put">>, Namespace, RawKey, RawVal, ReqQuorum, RequireDurability) of
+        {conflict, ConflictMap} ->
+            {reply, {error, ConflictMap}, State};
+        {cached_ok, CachedRes} ->
+            {reply, {ok, CachedRes}, State};
+        {cached_error, CachedErr} ->
+            {reply, {error, CachedErr}, State};
+        not_cached ->
+            case is_hot_wal_corrupted() of
+                true ->
                     {reply, {error, #{
                         <<"ok">> => false,
-                        <<"status">> => 409,
-                        <<"error_code">> => <<"FENCED_STALE_EPOCH">>,
-                        <<"verdict">> => <<"FENCED_STALE_EPOCH">>,
-                        <<"error">> => <<"fenced_stale_epoch">>
+                        <<"status">> => 503,
+                        <<"error_code">> => <<"ERR_HOT_WAL_CORRUPTED">>,
+                        <<"error">> => <<"Hot Node WAL is corrupted or degraded (fail-closed)">>
                     }}, State};
-                {ok, Epoch} ->
-                    SessionCheck = case Token of
-                        undefined -> {ok, false};
-                        _ ->
-                            case ets:lookup(?SESSIONS_TABLE, Token) of
-                                [{Token, _, _}] -> {ok, true};
-                                [] -> invalid_token
-                            end
-                    end,
-                    case SessionCheck of
-                        invalid_token ->
+                false ->
+                    T0 = os:perf_counter(nanosecond),
+                    T_start = os:perf_counter(microsecond),
+                    ReqEpoch = maps:get(<<"epoch">>, Opts, undefined),
+                    Token = maps:get(<<"token">>, Opts, undefined),
+                    CurrentEpoch = case ets:lookup(?TABLE, epoch) of [{epoch, Ep}] -> Ep; _ -> 1 end,
+
+                    case check_epoch(ReqEpoch, CurrentEpoch) of
+                        {error, fenced_stale_epoch} ->
                             {reply, {error, #{
                                 <<"ok">> => false,
-                                <<"status">> => 403,
-                                <<"error_code">> => <<"ERR_UNAUTHORIZED">>,
-                                <<"error">> => <<"invalid_session_token">>
+                                <<"status">> => 409,
+                                <<"error_code">> => <<"FENCED_STALE_EPOCH">>,
+                                <<"verdict">> => <<"FENCED_STALE_EPOCH">>,
+                                <<"error">> => <<"fenced_stale_epoch">>
                             }}, State};
-                        {ok, HasValidSession} ->
-                            ReqId = maps:get(<<"request_id">>, Opts, undefined),
-                            ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
-                            RequireDurability = maps:get(<<"require_durability">>, Opts, false),
-                            case check_idempotency(ReqId, <<"put">>, Namespace, RawKey, RawVal, ReqQuorum, RequireDurability) of
-                                {conflict, ConflictMap} ->
-                                    {reply, {error, ConflictMap}, State};
-                                {cached_ok, CachedRes} ->
-                                    {reply, {ok, CachedRes}, State};
-                                {cached_error, CachedErr} ->
-                                    {reply, {error, CachedErr}, State};
-                                not_cached ->
+                        {ok, Epoch} ->
+                            SessionCheck = case Token of
+                                undefined -> {ok, false};
+                                _ ->
+                                    case ets:lookup(?SESSIONS_TABLE, Token) of
+                                        [{Token, _, _}] -> {ok, true};
+                                        [] -> invalid_token
+                                    end
+                            end,
+                            case SessionCheck of
+                                invalid_token ->
+                                    {reply, {error, #{
+                                        <<"ok">> => false,
+                                        <<"status">> => 403,
+                                        <<"error_code">> => <<"ERR_UNAUTHORIZED">>,
+                                        <<"error">> => <<"invalid_session_token">>
+                                    }}, State};
+                                {ok, HasValidSession} ->
                                     {ActiveWasmBase, IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
                                     WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
                                     OptsWithSession = Opts#{ <<"has_valid_session">> => HasValidSession },
@@ -2758,27 +2780,20 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                                             },
                                             T_hash = os:perf_counter(microsecond),
 
-                                            TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
-                                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
-                                            T_repl = os:perf_counter(microsecond),
-                                            T1 = os:perf_counter(nanosecond),
-                                            DurationMs = ((T1 - T0) / 1000.0) / 1000.0,
                                             WasmSource = case IsCustomWasm of true -> <<"arweave_tx">>; false -> <<"node_default">> end,
                                             WasmInstanceCount = case {Backend, IsCustomWasm} of
                                                 {<<"wasm_slot">>, true} -> wasm_call(ActiveWasmBase, <<"db_count">>, [], NodeMsg, 0);
                                                 _ -> 0
                                             end,
-                                            CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
-                                            WriteStatus = case Replicated of true -> <<"durable">>; false -> <<"accepted">> end,
-                                            WalEvent = Event#{
-                                                <<"replicated">> => Replicated,
-                                                <<"commit_status">> => CommitStatus,
-                                                <<"write_status">> => WriteStatus,
+
+                                            %% Step A: Write provisional event to Hot WAL BEFORE replication
+                                            WalEvent0 = Event#{
+                                                <<"replicated">> => false,
+                                                <<"commit_status">> => <<"provisional">>,
+                                                <<"write_status">> => <<"accepted">>,
                                                 <<"quorum">> => to_bin_spec(ReqQuorum)
                                             },
-                                            NewHist = [WalEvent | lists:sublist(Hist, 49)],
-                                            ets:insert(?TABLE, {history, NewHist}),
-                                            case append_hot_wal_event(WalEvent) of
+                                            case append_hot_wal_event(WalEvent0) of
                                                 {error, WalErr} ->
                                                     {reply, {error, #{
                                                         <<"ok">> => false,
@@ -2787,7 +2802,9 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                                                         <<"error">> => to_bin_spec(io_lib:format("~p", [WalErr]))
                                                     }}, State};
                                                 ok ->
-                                                    Result0 = #{
+                                                    NewHist0 = [WalEvent0 | lists:sublist(Hist, 49)],
+                                                    ets:insert(?TABLE, {history, NewHist0}),
+                                                    ResultProv0 = #{
                                                         <<"ok">> => true,
                                                         <<"error_code">> => <<"OK">>,
                                                         <<"device">> => <<"hymessage@1.0">>,
@@ -2806,32 +2823,63 @@ handle_call({contract_put, Namespace, RawKey, RawVal, Opts}, _From, State = #sta
                                                         <<"ver">> => Ver,
                                                         <<"state_root">> => StateRoot,
                                                         <<"hash">> => NewHash,
-                                                        <<"commit_status">> => CommitStatus,
-                                                        <<"write_status">> => WriteStatus,
-                                                        <<"replicated">> => Replicated,
-                                                        <<"su_count">> => SuCount,
-                                                        <<"duration_ms">> => DurationMs,
+                                                        <<"commit_status">> => <<"provisional">>,
+                                                        <<"write_status">> => <<"accepted">>,
+                                                        <<"replicated">> => false,
+                                                        <<"su_count">> => 0,
+                                                        <<"duration_ms">> => 0.0,
                                                         <<"t_val_us">> => (T_val - T_start),
                                                         <<"t_wasm_us">> => (T_wasm - T_val),
                                                         <<"t_hash_us">> => (T_hash - T_wasm),
-                                                        <<"t_repl_us">> => (T_repl - T_hash)
+                                                        <<"t_repl_us">> => 0
                                                     },
-                                                    Result = store_idempotency(ReqId, <<"put">>, Namespace, RawKey, RawVal, Seq, ReqQuorum, Result0),
-                                                    if
-                                                        RequireDurability andalso not Replicated ->
-                                                            {reply, {error, #{
-                                                                <<"ok">> => false,
-                                                                <<"status">> => 504,
-                                                                <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
-                                                                <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
-                                                                <<"commit_status">> => CommitStatus,
-                                                                <<"write_status">> => WriteStatus,
-                                                                <<"replicated">> => false,
-                                                                <<"seq">> => Seq,
-                                                                <<"request_id">> => ReqId
-                                                            }}, State};
+                                                    %% Step B: Store idempotency cache IMMEDIATELY so retries NEVER duplicate mutation!
+                                                    _ = store_idempotency(ReqId, <<"put">>, Namespace, RawKey, RawVal, Seq, ReqQuorum, ResultProv0),
+
+                                                    %% Step C: Broadcast to SD replicas and await quorum
+                                                    TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
+                                                    {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
+                                                    T_repl = os:perf_counter(microsecond),
+                                                    T1 = os:perf_counter(nanosecond),
+                                                    DurationMsTotal = ((T1 - T0) / 1000.0) / 1000.0,
+
+                                                    case Replicated of
                                                         true ->
-                                                            {reply, {ok, Result}, State}
+                                                            _ = promote_hot_wal_event_durable(Seq),
+                                                            ResultDur0 = ResultProv0#{
+                                                                <<"commit_status">> => <<"durable">>,
+                                                                <<"write_status">> => <<"durable">>,
+                                                                <<"replicated">> => true,
+                                                                <<"su_count">> => SuCount,
+                                                                <<"duration_ms">> => DurationMsTotal,
+                                                                <<"t_repl_us">> => (T_repl - T_hash)
+                                                            },
+                                                            ResultDur = store_idempotency(ReqId, <<"put">>, Namespace, RawKey, RawVal, Seq, ReqQuorum, ResultDur0),
+                                                            {reply, {ok, ResultDur}, State};
+                                                        false ->
+                                                            ResultProv1 = ResultProv0#{
+                                                                <<"su_count">> => SuCount,
+                                                                <<"duration_ms">> => DurationMsTotal,
+                                                                <<"t_repl_us">> => (T_repl - T_hash)
+                                                            },
+                                                            FinalProv = store_idempotency(ReqId, <<"put">>, Namespace, RawKey, RawVal, Seq, ReqQuorum, ResultProv1),
+                                                            if
+                                                                RequireDurability ->
+                                                                    {reply, {error, #{
+                                                                        <<"ok">> => false,
+                                                                        <<"status">> => 504,
+                                                                        <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
+                                                                        <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
+                                                                        <<"commit_status">> => <<"provisional">>,
+                                                                        <<"write_status">> => <<"accepted">>,
+                                                                        <<"replicated">> => false,
+                                                                        <<"su_count">> => SuCount,
+                                                                        <<"seq">> => Seq,
+                                                                        <<"request_id">> => ReqId
+                                                                    }}, State};
+                                                                true ->
+                                                                    {reply, {ok, FinalProv}, State}
+                                                            end
                                                     end
                                             end
                                     end
@@ -3010,58 +3058,58 @@ handle_call({contract_scan, Namespace, Prefix}, _From, State) ->
     end;
 
 handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_base = WasmBase, node_msg = NodeMsg}) ->
-    case is_hot_wal_corrupted() of
-        true ->
-            {reply, {error, #{
-                <<"ok">> => false,
-                <<"status">> => 503,
-                <<"error_code">> => <<"ERR_HOT_WAL_CORRUPTED">>,
-                <<"error">> => <<"Hot Node WAL is corrupted or degraded (fail-closed)">>
-            }}, State};
-        false ->
-            T0 = os:perf_counter(nanosecond),
-            ReqEpoch = maps:get(<<"epoch">>, Opts, undefined),
-            Token = maps:get(<<"token">>, Opts, undefined),
-            CurrentEpoch = case ets:lookup(?TABLE, epoch) of [{epoch, Ep}] -> Ep; _ -> 1 end,
-
-            case check_epoch(ReqEpoch, CurrentEpoch) of
-                {error, fenced_stale_epoch} ->
+    ReqId = maps:get(<<"request_id">>, Opts, undefined),
+    ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
+    RequireDurability = maps:get(<<"require_durability">>, Opts, false),
+    case check_idempotency(ReqId, <<"del">>, Namespace, RawKey, 0, ReqQuorum, RequireDurability) of
+        {conflict, ConflictMap} ->
+            {reply, {error, ConflictMap}, State};
+        {cached_ok, CachedRes} ->
+            {reply, {ok, CachedRes}, State};
+        {cached_error, CachedErr} ->
+            {reply, {error, CachedErr}, State};
+        not_cached ->
+            case is_hot_wal_corrupted() of
+                true ->
                     {reply, {error, #{
                         <<"ok">> => false,
-                        <<"status">> => 409,
-                        <<"error_code">> => <<"FENCED_STALE_EPOCH">>,
-                        <<"verdict">> => <<"FENCED_STALE_EPOCH">>,
-                        <<"error">> => <<"fenced_stale_epoch">>
+                        <<"status">> => 503,
+                        <<"error_code">> => <<"ERR_HOT_WAL_CORRUPTED">>,
+                        <<"error">> => <<"Hot Node WAL is corrupted or degraded (fail-closed)">>
                     }}, State};
-                {ok, Epoch} ->
-                    SessionCheck = case Token of
-                        undefined -> {ok, false};
-                        _ ->
-                            case ets:lookup(?SESSIONS_TABLE, Token) of
-                                [{Token, _, _}] -> {ok, true};
-                                [] -> invalid_token
-                            end
-                    end,
-                    case SessionCheck of
-                        invalid_token ->
+                false ->
+                    T0 = os:perf_counter(nanosecond),
+                    ReqEpoch = maps:get(<<"epoch">>, Opts, undefined),
+                    Token = maps:get(<<"token">>, Opts, undefined),
+                    CurrentEpoch = case ets:lookup(?TABLE, epoch) of [{epoch, Ep}] -> Ep; _ -> 1 end,
+
+                    case check_epoch(ReqEpoch, CurrentEpoch) of
+                        {error, fenced_stale_epoch} ->
                             {reply, {error, #{
                                 <<"ok">> => false,
-                                <<"status">> => 403,
-                                <<"error_code">> => <<"ERR_UNAUTHORIZED">>,
-                                <<"error">> => <<"invalid_session_token">>
+                                <<"status">> => 409,
+                                <<"error_code">> => <<"FENCED_STALE_EPOCH">>,
+                                <<"verdict">> => <<"FENCED_STALE_EPOCH">>,
+                                <<"error">> => <<"fenced_stale_epoch">>
                             }}, State};
-                        {ok, HasValidSession} ->
-                            ReqId = maps:get(<<"request_id">>, Opts, undefined),
-                            ReqQuorum = maps:get(<<"quorum">>, Opts, <<"single">>),
-                            RequireDurability = maps:get(<<"require_durability">>, Opts, false),
-                            case check_idempotency(ReqId, <<"del">>, Namespace, RawKey, 0, ReqQuorum, RequireDurability) of
-                                {conflict, ConflictMap} ->
-                                    {reply, {error, ConflictMap}, State};
-                                {cached_ok, CachedRes} ->
-                                    {reply, {ok, CachedRes}, State};
-                                {cached_error, CachedErr} ->
-                                    {reply, {error, CachedErr}, State};
-                                not_cached ->
+                        {ok, Epoch} ->
+                            SessionCheck = case Token of
+                                undefined -> {ok, false};
+                                _ ->
+                                    case ets:lookup(?SESSIONS_TABLE, Token) of
+                                        [{Token, _, _}] -> {ok, true};
+                                        [] -> invalid_token
+                                    end
+                            end,
+                            case SessionCheck of
+                                invalid_token ->
+                                    {reply, {error, #{
+                                        <<"ok">> => false,
+                                        <<"status">> => 403,
+                                        <<"error_code">> => <<"ERR_UNAUTHORIZED">>,
+                                        <<"error">> => <<"invalid_session_token">>
+                                    }}, State};
+                                {ok, HasValidSession} ->
                                     {ActiveWasmBase, IsCustomWasm} = resolve_ns_wasm(Namespace, WasmBase),
                                     WasmCtx = {fun wasm_call/5, ActiveWasmBase, NodeMsg},
                                     OptsWithSession = Opts#{ <<"has_valid_session">> => HasValidSession },
@@ -3121,21 +3169,14 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                                                 <<"request_id">> => case ReqId of undefined -> <<"">>; _ -> ReqId end
                                             },
 
-                                            TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
-                                            {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
-                                            T1 = os:perf_counter(nanosecond),
-                                            DurationMs = ((T1 - T0) / 1000.0) / 1000.0,
-                                            CommitStatus = case Replicated of true -> <<"durable">>; false -> <<"provisional">> end,
-                                            WriteStatus = case Replicated of true -> <<"durable">>; false -> <<"accepted">> end,
-                                            WalEvent = Event#{
-                                                <<"replicated">> => Replicated,
-                                                <<"commit_status">> => CommitStatus,
-                                                <<"write_status">> => WriteStatus,
+                                            %% Step A: Write provisional event to Hot WAL BEFORE replication
+                                            WalEvent0 = Event#{
+                                                <<"replicated">> => false,
+                                                <<"commit_status">> => <<"provisional">>,
+                                                <<"write_status">> => <<"accepted">>,
                                                 <<"quorum">> => to_bin_spec(ReqQuorum)
                                             },
-                                            NewHist = [WalEvent | lists:sublist(Hist, 49)],
-                                            ets:insert(?TABLE, {history, NewHist}),
-                                            case append_hot_wal_event(WalEvent) of
+                                            case append_hot_wal_event(WalEvent0) of
                                                 {error, WalErr} ->
                                                     {reply, {error, #{
                                                         <<"ok">> => false,
@@ -3144,7 +3185,9 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                                                         <<"error">> => to_bin_spec(io_lib:format("~p", [WalErr]))
                                                     }}, State};
                                                 ok ->
-                                                    Result0 = #{
+                                                    NewHist0 = [WalEvent0 | lists:sublist(Hist, 49)],
+                                                    ets:insert(?TABLE, {history, NewHist0}),
+                                                    ResultProv0 = #{
                                                         <<"ok">> => true,
                                                         <<"error_code">> => <<"OK">>,
                                                         <<"device">> => <<"hymessage@1.0">>,
@@ -3159,28 +3202,56 @@ handle_call({contract_del, Namespace, RawKey, Opts}, _From, State = #state{wasm_
                                                         <<"ver">> => DelVer,
                                                         <<"state_root">> => StateRoot,
                                                         <<"hash">> => NewHash,
-                                                        <<"commit_status">> => CommitStatus,
-                                                        <<"write_status">> => WriteStatus,
-                                                        <<"replicated">> => Replicated,
-                                                        <<"su_count">> => SuCount,
-                                                        <<"duration_ms">> => DurationMs
+                                                        <<"commit_status">> => <<"provisional">>,
+                                                        <<"write_status">> => <<"accepted">>,
+                                                        <<"replicated">> => false,
+                                                        <<"su_count">> => 0,
+                                                        <<"duration_ms">> => 0.0
                                                     },
-                                                    Result = store_idempotency(ReqId, <<"del">>, Namespace, RawKey, 0, Seq, ReqQuorum, Result0),
-                                                    if
-                                                        RequireDurability andalso not Replicated ->
-                                                            {reply, {error, #{
-                                                                <<"ok">> => false,
-                                                                <<"status">> => 504,
-                                                                <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
-                                                                <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
-                                                                <<"commit_status">> => CommitStatus,
-                                                                <<"write_status">> => WriteStatus,
-                                                                <<"replicated">> => false,
-                                                                <<"seq">> => Seq,
-                                                                <<"request_id">> => ReqId
-                                                            }}, State};
+                                                    %% Step B: Store idempotency cache IMMEDIATELY so retries NEVER duplicate mutation!
+                                                    _ = store_idempotency(ReqId, <<"del">>, Namespace, RawKey, 0, Seq, ReqQuorum, ResultProv0),
+
+                                                    %% Step C: Broadcast to SD replicas and await quorum
+                                                    TimeoutMs = maps:get(<<"timeout_ms">>, Opts, 1500),
+                                                    {Replicated, SuCount} = broadcast_and_await_su(Event, Seq, ReqQuorum, TimeoutMs),
+                                                    T1 = os:perf_counter(nanosecond),
+                                                    DurationMsTotal = ((T1 - T0) / 1000.0) / 1000.0,
+
+                                                    case Replicated of
                                                         true ->
-                                                            {reply, {ok, Result}, State}
+                                                            _ = promote_hot_wal_event_durable(Seq),
+                                                            ResultDur0 = ResultProv0#{
+                                                                <<"commit_status">> => <<"durable">>,
+                                                                <<"write_status">> => <<"durable">>,
+                                                                <<"replicated">> => true,
+                                                                <<"su_count">> => SuCount,
+                                                                <<"duration_ms">> => DurationMsTotal
+                                                            },
+                                                            ResultDur = store_idempotency(ReqId, <<"del">>, Namespace, RawKey, 0, Seq, ReqQuorum, ResultDur0),
+                                                            {reply, {ok, ResultDur}, State};
+                                                        false ->
+                                                            ResultProv1 = ResultProv0#{
+                                                                <<"su_count">> => SuCount,
+                                                                <<"duration_ms">> => DurationMsTotal
+                                                            },
+                                                            FinalProv = store_idempotency(ReqId, <<"del">>, Namespace, RawKey, 0, Seq, ReqQuorum, ResultProv1),
+                                                            if
+                                                                RequireDurability ->
+                                                                    {reply, {error, #{
+                                                                        <<"ok">> => false,
+                                                                        <<"status">> => 504,
+                                                                        <<"error_code">> => <<"ERR_DURABILITY_TIMEOUT">>,
+                                                                        <<"error">> => <<"Required durability replication ACK not satisfied by SU quorum">>,
+                                                                        <<"commit_status">> => <<"provisional">>,
+                                                                        <<"write_status">> => <<"accepted">>,
+                                                                        <<"replicated">> => false,
+                                                                        <<"su_count">> => SuCount,
+                                                                        <<"seq">> => Seq,
+                                                                        <<"request_id">> => ReqId
+                                                                    }}, State};
+                                                                true ->
+                                                                    {reply, {ok, FinalProv}, State}
+                                                            end
                                                     end
                                             end
                                     end

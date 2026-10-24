@@ -167,12 +167,44 @@ export async function reconcileCursorWithAO(options = {}) {
       };
     }
 
+    if (aoState.official_seq === diskCursor.last_committed_seq && aoState.official_seq > 0) {
+      const aoHash = String(aoState.official_hash || '').toUpperCase();
+      const localHash = String(diskCursor.last_committed_hash || '').toUpperCase();
+      const aoRoot = String(aoState.official_state_root ?? '0');
+      const localRoot = String(diskCursor.last_state_root ?? '0');
+
+      const hashMismatch = aoHash && localHash && aoHash !== localHash;
+      const rootMismatch = aoRoot && localRoot && aoRoot !== localRoot;
+
+      if (hashMismatch || rootMismatch) {
+        lastCommittedSeq = diskCursor.last_committed_seq;
+        const diverged = {
+          ...diskCursor,
+          reconciliation_status: 'diverged_state_mismatch',
+          mismatch_detected: true,
+          error_code: 'ERR_CURSOR_AO_STATE_MISMATCH',
+          ao_official_seq: aoState.official_seq,
+          ao_official_hash: aoState.official_hash,
+          ao_official_state_root: aoState.official_state_root,
+          local_disk_seq: diskCursor.last_committed_seq,
+          local_disk_hash: diskCursor.last_committed_hash,
+          local_disk_state_root: diskCursor.last_state_root,
+          reason: `Local cursor state diverges from AO official state at seq ${aoState.official_seq} (hashMismatch=${Boolean(hashMismatch)}, rootMismatch=${Boolean(rootMismatch)})`
+        };
+        if (options.throwOnDivergence === true) {
+          throw new Error(diverged.reason);
+        }
+        return diverged;
+      }
+    }
+
     if (diskCursor.last_committed_seq > aoState.official_seq) {
       lastCommittedSeq = diskCursor.last_committed_seq;
       const diverged = {
         ...diskCursor,
         reconciliation_status: 'diverged_local_ahead_of_ao',
         mismatch_detected: true,
+        error_code: 'ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ',
         ao_official_seq: aoState.official_seq,
         local_disk_seq: diskCursor.last_committed_seq,
         reason: `Local cursor seq (${diskCursor.last_committed_seq}) is ahead of AO OfficialSeq (${aoState.official_seq})`
@@ -237,13 +269,14 @@ export async function processCommitterCycle(options = {}) {
   const fetchFn = options.fetchFn || httpFetch;
 
   // Ensure cursor is initialized from durable storage or AO state before first cycle
-  if (lastCommittedSeq === null || options.forceReconcile) {
+  if (lastCommittedSeq === null || options.forceReconcile || options.reconcileEveryCycle) {
     const reconcileRes = await reconcileCursorWithAO({ ...options, cursorPath });
     if (reconcileRes && reconcileRes.mismatch_detected && !options.allowLocalAhead) {
       return {
         ok: false,
         skipped: true,
-        error_code: 'ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ',
+        cursor_advanced: false,
+        error_code: reconcileRes.error_code || 'ERR_CURSOR_DIVERGENCE',
         mismatch_detected: true,
         reconciliation_status: reconcileRes.reconciliation_status,
         ao_official_seq: reconcileRes.ao_official_seq,
@@ -310,8 +343,29 @@ export async function processCommitterCycle(options = {}) {
   batchData.batch_id = computeBatchId(batchData);
   batchData.batch_sig = computeBatchSig(batchData, secretKey);
 
+  const commitOptions = {
+    ...options,
+    verifyL1Gateway:
+      options.verifyL1Gateway ??
+      (process.env.VERIFY_L1_FINALITY === 'true' || options.verifyL1Finality === true),
+    verifyL1Finality:
+      options.verifyL1Finality ??
+      (process.env.VERIFY_L1_FINALITY === 'true' || options.verifyL1Gateway === true),
+    l1Gateways:
+      options.l1Gateways ||
+      (process.env.L1_GATEWAYS
+        ? process.env.L1_GATEWAYS.split(',').map((s) => s.trim()).filter(Boolean)
+        : undefined),
+    minConfirmations:
+      options.minConfirmations ??
+      (process.env.MIN_CONFIRMATIONS ? parseInt(process.env.MIN_CONFIRMATIONS, 10) : 1),
+    requireMultiGateway:
+      options.requireMultiGateway ??
+      (process.env.REQUIRE_MULTI_GATEWAY === 'true')
+  };
+
   const commitFn = options.commitFn || commitCheckpointBatch;
-  const commitRes = await commitFn(batchData, options);
+  const commitRes = await commitFn(batchData, commitOptions);
 
   // CRITICAL PHASE 06 GATE:
   // Only advance `lastCommittedSeq` and persist cursor if evaluation proof is VERIFIED!
@@ -368,6 +422,10 @@ export async function startCommitterDaemon(options = {}) {
   console.log('========================================================================\n');
 
   const initialCursor = await reconcileCursorWithAO(options);
+  if (initialCursor && initialCursor.mismatch_detected && !options.allowLocalAhead) {
+    console.error('[Fatal CommitterDaemon Error] Cursor reconciliation mismatch detected:', initialCursor.reason);
+    throw new Error(`Committer daemon fail-closed: ${initialCursor.reason}`);
+  }
   console.log(
     `[CommitterDaemon] Initialized cursor at seq=${initialCursor.last_committed_seq} (source=${initialCursor.source})`
   );

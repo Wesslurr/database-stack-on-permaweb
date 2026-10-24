@@ -10,6 +10,9 @@ services:
     volumes:
       - .:/app
       - hot_node_data:/app/data/node
+      - sd_node_1_data:/app/data/node_sd_1:ro
+      - sd_node_2_data:/app/data/node_sd_2:ro
+      - sd_node_3_data:/app/data/node_sd_3:ro
     ports:
       - "${HOT_HTTP_PORT:-8734}:8734"
       - "${HOT_TCP_PORT:-8736}:8736"
@@ -23,6 +26,7 @@ services:
       - HYDB_HOT_WAL_PATH=/app/data/node/hot_wal.log
       - HYDB_HOT_EPOCH_PATH=/app/data/node/hot_epoch.meta
       - HYDB_MEMBERSHIP_PATH=/app/data/node/cluster_membership.meta
+      - HYDB_RECONCILE_WAL_PATH=/app/data/node_sd_1/wal.log,/app/data/node_sd_2/wal.log,/app/data/node_sd_3/wal.log
       - HOT_PORT=8734
       - HOT_TCP_PORT=8736
       - ARWEAVE_GATEWAY=${ARWEAVE_GATEWAY:-http://arlocal:1984}
@@ -131,6 +135,10 @@ services:
       - AO_PROCESS_ID=${AO_PROCESS_ID:-}
       - USE_AO_CONNECT=${USE_AO_CONNECT:-false}
       - INTERVAL_MS=3000
+      - VERIFY_L1_FINALITY=${VERIFY_L1_FINALITY:-false}
+      - L1_GATEWAYS=${L1_GATEWAYS:-https://arweave.net,https://ar-io.dev}
+      - MIN_CONFIRMATIONS=${MIN_CONFIRMATIONS:-1}
+      - REQUIRE_MULTI_GATEWAY=${REQUIRE_MULTI_GATEWAY:-false}
     command: node ao_process/committer_daemon.mjs
 
   # 4. Optional Local Arweave Gateway (for local testing/isolated dev)

@@ -526,6 +526,27 @@ async function runPhase06Tests() {
         realHttpL1Proof.confirmations === 15,
       'Real signed Arweave L1 transaction with base64url tags verified over live HTTP gateway'
     );
+    assert(
+      realHttpL1Proof.trust_boundary === 'single_gateway_trusted_provider',
+      'Single gateway proof is marked with trust_boundary=single_gateway_trusted_provider'
+    );
+    assert(
+      realHttpL1Proof.multi_gateway_consensus === false,
+      'Single gateway proof sets multi_gateway_consensus=false'
+    );
+
+    const singleGwReqMulti = await verifyArweaveL1Finality(realTx.id, verifiedArLocalRes.batch_id, {
+      environment: 'ao_network',
+      gatewayUrl: `http://127.0.0.1:${gwPort}`,
+      requireMultiGateway: true,
+      processId: realTargetProc,
+      expectedBatch: batch1to3
+    });
+    assert(
+      singleGwReqMulti.verified === false &&
+        singleGwReqMulti.error_code === 'MULTI_GATEWAY_CONSENSUS_REQUIRED',
+      'verifyArweaveL1Finality rejects single gateway when requireMultiGateway=true'
+    );
   } finally {
     localGatewayServer.close();
   }
@@ -712,6 +733,95 @@ async function runPhase06Tests() {
   assert(
     divergedCycle.ok === false && divergedCycle.error_code === 'ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ',
     'processCommitterCycle halts with ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ when local cursor is ahead of AO'
+  );
+
+  // [4] State Root and Hash Verification on Matching Sequence (Fork/Corruption Fail-Closed)
+  saveDurableCursor(
+    {
+      last_committed_seq: 5,
+      last_committed_hash: 'CORRUPTED_OR_FORKED_LOCAL_HASH_00000000000000000000000000000000',
+      last_state_root: '999999999',
+      epoch: 1,
+      last_batch_id: 'FORKED_BATCH_ID'
+    },
+    cursorFile
+  );
+  setCommittedCursor(null);
+
+  const stateMismatchReconcile = await reconcileCursorWithAO({
+    cursorPath: cursorFile,
+    evaluatorFn: (m) => daemonLuaArbit.evaluate(m)
+  });
+  assert(
+    stateMismatchReconcile.mismatch_detected === true &&
+      stateMismatchReconcile.reconciliation_status === 'diverged_state_mismatch' &&
+      stateMismatchReconcile.error_code === 'ERR_CURSOR_AO_STATE_MISMATCH',
+    'reconcileCursorWithAO flags ERR_CURSOR_AO_STATE_MISMATCH when seq matches but hash or state root diverges'
+  );
+
+  setCommittedCursor(null);
+  const stateMismatchCycle = await processCommitterCycle({
+    cursorPath: cursorFile,
+    fetchFn: mockSuFetch,
+    evaluatorFn: (m) => daemonLuaArbit.evaluate(m)
+  });
+  assert(
+    stateMismatchCycle.ok === false &&
+      stateMismatchCycle.cursor_advanced === false &&
+      stateMismatchCycle.error_code === 'ERR_CURSOR_AO_STATE_MISMATCH',
+    'processCommitterCycle halts fail-closed on state mismatch without advancing cursor'
+  );
+
+  // [5] startCommitterDaemon Fail-Closed on Divergence
+  let daemonFailedClosed = false;
+  try {
+    const { startCommitterDaemon } = await import('../ao_process/committer_daemon.mjs');
+    await startCommitterDaemon({
+      cursorPath: cursorFile,
+      evaluatorFn: (m) => daemonLuaArbit.evaluate(m),
+      allowLocalAhead: false
+    });
+  } catch (err) {
+    if (err.message.includes('Committer daemon fail-closed')) {
+      daemonFailedClosed = true;
+    }
+  }
+  assert(daemonFailedClosed === true, 'startCommitterDaemon throws and halts fail-closed when state divergence is detected');
+
+  // [6] Daemon Default Option Propagation to commitCheckpointBatch
+  let capturedCommitOptions = null;
+  const mockCommitFn = async (batch, opts) => {
+    capturedCommitOptions = opts;
+    return { ok: false, verified: false, reason: 'mock_test_inspection' };
+  };
+  setCommittedCursor(5);
+  process.env.VERIFY_L1_FINALITY = 'true';
+  process.env.L1_GATEWAYS = 'https://arweave.net,https://ar-io.dev';
+  process.env.REQUIRE_MULTI_GATEWAY = 'true';
+  process.env.MIN_CONFIRMATIONS = '3';
+
+  // Advance SU tick so a batch is generated
+  const event6 = buildValidEvents(6, 1, allWalEvents[4].hash, BigInt(allWalEvents[4].state_root_str))[0];
+  allWalEvents.push(event6);
+  await processCommitterCycle({
+    cursorPath: cursorFile,
+    fetchFn: mockSuFetch,
+    commitFn: mockCommitFn,
+    allowLocalAhead: true
+  });
+  delete process.env.VERIFY_L1_FINALITY;
+  delete process.env.L1_GATEWAYS;
+  delete process.env.REQUIRE_MULTI_GATEWAY;
+  delete process.env.MIN_CONFIRMATIONS;
+
+  assert(
+    capturedCommitOptions !== null &&
+      capturedCommitOptions.verifyL1Finality === true &&
+      Array.isArray(capturedCommitOptions.l1Gateways) &&
+      capturedCommitOptions.l1Gateways.length === 2 &&
+      capturedCommitOptions.requireMultiGateway === true &&
+      capturedCommitOptions.minConfirmations === 3,
+    'processCommitterCycle propagates L1 finality & multi-gateway consensus options to commitCheckpointBatch'
   );
 
   console.log('\n========================================================================');

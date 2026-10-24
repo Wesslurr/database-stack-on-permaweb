@@ -267,10 +267,21 @@ export async function verifyArweaveL1Finality(l1TxId, batchDataOrId, options = {
 
   const rawGateways = Array.isArray(options.l1Gateways) && options.l1Gateways.length > 0
     ? options.l1Gateways
-    : [options.gatewayUrl || gatewayUrl];
+    : (process.env.L1_GATEWAYS ? process.env.L1_GATEWAYS.split(',').map((s) => s.trim()).filter(Boolean) : null) ||
+      [options.gatewayUrl || gatewayUrl];
   const gateways = [...new Set(rawGateways.map((g) => String(g).replace(/\/$/, '')).filter(Boolean))];
   if (gateways.length === 0) {
     return { verified: false, finalized: false, error_code: 'NO_GATEWAY_URLS', reason: 'No L1 gateway URLs configured' };
+  }
+
+  if ((options.requireMultiGateway === true || process.env.REQUIRE_MULTI_GATEWAY === 'true') && gateways.length < 2) {
+    return {
+      verified: false,
+      finalized: false,
+      error_code: 'MULTI_GATEWAY_CONSENSUS_REQUIRED',
+      reason: 'Multi-gateway consensus is required but fewer than 2 distinct gateways were provided',
+      gateways_count: gateways.length
+    };
   }
 
   const expectedBatchId = explicitBatchId || computeBatchId(batchData);
@@ -453,7 +464,9 @@ export async function verifyArweaveL1Finality(l1TxId, batchDataOrId, options = {
       number_of_confirmations: minObservedConfirmations,
       block_indep_hash: canonicalBlockHash,
       batch_id: expectedBatchId,
-      gateways_verified: gateways.length
+      gateways_verified: gateways.length,
+      multi_gateway_consensus: gateways.length >= 2,
+      trust_boundary: gateways.length >= 2 ? 'multi_gateway_consensus' : 'single_gateway_trusted_provider'
     };
   } catch (err) {
     return { verified: false, reason: `L1 gateway verification error: ${err.message}` };
@@ -610,8 +623,16 @@ export async function commitCheckpointBatch(batchData, options = {}) {
       }
     }
 
+    const shouldVerifyL1 =
+      env === 'ao_network' &&
+      (options.l1TxId || msgId) &&
+      (options.verifyL1Gateway === true ||
+        options.verifyL1Finality === true ||
+        process.env.VERIFY_L1_FINALITY === 'true' ||
+        Boolean(options.l1GatewayFetchFn));
+
     let verifiedL1Finality = null;
-    if (env === 'ao_network' && (options.l1TxId || msgId) && (options.l1GatewayFetchFn || options.verifyL1Gateway)) {
+    if (shouldVerifyL1) {
       verifiedL1Finality = await verifyArweaveL1Finality(options.l1TxId || msgId, batchData, {
         ...options,
         batchId,
@@ -704,8 +725,16 @@ export async function commitCheckpointBatch(batchData, options = {}) {
     }
   }
 
+  const shouldVerifyL1Tx =
+    env === 'ao_network' &&
+    (options.l1TxId || txId) &&
+    (options.verifyL1Gateway === true ||
+      options.verifyL1Finality === true ||
+      process.env.VERIFY_L1_FINALITY === 'true' ||
+      Boolean(options.l1GatewayFetchFn));
+
   let verifiedL1Finality = null;
-  if (env === 'ao_network' && (options.l1TxId || txId) && (options.l1GatewayFetchFn || options.verifyL1Gateway)) {
+  if (shouldVerifyL1Tx) {
     verifiedL1Finality = await verifyArweaveL1Finality(options.l1TxId || txId, batchData, {
       ...options,
       batchId,

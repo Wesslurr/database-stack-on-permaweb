@@ -267,6 +267,46 @@ main(_) ->
     CacheSize = ets:info(hymessage_idempotency_cache, size),
     assert_eq(CacheSize =< 3, true, "Idempotency cache size is bounded by HYDB_IDEMPOTENCY_MAX_ENTRIES"),
 
+    %% ========================================================================
+    %% 8. Idempotency Serving during Degraded Hot Node State
+    %% ========================================================================
+    ReqDegraded = #{
+        <<"namespace">> => <<"app.docs">>,
+        <<"key">> => <<"doc:degraded-test">>,
+        <<"val">> => <<"val-degraded-test">>,
+        <<"request_id">> => <<"req-degraded-001">>,
+        <<"epoch">> => 3,
+        <<"timeout_ms">> => 10
+    },
+    ResDegradedOrig = hymessage_runtime:put_from_req(#{}, ReqDegraded, #{}),
+    assert_eq(maps:get(<<"ok">>, ResDegradedOrig), true, "Original write before degradation succeeds"),
+    SeqDegraded = maps:get(<<"seq">>, ResDegradedOrig),
+
+    %% Mark Hot WAL degraded in ETS
+    ets:insert(hymessage_store, {hot_wal_corrupted, true}),
+
+    %% A brand NEW write must be rejected with 503 ERR_HOT_NODE_DEGRADED
+    ReqNewDegraded = #{
+        <<"namespace">> => <<"app.docs">>,
+        <<"key">> => <<"doc:degraded-new">>,
+        <<"val">> => <<"should-be-rejected">>,
+        <<"request_id">> => <<"req-degraded-new-002">>,
+        <<"epoch">> => 3
+    },
+    ResNewDegraded = hymessage_runtime:put_from_req(#{}, ReqNewDegraded, #{}),
+    assert_eq(maps:get(<<"ok">>, ResNewDegraded), false, "New write during degraded state is rejected"),
+    assert_eq(maps:get(<<"error_code">>, ResNewDegraded), <<"ERR_HOT_WAL_CORRUPTED">>,
+        "New write during degraded state returns ERR_HOT_WAL_CORRUPTED"),
+
+    %% But RETRY of the original request with same request_id MUST succeed from idempotency cache!
+    ResDegradedRetry = hymessage_runtime:put_from_req(#{}, ReqDegraded, #{}),
+    assert_eq(maps:get(<<"ok">>, ResDegradedRetry), true, "Retry of completed request during degraded state succeeds"),
+    assert_eq(maps:get(<<"seq">>, ResDegradedRetry), SeqDegraded, "Retry during degraded state returns original seq"),
+    assert_eq(maps:get(<<"idempotent_replay">>, ResDegradedRetry), true, "Retry during degraded state is marked idempotent_replay=true"),
+
+    %% Clear degraded flag
+    ets:delete(hymessage_store, hot_wal_corrupted),
+
     _ = file:delete(HotWalFile),
     _ = file:delete(HotEpochFile),
     io:format("ALL_PHASE_04_ERL_TESTS_PASSED~n").
