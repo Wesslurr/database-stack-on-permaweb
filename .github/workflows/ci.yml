@@ -64,6 +64,9 @@ jobs:
       - name: Run Phase 06 AO Settlement Verification & Durable Cursor Suite
         run: npm run test:committer
 
+      - name: Run Phase 07 Documentation Synchronization & Release Gate Audit
+        run: npm run test:release-gate
+
       - name: Run Cross-Language Conformance Suite (JS, Erlang, Rust, Lua)
         run: npm run test:conformance
 

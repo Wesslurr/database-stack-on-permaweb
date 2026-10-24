@@ -22,8 +22,9 @@
     "test:business": "node tests/business/financial_ledger_scenario.mjs && node tests/business/gaming_session_scenario.mjs",
     "test:chaos": "node tests/fault_injection_chaos.mjs",
     "test:committer": "node tests/test_tahap06_ao_committer.mjs",
+    "test:release-gate": "node tests/test_tahap07_release_gate.mjs",
     "test:integration": "node tests/test_maximal_poc.mjs",
-    "test:all": "npm run test:security && npm run test:recovery && npm run test:quorum && npm run test:idempotency && npm run test:chaos && npm run test:committer && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:integration"
+    "test:all": "npm run test:security && npm run test:recovery && npm run test:quorum && npm run test:idempotency && npm run test:chaos && npm run test:committer && npm run test:release-gate && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:integration"
   },
   "devDependencies": {
     "@permaweb/ao-loader": "^0.0.49",
