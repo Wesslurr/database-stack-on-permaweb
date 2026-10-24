@@ -31,6 +31,17 @@ const AO_WASM_PATH = process.env.AO_PROCESS_WASM || (
     : join(DB_DIR, 'vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb/genesis-wasm-server/test/processes/happy/process.wasm')
 );
 
+function getLuaBinary() {
+  for (const bin of ['lua', 'lua5.3', 'luajit']) {
+    try {
+      execFileSync(bin, ['-v'], { stdio: 'ignore' });
+      return bin;
+    } catch {}
+  }
+  return 'lua';
+}
+const LUA_BIN = getLuaBinary();
+
 let passed = 0;
 let failed = 0;
 
@@ -389,7 +400,7 @@ assertEq(domain.records.has('doc:inventory.stock:batchA'), false, 'Event 6 (batc
 console.log('\n[Test 7] Live AO Process Execution (Admin Authority & Checkpoint Commit):');
 
 // 1. Test PromoteEpoch unauthorized sender rejected via live Lua Arbitrator Process
-const luaCheckOut = execFileSync('lua5.3', [join(DB_DIR, 'tests/test_arbitrator_dispatch.lua')], { encoding: 'utf8' });
+const luaCheckOut = execFileSync(LUA_BIN, [join(DB_DIR, 'tests/test_arbitrator_dispatch.lua')], { encoding: 'utf8' });
 assert(luaCheckOut.includes('TEST1_STATUS=REJECTED_UNAUTHORIZED_ADMIN'), 'Live Arbitrator Lua process rejects unauthorized epoch promotion');
 assert(luaCheckOut.includes('TEST2_STATUS=EPOCH_PROMOTED'), 'Live Arbitrator Lua process promotes epoch for authorized admin');
 assert(luaCheckOut.includes('TEST3_STATUS=AUTHORIZED'), 'Live Arbitrator Lua process authorizes node');

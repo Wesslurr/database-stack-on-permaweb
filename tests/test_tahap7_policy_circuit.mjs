@@ -24,6 +24,17 @@ import { ArbitratorDomain, resolvePolicyAction } from '../ao_process/real_ao_eva
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
 
+function getLuaBinary() {
+  for (const bin of ['lua', 'lua5.3', 'luajit']) {
+    try {
+      execFileSync(bin, ['-v'], { stdio: 'ignore' });
+      return bin;
+    } catch {}
+  }
+  return 'lua';
+}
+const LUA_BIN = getLuaBinary();
+
 let passed = 0;
 let failed = 0;
 
@@ -262,7 +273,7 @@ print("TEST5_ACTION=" .. tostring(guardrailRes.action))
 print("TEST5_TRIGGERED=" .. tostring(guardrailRes.guardrail_triggered))
 `;
 
-const luaRunOut = execFileSync('lua5.3', ['-e', luaScript], { encoding: 'utf8' });
+const luaRunOut = execFileSync(LUA_BIN, ['-e', luaScript], { encoding: 'utf8' });
 assert(luaRunOut.includes('TEST1_STATUS=REJECTED_UNAUTHORIZED_ADMIN'), 'SetPolicy rejected for unauthorized caller');
 assert(luaRunOut.includes('TEST2_STATUS=REJECTED_INVALID_POLICY'), 'SetPolicy rejected for unknown verdict');
 assert(luaRunOut.includes('TEST2_CODE=ERR_POLICY_INVALID'), 'SetPolicy returns ERR_POLICY_INVALID on unknown verdict');
