@@ -11,6 +11,7 @@
     "smoke": "bash tests/smoke.sh",
     "test": "node tests/contract_conformance.mjs",
     "test:security": "node tests/test_tahap01_security.mjs",
+    "test:recovery": "node tests/test_tahap02_wal_recovery.mjs",
     "test:conformance": "node tests/contract_conformance.mjs",
     "test:contract": "node tests/test_tahap3_enforcement.mjs && node tests/test_tahap4_schema.mjs",
     "test:durability": "node tests/test_tahap5_durability.mjs",
@@ -19,7 +20,7 @@
     "test:business": "node tests/business/financial_ledger_scenario.mjs && node tests/business/gaming_session_scenario.mjs",
     "test:chaos": "node tests/fault_injection_chaos.mjs",
     "test:integration": "node tests/test_maximal_poc.mjs",
-    "test:all": "npm run test:security && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:chaos && npm run test:integration"
+    "test:all": "npm run test:security && npm run test:recovery && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:chaos && npm run test:integration"
   },
   "devDependencies": {
     "@permaweb/ao-loader": "^0.0.49",

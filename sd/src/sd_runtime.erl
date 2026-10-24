@@ -15,7 +15,7 @@
 -export([start_link/0, ensure_started/0, reset/0, is_connected/0, get_current_tick/0, get_state_root/0, get_epoch/0]).
 -export([get_tick/0, get_state/0, get_key/1, get_wal/0, get_wal_batch/2, get_status/0, get_status_map/0, fence_epoch/1, recover_wal/0, simulate_restart_from_wal/0]).
 -export([get_tick_from_req/3, get_state_from_req/3, get_key_from_req/3, get_wal_from_req/3, get_wal_batch_from_req/3, get_status_from_req/3, reset_from_req/3, fence_from_req/3, restart_from_req/3, handle_scheduler_http/4]).
--export([verify_admin_req/1, is_test_profile/0]).
+-export([verify_admin_req/1, is_test_profile/0, is_degraded/0, canonical_hash_64/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TABLE, sd_ram_store).
@@ -131,7 +131,12 @@ reset_ets_defaults() ->
     ets:insert(?TABLE, {fenced_rejections, 0}),
     ets:insert(?TABLE, {gap_rejections, 0}),
     ets:insert(?TABLE, {hash_rejections, 0}),
+    ets:insert(?TABLE, {degraded_rejections, 0}),
     ets:insert(?TABLE, {connected_to_hot, false}),
+    ets:insert(?TABLE, {wal_corrupted, false}),
+    ets:insert(?TABLE, {node_health, healthy}),
+    ets:insert(?TABLE, {wal_recovery_halt_reason, none}),
+    ets:insert(?TABLE, {wal_recovery_truncated_detected, false}),
     ets:insert(?TABLE, {history, []}).
 
 get_or_open_wal_fd() ->
@@ -154,61 +159,160 @@ close_wal_fd() ->
         [] -> ok
     end.
 
+is_degraded() ->
+    lookup_val(wal_corrupted, false).
+
+mark_recovery_failure(Reason) ->
+    ets:insert(?TABLE, {wal_recovery_halt_reason, Reason}),
+    ets:insert(?TABLE, {wal_corrupted, true}),
+    ets:insert(?TABLE, {node_health, degraded}).
+
+canonical_hash_64(KeyInt, ValInt, VerInt) when is_integer(KeyInt), is_integer(ValInt), is_integer(VerInt) ->
+    Mask64 = 16#FFFFFFFFFFFFFFFF,
+    Prime = 16#100000001B3,
+    UKey = KeyInt band Mask64,
+    UVal = ValInt band Mask64,
+    UVer = VerInt band Mask64,
+
+    H0 = 16#CBF29CE484222325,
+    H1 = ((H0 bxor UKey) * Prime) band Mask64,
+    H2 = ((H1 bxor UVal) * Prime) band Mask64,
+    H3 = ((H2 bxor UVer) * Prime) band Mask64,
+    H4 = (H3 bxor (H3 bsr 30)) band Mask64,
+    H5 = (H4 * 16#BF58476D1CE4E5B9) band Mask64,
+    H6 = (H5 bxor (H5 bsr 27)) band Mask64,
+    H7 = (H6 * 16#94D049BB133111EB) band Mask64,
+    H8 = (H7 bxor (H7 bsr 31)) band Mask64,
+    to_signed_64(H8).
+
+to_signed_64(U) when U >= 16#8000000000000000 ->
+    U - 16#10000000000000000;
+to_signed_64(U) ->
+    U.
+
+namespace_id_64(<<"default">>) ->
+    0;
+namespace_id_64(Ns) when is_binary(Ns) ->
+    <<Int32:32/big-unsigned-integer, _/binary>> = crypto:hash(sha256, Ns),
+    1000 + (Int32 rem 100000000);
+namespace_id_64(_) ->
+    0.
+
+compute_incremental_root(Event, CurrentRoot) ->
+    Op = maps:get(<<"action">>, Event, maps:get(<<"op">>, Event, <<"put">>)),
+    case Op of
+        <<"register_schema">> ->
+            CurrentRoot;
+        _ ->
+            RawKey = maps:get(<<"key">>, Event, undefined),
+            case RawKey of
+                undefined -> CurrentRoot;
+                _ ->
+                    Namespace = maps:get(<<"namespace">>, Event, <<"default">>),
+                    KeyInt = to_integer(RawKey, 0),
+                    NsId = namespace_id_64(Namespace),
+                    CompKey = if NsId =:= 0 -> KeyInt; true -> NsId bxor KeyInt end,
+                    OldRec = case ets:lookup(?TABLE, {record_meta, Namespace, KeyInt}) of
+                        [{{record_meta, Namespace, KeyInt}, Meta}] -> Meta;
+                        _ -> undefined
+                    end,
+                    case Op of
+                        <<"del">> ->
+                            case OldRec of
+                                {OldVal, OldVer} ->
+                                    OldHash = canonical_hash_64(CompKey, OldVal, OldVer),
+                                    to_signed_64((CurrentRoot bxor OldHash) band 16#FFFFFFFFFFFFFFFF);
+                                _ ->
+                                    CurrentRoot
+                            end;
+                        _ ->
+                            NewVal = to_integer(maps:get(<<"val">>, Event, 0), 0),
+                            NewVer = to_integer(maps:get(<<"ver">>, Event, 1), 1),
+                            NewHash = canonical_hash_64(CompKey, NewVal, NewVer),
+                            OldHash = case OldRec of
+                                {OldVal, OldVer} -> canonical_hash_64(CompKey, OldVal, OldVer);
+                                _ -> 0
+                            end,
+                            to_signed_64(((CurrentRoot bxor OldHash) bxor NewHash) band 16#FFFFFFFFFFFFFFFF)
+                    end
+            end
+    end.
+
 recover_from_wal(Path) ->
     case file:read_file(Path) of
         {ok, Content} ->
             Lines = binary:split(Content, <<"\n">>, [global, trim_all]),
-            validate_and_apply_wal_lines(Lines, 1, ?GENESIS_HASH, 0);
+            validate_and_apply_wal_lines(Lines, 1, ?GENESIS_HASH, 1, 0, 0);
         _ -> 0
     end.
 
-validate_and_apply_wal_lines([], _ExpectedSeq, _LastHash, AppliedCount) ->
+validate_and_apply_wal_lines([], _ExpectedSeq, _LastHash, _LastEpoch, AppliedCount, AccRoot) ->
+    ets:insert(?TABLE, {state_root, AccRoot}),
     AppliedCount;
-validate_and_apply_wal_lines([Line | Rest], ExpectedSeq, LastHash, AppliedCount) ->
+validate_and_apply_wal_lines([Line | Rest], ExpectedSeq, LastHash, LastEpoch, AppliedCount, AccRoot) ->
     case catch json:decode(Line) of
         Event when is_map(Event) ->
             Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
+            EvEpoch = to_integer(maps:get(<<"epoch">>, Event, 1), 1),
             GivenHash = maps:get(<<"hash">>, Event, <<>>),
             GivenPrevHash = maps:get(<<"prev_hash">>, Event, <<>>),
             ExpectedHash = compute_event_hash(Event, LastHash),
             HashMatches = (string:uppercase(GivenHash) =:= string:uppercase(ExpectedHash)),
             PrevHashMatches = (string:uppercase(GivenPrevHash) =:= string:uppercase(LastHash)),
+
+            ClaimedRootBin = maps:get(<<"state_root">>, Event, undefined),
+            ClaimedRoot = case ClaimedRootBin of
+                undefined -> undefined;
+                RInt when is_integer(RInt) -> RInt;
+                RBin when is_binary(RBin) -> to_integer(RBin, undefined)
+            end,
+
+            NewAccRoot = compute_incremental_root(Event, AccRoot),
+            RootMatches = (ClaimedRoot =:= undefined orelse ClaimedRoot =:= NewAccRoot),
+
             if
                 Seq =/= ExpectedSeq ->
-                    ets:insert(?TABLE, {wal_recovery_halt_reason, {sequence_gap, Seq, ExpectedSeq}}),
+                    mark_recovery_failure({sequence_gap, Seq, ExpectedSeq}),
+                    AppliedCount;
+                EvEpoch < LastEpoch ->
+                    mark_recovery_failure({epoch_regression, EvEpoch, LastEpoch}),
                     AppliedCount;
                 not PrevHashMatches ->
-                    ets:insert(?TABLE, {wal_recovery_halt_reason, {broken_hash_chain, GivenPrevHash, LastHash}}),
+                    mark_recovery_failure({broken_hash_chain, GivenPrevHash, LastHash}),
                     AppliedCount;
                 not HashMatches ->
-                    ets:insert(?TABLE, {wal_recovery_halt_reason, {hash_mismatch, GivenHash, ExpectedHash}}),
+                    mark_recovery_failure({hash_mismatch, GivenHash, ExpectedHash}),
+                    AppliedCount;
+                not RootMatches ->
+                    mark_recovery_failure({state_root_mismatch, ClaimedRoot, NewAccRoot}),
                     AppliedCount;
                 true ->
-                    apply_event_to_ets(Event),
-                    validate_and_apply_wal_lines(Rest, ExpectedSeq + 1, GivenHash, AppliedCount + 1)
+                    apply_event_to_ets(Event, NewAccRoot),
+                    validate_and_apply_wal_lines(Rest, ExpectedSeq + 1, GivenHash, max(LastEpoch, EvEpoch), AppliedCount + 1, NewAccRoot)
             end;
         _CorruptOrTruncated ->
-            ets:insert(?TABLE, {wal_recovery_truncated_detected, true}),
-            AppliedCount
+            case Rest of
+                [] ->
+                    %% Clean EOF truncation due to crash mid-write
+                    ets:insert(?TABLE, {wal_recovery_truncated_detected, true}),
+                    ets:insert(?TABLE, {state_root, AccRoot}),
+                    AppliedCount;
+                _ ->
+                    %% Mid-file corruption! Subsequent lines exist after corrupt record
+                    mark_recovery_failure({mid_file_corruption, Line}),
+                    AppliedCount
+            end
     end.
 
-apply_event_to_ets(Event) ->
+apply_event_to_ets(Event, ComputedRoot) ->
     Seq = to_integer(maps:get(<<"seq">>, Event, 0), 0),
     Epoch = to_integer(maps:get(<<"epoch">>, Event, 1), 1),
     Namespace = maps:get(<<"namespace">>, Event, <<"default">>),
     CurrEpoch = lookup_val(epoch, 1),
     ets:insert(?TABLE, {epoch, max(CurrEpoch, Epoch)}),
     ets:insert(?TABLE, {tick, Seq}),
-    RootBin = case maps:get(<<"state_root">>, Event, undefined) of
-        undefined ->
-            integer_to_binary(lookup_val(state_root, 0));
-        RootInt when is_integer(RootInt) ->
-            ets:insert(?TABLE, {state_root, RootInt}),
-            integer_to_binary(RootInt);
-        RootB when is_binary(RootB) ->
-            ets:insert(?TABLE, {state_root, to_integer(RootB, 0)}),
-            RootB
-    end,
+    ets:insert(?TABLE, {state_root, ComputedRoot}),
+    RootBin = integer_to_binary(ComputedRoot),
     case maps:get(<<"hash">>, Event, undefined) of
         undefined -> ok;
         Hash ->
@@ -232,10 +336,16 @@ apply_event_to_ets(Event) ->
                     end,
                     case Op of
                         <<"del">> ->
+                            KeyInt = to_integer(Key0, 0),
+                            ets:delete(?TABLE, {record_meta, Namespace, KeyInt}),
                             ets:delete(?TABLE, {kv_ns, Namespace, Key}),
                             if Namespace =:= <<"default">> -> ets:delete(?TABLE, {kv, Key}); true -> ok end;
                         _ ->
                             Val = maps:get(<<"val">>, Event, 0),
+                            KeyInt = to_integer(Key0, 0),
+                            ValInt = to_integer(Val, 0),
+                            Ver = to_integer(maps:get(<<"ver">>, Event, 1), 1),
+                            ets:insert(?TABLE, {{record_meta, Namespace, KeyInt}, {ValInt, Ver}}),
                             ets:insert(?TABLE, {{kv_ns, Namespace, Key}, Val}),
                             if Namespace =:= <<"default">> -> ets:insert(?TABLE, {{kv, Key}, Val}); true -> ok end
                     end
@@ -280,11 +390,29 @@ get_status_map() ->
     FencedRej = lookup_val(fenced_rejections, 0),
     GapRej = lookup_val(gap_rejections, 0),
     HashRej = lookup_val(hash_rejections, 0),
+    DegradedRej = lookup_val(degraded_rejections, 0),
+    WalCorrupted = lookup_val(wal_corrupted, false),
+    HaltReason = case ets:lookup(?TABLE, wal_recovery_halt_reason) of
+        [{wal_recovery_halt_reason, none}] -> <<"none">>;
+        [{wal_recovery_halt_reason, R}] -> list_to_binary(io_lib:format("~p", [R]));
+        _ -> <<"none">>
+    end,
+    Truncated = case ets:lookup(?TABLE, wal_recovery_truncated_detected) of
+        [{wal_recovery_truncated_detected, T}] -> T;
+        _ -> false
+    end,
+    Health = case WalCorrupted of true -> <<"degraded">>; false -> <<"healthy">> end,
+    Ready = not WalCorrupted,
     #{
         <<"ok">> => true,
         <<"role">> => <<"SD-HyperBEAM-Node">>,
         <<"node_name">> => <<"hb_su">>,
         <<"device">> => <<"sd@1.0">>,
+        <<"health">> => Health,
+        <<"ready">> => Ready,
+        <<"wal_corrupted">> => WalCorrupted,
+        <<"halt_reason">> => HaltReason,
+        <<"truncated_detected">> => Truncated,
         <<"connected_to_hot">> => Connected,
         <<"epoch">> => Epoch,
         <<"latest_tick_ram">> => Tick,
@@ -295,6 +423,7 @@ get_status_map() ->
         <<"fenced_rejections">> => FencedRej,
         <<"gap_rejections">> => GapRej,
         <<"hash_rejections">> => HashRej,
+        <<"degraded_rejections">> => DegradedRej,
         <<"wal_file">> => list_to_binary(wal_path())
     }.
 
@@ -430,7 +559,9 @@ handle_call(simulate_restart_from_wal, _From, State) ->
     Root = lookup_val(state_root, 0),
     Epoch = lookup_val(epoch, 1),
     KVCount = ets:foldl(fun({{kv, _}, _}, Acc) -> Acc + 1; (_, Acc) -> Acc end, 0, ?TABLE),
+    WalCorrupted = lookup_val(wal_corrupted, false),
     HaltReason = case ets:lookup(?TABLE, wal_recovery_halt_reason) of
+        [{wal_recovery_halt_reason, none}] -> <<"none">>;
         [{wal_recovery_halt_reason, R}] -> list_to_binary(io_lib:format("~p", [R]));
         _ -> <<"none">>
     end,
@@ -438,8 +569,13 @@ handle_call(simulate_restart_from_wal, _From, State) ->
         [{wal_recovery_truncated_detected, T}] -> T;
         _ -> false
     end,
+    Health = case WalCorrupted of true -> <<"degraded">>; false -> <<"healthy">> end,
+    Ready = not WalCorrupted,
     {reply, #{
         <<"ok">> => true,
+        <<"health">> => Health,
+        <<"ready">> => Ready,
+        <<"wal_corrupted">> => WalCorrupted,
         <<"recovered_entries">> => Count,
         <<"epoch">> => Epoch,
         <<"tick">> => Tick,
@@ -723,43 +859,52 @@ handle_incoming_event(Socket, RawData) ->
         LastTick = lookup_val(tick, 0),
         LastHash = lookup_val(latest_hash, ?GENESIS_HASH),
 
-        %% 1. EPOCH FENCING CHECK: Reject stale Hot Node from older epoch
-        if EvEpoch < MinEpoch ->
-            ets:update_counter(?TABLE, fenced_rejections, 1, {fenced_rejections, 0}),
-            ok;
-           Seq =< LastTick ->
-            case ets:lookup(?TABLE, {event_hash, Seq}) of
-                [{{event_hash, Seq}, ExistingHash}] ->
-                    GivenHash = maps:get(<<"hash">>, Event, <<>>),
-                    if ExistingHash == GivenHash ->
-                        gen_tcp:send(Socket, <<Seq:32/big>>);
-                       true ->
-                        ets:update_counter(?TABLE, hash_rejections, 1, {hash_rejections, 0}),
-                        ok
-                    end;
-                [] ->
-                    ok
-            end;
-           Seq > (LastTick + 1) ->
-            ets:update_counter(?TABLE, gap_rejections, 1, {gap_rejections, 0}),
-            ok;
-           true ->
-            ExpectedHash = compute_event_hash(Event, LastHash),
-            GivenHashRaw = maps:get(<<"hash">>, Event, <<>>),
-            HashMatches = (ExpectedHash =:= GivenHashRaw) orelse
-                          (string:uppercase(ExpectedHash) =:= string:uppercase(GivenHashRaw)),
-
-            if not HashMatches ->
-                ets:update_counter(?TABLE, hash_rejections, 1, {hash_rejections, 0}),
+        %% 0. FAIL-CLOSED CHECK: Reject incoming writes if WAL recovery failed or node is degraded
+        case is_degraded() of
+            true ->
+                ets:update_counter(?TABLE, degraded_rejections, 1, {degraded_rejections, 0}),
                 ok;
-               true ->
-                WalFd = get_or_open_wal_fd(),
-                ok = file:write(WalFd, [RawData, <<"\n">>]),
-                ok = file:datasync(WalFd),
-                apply_event_to_ets(Event),
-                gen_tcp:send(Socket, <<Seq:32/big>>),
-                ok
-            end
+            false ->
+                %% 1. EPOCH FENCING CHECK: Reject stale Hot Node from older epoch
+                if EvEpoch < MinEpoch ->
+                    ets:update_counter(?TABLE, fenced_rejections, 1, {fenced_rejections, 0}),
+                    ok;
+                   Seq =< LastTick ->
+                    case ets:lookup(?TABLE, {event_hash, Seq}) of
+                        [{{event_hash, Seq}, ExistingHash}] ->
+                            GivenHash = maps:get(<<"hash">>, Event, <<>>),
+                            if ExistingHash == GivenHash ->
+                                gen_tcp:send(Socket, <<Seq:32/big>>);
+                               true ->
+                                ets:update_counter(?TABLE, hash_rejections, 1, {hash_rejections, 0}),
+                                ok
+                            end;
+                        [] ->
+                            ok
+                    end;
+                   Seq > (LastTick + 1) ->
+                    ets:update_counter(?TABLE, gap_rejections, 1, {gap_rejections, 0}),
+                    ok;
+                   true ->
+                    ExpectedHash = compute_event_hash(Event, LastHash),
+                    GivenHashRaw = maps:get(<<"hash">>, Event, <<>>),
+                    HashMatches = (ExpectedHash =:= GivenHashRaw) orelse
+                                  (string:uppercase(ExpectedHash) =:= string:uppercase(GivenHashRaw)),
+
+                    if not HashMatches ->
+                        ets:update_counter(?TABLE, hash_rejections, 1, {hash_rejections, 0}),
+                        ok;
+                       true ->
+                        WalFd = get_or_open_wal_fd(),
+                        ok = file:write(WalFd, [RawData, <<"\n">>]),
+                        ok = file:datasync(WalFd),
+                        CurrRoot = lookup_val(state_root, 0),
+                        ComputedRoot = compute_incremental_root(Event, CurrRoot),
+                        apply_event_to_ets(Event, ComputedRoot),
+                        gen_tcp:send(Socket, <<Seq:32/big>>),
+                        ok
+                    end
+                end
         end
     catch
         _:_Err ->

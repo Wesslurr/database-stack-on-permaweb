@@ -49,6 +49,9 @@ jobs:
       - name: Run Phase 01 Security & Cluster Endpoint Hardening Tests
         run: npm run test:security
 
+      - name: Run Phase 02 WAL Recovery & Data Integrity Tests
+        run: npm run test:recovery
+
       - name: Run Cross-Language Conformance Suite (JS, Erlang, Rust, Lua)
         run: npm run test:conformance
 
