@@ -7,6 +7,7 @@
   "scripts": {
     "wallet": "node scripts/gen-wallet.mjs && node scripts/gen-wallet-su.mjs",
     "arlocal": "node scripts/start-arlocal.mjs",
+    "committer": "node ao_process/committer_daemon.mjs",
     "smoke": "bash tests/smoke.sh",
     "test": "node tests/contract_conformance.mjs",
     "test:conformance": "node tests/contract_conformance.mjs",

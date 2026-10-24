@@ -121,7 +121,7 @@ export function validateContractPolicy(policy = {}) {
 }
 
 
-function parseArweaveGateway(gatewayUrl = 'http://127.0.0.1:1984') {
+function parseArweaveGateway(gatewayUrl = (typeof process !== 'undefined' && process.env?.ARWEAVE_GATEWAY) || 'http://127.0.0.1:1984') {
   const u = new URL(gatewayUrl);
   return {
     host: u.hostname,
@@ -435,7 +435,7 @@ export class HyDBContract {
       await this.preflightDryRun();
     }
 
-    const gw = parseArweaveGateway(options.gatewayUrl || 'http://127.0.0.1:1984');
+    const gw = parseArweaveGateway(options.gatewayUrl || (typeof process !== 'undefined' && process.env?.ARWEAVE_GATEWAY) || 'http://127.0.0.1:1984');
     const arweave = Arweave.init({ host: gw.host, port: gw.port, protocol: gw.protocol });
     const jwk = options.jwk || JSON.parse(readFileSync(options.walletPath || DEFAULT_WALLET_PATH, 'utf-8'));
     const ownerAddress = await arweave.wallets.jwkToAddress(jwk);

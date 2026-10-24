@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # 1. Hot Node: Ultra-fast in-memory execution (sub-15ms)
+  hot-node:
+    image: erlang:27-slim
+    container_name: hydb-hot-node
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+      - hot_node_data:/app/data/node
+    ports:
+      - "${HOT_HTTP_PORT:-8734}:8734"
+      - "${HOT_TCP_PORT:-8736}:8736"
+    environment:
+      - DB_DIR=/app
+      - HOT_PORT=8734
+      - HOT_TCP_PORT=8736
+      - ARWEAVE_GATEWAY=${ARWEAVE_GATEWAY:-http://arlocal:1984}
+      - TRUSTED_ARWEAVE_GATEWAYS=http://127.0.0.1:1984,http://arlocal:1984,https://arweave.net,https://ar-io.dev
+    command: bash -c "./scripts/start-node.sh && tail -f /dev/null"
+
+  # 2. Storage Unit (SU): Durability worker & append-only disk WAL
+  storage-unit:
+    image: erlang:27-slim
+    container_name: hydb-storage-unit
+    restart: unless-stopped
+    working_dir: /app
+    depends_on:
+      - hot-node
+    volumes:
+      - .:/app
+      - su_wal_data:/app/data/node_sd
+    ports:
+      - "${SU_PORT:-8735}:8735"
+    environment:
+      - DB_DIR=/app
+      - SU_PORT=8735
+      - HOT_NODE_HOST=hot-node
+      - HOT_NODE_PORT=8736
+      - HYDB_WAL_PATH=/app/data/node_sd/wal.log
+    command: bash -c "./scripts/start-sd-node.sh && tail -f /dev/null"
+
+  # 3. Autonomous Committer Daemon: Storage Unit -> AO Process Bridge
+  committer-daemon:
+    image: node:22-slim
+    container_name: hydb-committer-daemon
+    restart: unless-stopped
+    working_dir: /app
+    depends_on:
+      - storage-unit
+    volumes:
+      - .:/app
+    environment:
+      - DB_DIR=/app
+      - SU_URL=http://storage-unit:8735/~scheduler@1.0
+      - HOT_URL=http://hot-node:8734/~hymessage@1.0
+      - ARWEAVE_GATEWAY=${ARWEAVE_GATEWAY:-http://arlocal:1984}
+      - AO_PROCESS_ID=${AO_PROCESS_ID:-}
+      - USE_AO_CONNECT=${USE_AO_CONNECT:-false}
+      - INTERVAL_MS=3000
+    command: node ao_process/committer_daemon.mjs
+
+  # 4. Optional Local Arweave Gateway (for local testing/isolated dev)
+  arlocal:
+    image: node:22-slim
+    container_name: hydb-arlocal
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - .:/app
+      - arlocal_data:/app/.arlocal-db
+    ports:
+      - "1984:1984"
+    command: node scripts/start-arlocal.mjs
+    profiles:
+      - local-dev
+
+volumes:
+  hot_node_data:
+  su_wal_data:
+  arlocal_data:

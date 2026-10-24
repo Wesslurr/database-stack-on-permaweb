@@ -9,17 +9,21 @@ if [ ! -f "$DB_DIR/secrets/wallet.json" ]; then
   (cd "$DB_DIR" && node "$DB_DIR/scripts/gen-wallet.mjs")
 fi
 
-if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8734/~meta@1.0/info; then
-  echo "[node] already running on :8734"
+HOT_PORT="${HOT_PORT:-8734}"
+
+if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$HOT_PORT/~meta@1.0/info"; then
+  echo "[node] already running on :$HOT_PORT"
   exit 0
 fi
 # relx selalu cd ke release root dan load config.flat dari sana bila HB_CONFIG
 # tidak terbaca - sinkronkan dulu biar tidak baca config basi.
-sed "s|secrets/wallet.json|$DB_DIR/secrets/wallet.json|g" "$DB_DIR/config/node.flat" > "$HB_REL/config.flat"
+sed -e "s|secrets/wallet.json|$DB_DIR/secrets/wallet.json|g" \
+    -e "s|port: 8734|port: $HOT_PORT|g" \
+    "$DB_DIR/config/node.flat" > "$HB_REL/config.flat"
 "$HB_REL/bin/hb" daemon
 for i in $(seq 1 45); do
-  if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8734/~meta@1.0/info; then
-    echo "[node] UP on :8734"
+  if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$HOT_PORT/~meta@1.0/info"; then
+    echo "[node] UP on :$HOT_PORT"
     exit 0
   fi
   sleep 1

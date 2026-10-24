@@ -1,0 +1,21 @@
+{
+  "name": "@hydb/ao-arbitrator",
+  "version": "1.0.0",
+  "description": "On-Chain AO Verification Authority and Autonomous Committer Daemon for HyDB",
+  "type": "module",
+  "main": "./real_ao_evaluator.mjs",
+  "exports": {
+    "./evaluator": "./real_ao_evaluator.mjs",
+    "./committer": "./committer.mjs",
+    "./daemon": "./committer_daemon.mjs"
+  },
+  "scripts": {
+    "start": "node committer_daemon.mjs",
+    "commit": "node committer.mjs"
+  },
+  "dependencies": {
+    "@permaweb/ao-loader": "^0.0.49",
+    "@permaweb/aoconnect": "^0.0.98",
+    "arweave": "^1.15.7"
+  }
+}

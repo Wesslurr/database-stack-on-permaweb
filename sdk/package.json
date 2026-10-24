@@ -1,0 +1,25 @@
+{
+  "name": "@hydb/sdk",
+  "version": "1.0.0",
+  "description": "Universal Verifiable Database SDK for AO & Arweave — Sub-15ms Optimistic Execution with Autonomous Decentralized Settlement",
+  "type": "module",
+  "main": "./hydb_sdk.mjs",
+  "exports": {
+    ".": "./hydb_sdk.mjs"
+  },
+  "keywords": [
+    "ao",
+    "arweave",
+    "permaweb",
+    "database",
+    "hydb",
+    "optimistic",
+    "wasm"
+  ],
+  "author": "HyDB Core Team",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@permaweb/aoconnect": "^0.0.98",
+    "arweave": "^1.15.7"
+  }
+}

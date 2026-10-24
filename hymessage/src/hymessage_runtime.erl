@@ -295,10 +295,30 @@ schema_from_req(_Base, Req, _Opts) ->
             }
     end.
 
-is_trusted_arweave_gateway(<<"http://127.0.0.1:1984">>) -> true;
-is_trusted_arweave_gateway(<<"http://localhost:1984">>) -> true;
-is_trusted_arweave_gateway(<<"https://arweave.net">>) -> true;
-is_trusted_arweave_gateway(<<"https://ar-io.dev">>) -> true;
+is_trusted_arweave_gateway(GatewayBin) when is_binary(GatewayBin) ->
+    Defaults = [
+        <<"http://127.0.0.1:1984">>,
+        <<"http://localhost:1984">>,
+        <<"https://arweave.net">>,
+        <<"https://ar-io.dev">>,
+        <<"https://permaweb.io">>,
+        <<"https://arweave.dev">>
+    ],
+    case lists:member(GatewayBin, Defaults) of
+        true -> true;
+        false ->
+            case os:getenv("TRUSTED_ARWEAVE_GATEWAYS") of
+                false ->
+                    case os:getenv("ARWEAVE_GATEWAY") of
+                        false -> false;
+                        EnvGw ->
+                            GatewayBin =:= iolist_to_binary(EnvGw)
+                    end;
+                EnvList ->
+                    Configured = [iolist_to_binary(string:trim(G)) || G <- string:tokens(EnvList, ",")],
+                    lists:member(GatewayBin, Configured)
+            end
+    end;
 is_trusted_arweave_gateway(_) -> false.
 
 verify_admin_req(Req, ForceRequire) ->
@@ -779,7 +799,12 @@ node_auth_secret() ->
 start_stream_hub() ->
     case whereis(hymessage_stream_hub) of
         undefined ->
-            Pid = spawn_link(fun() -> stream_hub_listen(8736) end),
+            TcpPort = case os:getenv("HOT_TCP_PORT") of
+                false -> 8736;
+                "" -> 8736;
+                PStr -> list_to_integer(PStr)
+            end,
+            Pid = spawn_link(fun() -> stream_hub_listen(TcpPort) end),
             register(hymessage_stream_hub, Pid);
         _ -> ok
     end.

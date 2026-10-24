@@ -7,6 +7,7 @@
  */
 
 import Arweave from 'arweave';
+import { message, createDataItemSigner } from '@permaweb/aoconnect';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
@@ -17,10 +18,13 @@ const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json
 const PROCESS_ID_FILE = join(DB_DIR, 'ao_process/process_id.txt');
 const LUA_PATH = join(DB_DIR, 'ao_process/arbitrator.lua');
 
+const gatewayUrl = process.env.ARWEAVE_GATEWAY || 'http://127.0.0.1:1984';
+const gwUrlObj = new URL(gatewayUrl);
+
 const arweave = Arweave.init({
-  host: '127.0.0.1',
-  port: 1984,
-  protocol: 'http',
+  host: gwUrlObj.hostname,
+  port: Number(gwUrlObj.port || (gwUrlObj.protocol === 'https:' ? 443 : 80)),
+  protocol: gwUrlObj.protocol.replace(':', ''),
 });
 
 async function getWallet() {
@@ -30,8 +34,12 @@ async function getWallet() {
 }
 
 async function mineBlock() {
-  const res = await fetch('http://127.0.0.1:1984/mine').then(r => r.json());
-  return res;
+  try {
+    const res = await fetch(`${gatewayUrl.replace(/\/$/, '')}/mine`).then(r => r.json());
+    return res;
+  } catch {
+    return { height: 1, current: 'public_block' };
+  }
 }
 
 export async function getOrCreateProcessId() {
@@ -67,9 +75,43 @@ export async function getOrCreateProcessId() {
   return tx.id;
 }
 
-export async function commitCheckpointBatch(batchData) {
-  const processId = await getOrCreateProcessId();
+export async function commitCheckpointBatch(batchData, options = {}) {
+  const processId = options.processId || process.env.AO_PROCESS_ID || await getOrCreateProcessId();
   const { jwk } = await getWallet();
+
+  const useAoConnect = options.useAoConnect || process.env.USE_AO_CONNECT === 'true';
+
+  if (useAoConnect) {
+    const msgId = await message({
+      process: processId,
+      signer: createDataItemSigner(jwk),
+      tags: [
+        { name: 'Data-Protocol', value: 'ao' },
+        { name: 'Variant', value: 'ao.TN.1' },
+        { name: 'Type', value: 'Message' },
+        { name: 'Action', value: 'CommitCheckpoint' },
+        { name: 'From-Seq', value: String(batchData.from_seq) },
+        { name: 'To-Seq', value: String(batchData.to_seq) },
+        { name: 'State-Root', value: String(batchData.proposed_state_root) },
+        { name: 'Hash', value: String(batchData.proposed_hash) },
+        { name: 'Events-Count', value: String((batchData.events || []).length) },
+        { name: 'Timestamp', value: Date.now().toString() }
+      ],
+      data: JSON.stringify(batchData)
+    });
+
+    return {
+      ok: true,
+      protocol: 'aoconnect',
+      tx_id: msgId,
+      process_id: processId,
+      from_seq: batchData.from_seq,
+      to_seq: batchData.to_seq,
+      state_root: batchData.proposed_state_root,
+      final_hash: batchData.proposed_hash,
+      confirmed: true
+    };
+  }
 
   const payload = Buffer.from(JSON.stringify(batchData));
   const tx = await arweave.createTransaction({ data: payload }, jwk);

@@ -34,17 +34,21 @@ if [ ! -f "$DB_DIR/secrets/wallet_su.json" ]; then
   (cd "$DB_DIR" && node "$DB_DIR/scripts/gen-wallet-su.mjs")
 fi
 
-if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8735/~meta@1.0/info; then
-  echo "[sd-node] already running on :8735"
+SU_PORT="${SU_PORT:-8735}"
+
+if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$SU_PORT/~meta@1.0/info"; then
+  echo "[sd-node] already running on :$SU_PORT"
   exit 0
 fi
 
-sed "s|secrets/wallet_su.json|$DB_DIR/secrets/wallet_su.json|g" "$DB_DIR/config/node_sd.flat" > "$HB_SD_REL/config.flat"
+sed -e "s|secrets/wallet_su.json|$DB_DIR/secrets/wallet_su.json|g" \
+    -e "s|port: 8735|port: $SU_PORT|g" \
+    "$DB_DIR/config/node_sd.flat" > "$HB_SD_REL/config.flat"
 "$HB_SD_REL/bin/hb" daemon
 
 for i in $(seq 1 45); do
-  if curl -sf --max-time 2 -o /dev/null http://127.0.0.1:8735/~meta@1.0/info; then
-    echo "[sd-node] UP on :8735"
+  if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$SU_PORT/~meta@1.0/info"; then
+    echo "[sd-node] UP on :$SU_PORT"
     exit 0
   fi
   sleep 1

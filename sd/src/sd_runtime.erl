@@ -23,10 +23,24 @@
 -define(HOT_NODE_PORT, 8736).
 -define(GENESIS_HASH, <<"0000000000000000000000000000000000000000000000000000000000000000">>).
 
+get_hot_host() ->
+    case os:getenv("HOT_NODE_HOST") of
+        false -> "127.0.0.1";
+        "" -> "127.0.0.1";
+        Host -> Host
+    end.
+
+get_hot_port() ->
+    case os:getenv("HOT_NODE_PORT") of
+        false -> 8736;
+        "" -> 8736;
+        PStr -> list_to_integer(PStr)
+    end.
+
 -record(state, {
     sub_pid,
     hot_host = "127.0.0.1",
-    hot_port = ?HOT_NODE_PORT
+    hot_port = 8736
 }).
 
 get_db_dir() ->
@@ -89,8 +103,10 @@ start_link() ->
 init([]) ->
     init_ets(),
     recover_from_wal(wal_path()),
-    SubPid = spawn_link(fun() -> subscriber_loop(?SERVER, "127.0.0.1", ?HOT_NODE_PORT) end),
-    {ok, #state{sub_pid = SubPid}}.
+    SubHost = get_hot_host(),
+    SubPort = get_hot_port(),
+    SubPid = spawn_link(fun() -> subscriber_loop(?SERVER, SubHost, SubPort) end),
+    {ok, #state{sub_pid = SubPid, hot_host = SubHost, hot_port = SubPort}}.
 
 init_ets() ->
     case ets:info(?TABLE) of
