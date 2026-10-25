@@ -29,7 +29,9 @@ import {
   commitCheckpointBatch,
   queryOfficialAoState,
   verifyArbitratorEvaluation,
-  verifyArweaveL1Finality
+  verifyArweaveL1Finality,
+  getOrCreateProcessId,
+  isTestProfile
 } from '../ao_process/committer.mjs';
 
 import {
@@ -38,7 +40,13 @@ import {
   reconcileCursorWithAO,
   processCommitterCycle,
   setCommittedCursor,
-  getCommittedCursor
+  getCommittedCursor,
+  acquireCursorLock,
+  releaseCursorLock,
+  writeHeartbeatStatus,
+  readHeartbeatStatus,
+  resolveDefaultCursorPath,
+  FATAL_FAIL_CLOSED_EXIT_CODE
 } from '../ao_process/committer_daemon.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -774,19 +782,73 @@ async function runPhase06Tests() {
 
   // [5] startCommitterDaemon Fail-Closed on Divergence
   let daemonFailedClosed = false;
+  let daemonExitCode = null;
+  const { startCommitterDaemon } = await import('../ao_process/committer_daemon.mjs');
   try {
-    const { startCommitterDaemon } = await import('../ao_process/committer_daemon.mjs');
     await startCommitterDaemon({
       cursorPath: cursorFile,
       evaluatorFn: (m) => daemonLuaArbit.evaluate(m),
       allowLocalAhead: false
     });
   } catch (err) {
+    daemonExitCode = err.exitCode;
     if (err.message.includes('Committer daemon fail-closed')) {
       daemonFailedClosed = true;
     }
   }
   assert(daemonFailedClosed === true, 'startCommitterDaemon throws and halts fail-closed when state divergence is detected');
+  assert(daemonExitCode === FATAL_FAIL_CLOSED_EXIT_CODE, `startCommitterDaemon sets exitCode=${FATAL_FAIL_CLOSED_EXIT_CODE} on fatal fail-closed`);
+
+  // Verify committer_status.json records halted / failed_closed state
+  const statusAfterHalt = readHeartbeatStatus(cursorFile);
+  assert(
+    statusAfterHalt &&
+      statusAfterHalt.status === 'halted' &&
+      statusAfterHalt.health === 'failed_closed',
+    'Heartbeat status records status=halted and health=failed_closed on fatal divergence'
+  );
+
+  // [5B] Committer Mutual Exclusion via Cursor File Lock
+  const lockResult1 = acquireCursorLock(cursorFile);
+  assert(lockResult1.acquired === true, 'First committer worker acquires cursor lock cleanly');
+  const lockResult2 = acquireCursorLock(cursorFile);
+  assert(
+    lockResult2.acquired === false && lockResult2.heldByPid === process.pid,
+    'Second committer worker is rejected with lock held by active PID'
+  );
+  releaseCursorLock(cursorFile);
+  const lockResult3 = acquireCursorLock(cursorFile);
+  assert(lockResult3.acquired === true, 'Cursor lock can be re-acquired after release');
+  releaseCursorLock(cursorFile);
+
+  // [5C] Production Gate: Prohibit auto-creation of AO Arbitrator Process
+  const prevProfile = process.env.HYDB_PROFILE;
+  const prevEnvProc = process.env.AO_PROCESS_ID;
+  delete process.env.AO_PROCESS_ID;
+  process.env.HYDB_PROFILE = 'production';
+  let autoCreateBlocked = false;
+  try {
+    await getOrCreateProcessId({ processIdFile: join(TEST_TMP_DIR, 'nonexistent_proc_id.txt') });
+  } catch (err) {
+    if (err.message.includes('ERR_AO_PROCESS_ID_REQUIRED')) {
+      autoCreateBlocked = true;
+    }
+  }
+  process.env.HYDB_PROFILE = prevProfile;
+  if (prevEnvProc !== undefined) process.env.AO_PROCESS_ID = prevEnvProc;
+  assert(
+    autoCreateBlocked === true,
+    'getOrCreateProcessId rejects silent auto-creation in production mode (ERR_AO_PROCESS_ID_REQUIRED)'
+  );
+
+  // [5D] Committer Disabled via HYDB_COMMITTER_ENABLED=false
+  process.env.HYDB_COMMITTER_ENABLED = 'false';
+  const disabledRes = await startCommitterDaemon({ cursorPath: cursorFile });
+  delete process.env.HYDB_COMMITTER_ENABLED;
+  assert(
+    disabledRes.ok === true && disabledRes.status === 'disabled',
+    'startCommitterDaemon cleanly exits with status=disabled when HYDB_COMMITTER_ENABLED=false'
+  );
 
   // [6] Daemon Default Option Propagation to commitCheckpointBatch
   let capturedCommitOptions = null;

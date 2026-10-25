@@ -488,11 +488,33 @@ async function mineBlock(gw = gatewayUrl) {
   }
 }
 
+export function isTestProfile() {
+  const p = process.env.HYDB_PROFILE || process.env.HYDB_ENV;
+  if (p === 'prod' || p === 'production') return false;
+  if (p === 'test') return true;
+  if (process.env.NODE_ENV === 'test') return true;
+  return false;
+}
+
 export async function getOrCreateProcessId(options = {}) {
+  const envProcId = process.env.AO_PROCESS_ID;
+  if (envProcId && envProcId.trim()) {
+    return envProcId.trim();
+  }
+
   const procIdFile = options.processIdFile || PROCESS_ID_FILE;
   if (existsSync(procIdFile)) {
     const id = readFileSync(procIdFile, 'utf-8').trim();
     if (id) return id;
+  }
+
+  // CRITICAL PRODUCTION GATE:
+  // Auto-creation of AO Arbitrator Process is prohibited in production to prevent rogue or unanchored processes.
+  if (!isTestProfile() && options.allowAutoCreate !== true) {
+    throw new Error(
+      'Fatal: AO_PROCESS_ID environment variable or process_id.txt is required in production. ' +
+      'Auto-creation of AO processes is strictly prohibited in production mode (ERR_AO_PROCESS_ID_REQUIRED).'
+    );
   }
 
   const { jwk, address } = await getWallet(options.walletPath || WALLET_PATH);

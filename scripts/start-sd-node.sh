@@ -38,6 +38,17 @@ SU_PORT="${SU_PORT:-8735}"
 
 if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$SU_PORT/~meta@1.0/info"; then
   echo "[sd-node] already running on :$SU_PORT"
+  if [ "${HYDB_COMMITTER_ENABLED:-false}" = "true" ]; then
+    if [ ! -f "$NODE_SD_RUN_DIR/committer.pid" ] || ! kill -0 "$(cat "$NODE_SD_RUN_DIR/committer.pid" 2>/dev/null)" 2>/dev/null; then
+      if command -v node >/dev/null 2>&1; then
+        echo "[sd-node] Starting colocated AO Committer Worker..."
+        "$DB_DIR/scripts/start-committer-worker.sh" > "$NODE_SD_RUN_DIR/committer.log" 2>&1 &
+        COMMITTER_PID=$!
+        echo "$COMMITTER_PID" > "$NODE_SD_RUN_DIR/committer.pid"
+        echo "[sd-node] Committer worker started with PID $COMMITTER_PID"
+      fi
+    fi
+  fi
   exit 0
 fi
 
@@ -49,6 +60,17 @@ sed -e "s|secrets/wallet_su.json|$DB_DIR/secrets/wallet_su.json|g" \
 for i in $(seq 1 45); do
   if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$SU_PORT/~meta@1.0/info"; then
     echo "[sd-node] UP on :$SU_PORT"
+    if [ "${HYDB_COMMITTER_ENABLED:-false}" = "true" ]; then
+      if command -v node >/dev/null 2>&1; then
+        echo "[sd-node] Starting colocated AO Committer Worker..."
+        "$DB_DIR/scripts/start-committer-worker.sh" > "$NODE_SD_RUN_DIR/committer.log" 2>&1 &
+        COMMITTER_PID=$!
+        echo "$COMMITTER_PID" > "$NODE_SD_RUN_DIR/committer.pid"
+        echo "[sd-node] Committer worker started with PID $COMMITTER_PID"
+      else
+        echo "[sd-node] Warning: HYDB_COMMITTER_ENABLED=true but node is not installed in PATH. Committer worker skipped."
+      fi
+    fi
     exit 0
   fi
   sleep 1

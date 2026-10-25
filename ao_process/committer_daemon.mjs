@@ -23,6 +23,7 @@ import {
   readFileSync,
   writeFileSync,
   renameSync,
+  unlinkSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -32,13 +33,136 @@ import {
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join, basename } from 'node:path';
 import crypto from 'node:crypto';
-import { commitCheckpointBatch, computeBatchId, queryOfficialAoState } from './committer.mjs';
+import {
+  commitCheckpointBatch,
+  computeBatchId,
+  queryOfficialAoState,
+  isTestProfile
+} from './committer.mjs';
+
+export const FATAL_FAIL_CLOSED_EXIT_CODE = 78;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
 const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
-const DEFAULT_CURSOR_PATH =
-  process.env.HYDB_COMMITTER_CURSOR_PATH || join(DB_DIR, 'ao_process/committer_cursor.json');
+
+export function resolveDefaultCursorPath() {
+  if (process.env.HYDB_COMMITTER_CURSOR_PATH) {
+    return process.env.HYDB_COMMITTER_CURSOR_PATH;
+  }
+  if (!isTestProfile()) {
+    return join(DB_DIR, 'data/committer/committer_cursor.json');
+  }
+  return join(DB_DIR, 'ao_process/committer_cursor.json');
+}
+
+const DEFAULT_CURSOR_PATH = resolveDefaultCursorPath();
+
+function isProcessAlive(pid) {
+  if (!pid || typeof pid !== 'number' || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
+export function acquireCursorLock(cursorPath = DEFAULT_CURSOR_PATH) {
+  const dir = dirname(cursorPath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  const lockPath = join(dir, 'committer.lock');
+  try {
+    const fd = openSync(lockPath, 'wx');
+    const payload = JSON.stringify({ pid: process.pid, acquired_at: new Date().toISOString() });
+    writeFileSync(fd, payload, 'utf-8');
+    fsyncSync(fd);
+    closeSync(fd);
+    return { acquired: true, lockPath };
+  } catch (err) {
+    if (err.code === 'EEXIST') {
+      try {
+        const raw = readFileSync(lockPath, 'utf-8');
+        const lockData = JSON.parse(raw);
+        const lockPid = Number(lockData?.pid);
+        if (lockPid && isProcessAlive(lockPid)) {
+          return {
+            acquired: false,
+            lockPath,
+            heldByPid: lockPid,
+            reason: `Committer daemon lock held by active PID ${lockPid}`
+          };
+        }
+        // Stale lock detected (process died without unlocking)
+        console.warn(`[CommitterDaemon] Recovering stale lockfile from dead PID ${lockPid}`);
+        const fd = openSync(lockPath, 'w');
+        const payload = JSON.stringify({
+          pid: process.pid,
+          acquired_at: new Date().toISOString(),
+          recovered_from_stale_pid: lockPid
+        });
+        writeFileSync(fd, payload, 'utf-8');
+        fsyncSync(fd);
+        closeSync(fd);
+        return { acquired: true, lockPath, recoveredStale: true };
+      } catch (parseErr) {
+        return { acquired: false, lockPath, reason: `Could not inspect existing lock: ${parseErr.message}` };
+      }
+    }
+    throw err;
+  }
+}
+
+export function releaseCursorLock(cursorPath = DEFAULT_CURSOR_PATH) {
+  try {
+    const dir = dirname(cursorPath);
+    const lockPath = join(dir, 'committer.lock');
+    if (existsSync(lockPath)) {
+      try {
+        const raw = readFileSync(lockPath, 'utf-8');
+        const lockData = JSON.parse(raw);
+        if (Number(lockData?.pid) === process.pid) {
+          unlinkSync(lockPath);
+        }
+      } catch {
+        unlinkSync(lockPath);
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+export function writeHeartbeatStatus(statusData, cursorPath = DEFAULT_CURSOR_PATH) {
+  try {
+    const dir = dirname(cursorPath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    const statusFile = join(dir, 'committer_status.json');
+    const payload = {
+      pid: process.pid,
+      updated_at: new Date().toISOString(),
+      ...statusData
+    };
+    writeFileSync(statusFile, JSON.stringify(payload, null, 2), 'utf-8');
+  } catch {
+    // Non-fatal
+  }
+}
+
+export function readHeartbeatStatus(cursorPath = DEFAULT_CURSOR_PATH) {
+  try {
+    const dir = dirname(cursorPath);
+    const statusFile = join(dir, 'committer_status.json');
+    if (!existsSync(statusFile)) return null;
+    return JSON.parse(readFileSync(statusFile, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
 
 const args = process.argv.slice(2);
 function getArg(flag, envKey, def) {
@@ -272,6 +396,13 @@ export async function processCommitterCycle(options = {}) {
   if (lastCommittedSeq === null || options.forceReconcile || options.reconcileEveryCycle) {
     const reconcileRes = await reconcileCursorWithAO({ ...options, cursorPath });
     if (reconcileRes && reconcileRes.mismatch_detected && !options.allowLocalAhead) {
+      writeHeartbeatStatus({
+        status: 'halted',
+        health: 'failed_closed',
+        error_code: reconcileRes.error_code || 'ERR_CURSOR_DIVERGENCE',
+        reason: reconcileRes.reason,
+        last_committed_seq: lastCommittedSeq
+      }, cursorPath);
       return {
         ok: false,
         skipped: true,
@@ -288,6 +419,12 @@ export async function processCommitterCycle(options = {}) {
 
   const suStatus = await fetchFn(`${suUrl}/status`);
   if (suStatus.status !== 200 || !suStatus.body) {
+    writeHeartbeatStatus({
+      status: 'waiting_su',
+      health: 'healthy',
+      last_committed_seq: lastCommittedSeq,
+      reason: 'SU node unreachable'
+    }, cursorPath);
     return { skipped: true, reason: 'SU node unreachable', lastCommitted: lastCommittedSeq };
   }
 
@@ -295,6 +432,12 @@ export async function processCommitterCycle(options = {}) {
   const epoch = Number(suStatus.body.epoch || 1);
 
   if (latestTick <= lastCommittedSeq) {
+    writeHeartbeatStatus({
+      status: 'idle',
+      health: 'healthy',
+      current_seq: latestTick,
+      last_committed_seq: lastCommittedSeq
+    }, cursorPath);
     return { skipped: true, currentSeq: latestTick, lastCommitted: lastCommittedSeq };
   }
 
@@ -383,6 +526,15 @@ export async function processCommitterCycle(options = {}) {
       cursorPath
     );
     lastCommittedSeq = updatedCursor.last_committed_seq;
+    writeHeartbeatStatus({
+      status: 'running',
+      health: 'healthy',
+      last_committed_seq: lastCommittedSeq,
+      verdict: commitRes.verdict,
+      from_seq: fromSeq,
+      to_seq: toSeq,
+      batch_id: batchData.batch_id
+    }, cursorPath);
     return {
       ok: true,
       cursor_advanced: true,
@@ -398,6 +550,13 @@ export async function processCommitterCycle(options = {}) {
   }
 
   // Evaluation pending/unknown or rejected -> do NOT advance cursor!
+  writeHeartbeatStatus({
+    status: 'retry_pending',
+    health: 'healthy',
+    last_committed_seq: lastCommittedSeq,
+    verdict: commitRes?.verdict || null,
+    reason: commitRes?.reason || 'Batch evaluation not verified; cursor held at previous sequence'
+  }, cursorPath);
   return {
     ok: false,
     cursor_advanced: false,
@@ -413,50 +572,117 @@ export async function processCommitterCycle(options = {}) {
 }
 
 export async function startCommitterDaemon(options = {}) {
+  const cursorPath = options.cursorPath || DEFAULT_CURSOR_PATH;
+
+  // 1. Single Committer Owner Gate: Only run if HYDB_COMMITTER_ENABLED is not explicitly false
+  const enabledEnv = process.env.HYDB_COMMITTER_ENABLED;
+  const isEnabled = options.enabled !== undefined ? options.enabled : (enabledEnv !== 'false');
+  if (!isEnabled) {
+    console.log('[CommitterDaemon] Disabled on this node (HYDB_COMMITTER_ENABLED == false). Exiting gracefully.');
+    return { ok: true, enabled: false, status: 'disabled' };
+  }
+
+  // 2. Mutual Exclusion Gate: Enforce single active worker per cursor storage volume via file lock
+  if (!options.skipLock) {
+    const lockRes = acquireCursorLock(cursorPath);
+    if (!lockRes.acquired) {
+      console.error(`[Fatal CommitterDaemon Error] ${lockRes.reason}`);
+      const lockErr = new Error(`Committer daemon lock conflict: ${lockRes.reason}`);
+      lockErr.code = 'ERR_COMMITTER_LOCK_HELD';
+      lockErr.exitCode = FATAL_FAIL_CLOSED_EXIT_CODE;
+      throw lockErr;
+    }
+  }
+
   console.log('========================================================================');
   console.log(' HyDB Autonomous Committer Daemon (Storage Unit -> AO Settlement)');
-  console.log(` SU Endpoint: ${SU_SCHEDULER_URL}`);
-  console.log(` Cursor File: ${options.cursorPath || DEFAULT_CURSOR_PATH}`);
-  console.log(` Interval:    ${INTERVAL_MS}ms`);
-  console.log(` Run Once:    ${RUN_ONCE}`);
+  console.log(` SU Endpoint: ${options.suUrl || SU_SCHEDULER_URL}`);
+  console.log(` Cursor File: ${cursorPath}`);
+  console.log(` Interval:    ${options.intervalMs || INTERVAL_MS}ms`);
+  console.log(` Run Once:    ${options.runOnce !== undefined ? options.runOnce : RUN_ONCE}`);
   console.log('========================================================================\n');
 
-  const initialCursor = await reconcileCursorWithAO(options);
-  if (initialCursor && initialCursor.mismatch_detected && !options.allowLocalAhead) {
-    console.error('[Fatal CommitterDaemon Error] Cursor reconciliation mismatch detected:', initialCursor.reason);
-    throw new Error(`Committer daemon fail-closed: ${initialCursor.reason}`);
-  }
-  console.log(
-    `[CommitterDaemon] Initialized cursor at seq=${initialCursor.last_committed_seq} (source=${initialCursor.source})`
-  );
-
-  if (RUN_ONCE) {
-    const res = await processCommitterCycle(options);
-    console.log('[CommitterDaemon] Cycle complete:', res);
-    return res;
-  }
-
-  while (isRunning) {
-    try {
-      await processCommitterCycle(options);
-    } catch (err) {
-      console.error('[CommitterDaemon] Cycle error:', err.message);
+  try {
+    const initialCursor = await reconcileCursorWithAO(options);
+    if (initialCursor && initialCursor.mismatch_detected && !options.allowLocalAhead) {
+      console.error('[Fatal CommitterDaemon Error] Cursor reconciliation mismatch detected:', initialCursor.reason);
+      writeHeartbeatStatus({
+        status: 'halted',
+        health: 'failed_closed',
+        error_code: initialCursor.error_code || 'ERR_CURSOR_DIVERGENCE',
+        reason: initialCursor.reason,
+        last_committed_seq: initialCursor.last_committed_seq
+      }, cursorPath);
+      const failClosedErr = new Error(`Committer daemon fail-closed: ${initialCursor.reason}`);
+      failClosedErr.code = initialCursor.error_code || 'ERR_CURSOR_DIVERGENCE';
+      failClosedErr.exitCode = FATAL_FAIL_CLOSED_EXIT_CODE;
+      throw failClosedErr;
     }
-    await new Promise((r) => setTimeout(r, INTERVAL_MS));
+    console.log(
+      `[CommitterDaemon] Initialized cursor at seq=${initialCursor.last_committed_seq} (source=${initialCursor.source})`
+    );
+
+    writeHeartbeatStatus({
+      status: 'idle',
+      health: 'healthy',
+      last_committed_seq: initialCursor.last_committed_seq
+    }, cursorPath);
+
+    const isRunOnce = options.runOnce !== undefined ? options.runOnce : RUN_ONCE;
+    if (isRunOnce) {
+      const res = await processCommitterCycle(options);
+      console.log('[CommitterDaemon] Cycle complete:', res);
+      return res;
+    }
+
+    const interval = options.intervalMs || INTERVAL_MS;
+    while (isRunning) {
+      try {
+        await processCommitterCycle(options);
+      } catch (err) {
+        console.error('[CommitterDaemon] Cycle error:', err.message);
+        writeHeartbeatStatus({
+          status: 'cycle_error',
+          health: 'healthy',
+          last_committed_seq: lastCommittedSeq,
+          last_error: err.message
+        }, cursorPath);
+      }
+      await new Promise((r) => setTimeout(r, interval));
+    }
+  } finally {
+    if (!options.skipLock) {
+      releaseCursorLock(cursorPath);
+    }
   }
 }
 
 if (basename(process.argv[1] || '') === 'committer_daemon.mjs') {
-  process.on('SIGINT', () => {
+  const activeCursorPath = resolveDefaultCursorPath();
+  const cleanup = (code = 0) => {
     isRunning = false;
-    process.exit(0);
-  });
-  process.on('SIGTERM', () => {
-    isRunning = false;
-    process.exit(0);
+    releaseCursorLock(activeCursorPath);
+    writeHeartbeatStatus({ status: 'stopped', health: 'healthy' }, activeCursorPath);
+    process.exit(code);
+  };
+  process.on('SIGINT', () => cleanup(0));
+  process.on('SIGTERM', () => cleanup(0));
+  process.stdin.on('end', () => {
+    console.log('[CommitterDaemon] Supervisor stdin pipe closed. Gracefully stopping daemon.');
+    cleanup(0);
   });
   startCommitterDaemon().catch((err) => {
-    console.error('[Fatal CommitterDaemon Error]', err);
-    process.exit(1);
+    console.error('[Fatal CommitterDaemon Error]', err.message);
+    const exitCode =
+      err.exitCode ||
+      (err.message.includes('fail-closed') ||
+       err.code === 'ERR_CURSOR_AO_STATE_MISMATCH' ||
+       err.code === 'ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ' ||
+       err.code === 'ERR_COMMITTER_LOCK_HELD' ||
+       err.code === 'ERR_AO_PROCESS_ID_REQUIRED'
+        ? FATAL_FAIL_CLOSED_EXIT_CODE
+        : 1);
+    releaseCursorLock(activeCursorPath);
+    process.exit(exitCode);
   });
 }
