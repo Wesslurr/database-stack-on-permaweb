@@ -412,18 +412,19 @@ local function clone_schemas(src)
     return dst
 end
 
--- Handler: Authorize SU Node (Admin only)
+-- Handler: Authorize SU Node (Admin or Genesis Control Plane)
 Handlers.add(
     "AuthorizeNode",
     Handlers.utils.hasMatchingTag("Action", "AuthorizeNode"),
     function(msg)
         local caller = msg.From
-        if not AuthorizedAdmins[caller] and caller ~= Owner then
+        local is_authorized = AuthorizedAdmins[caller] or (caller == Owner) or (GenesisProcessId ~= "" and caller == GenesisProcessId)
+        if not is_authorized then
             ao.send({
                 Target = msg.From,
                 Action = "AuthorizeNode-Rejected",
                 Status = "REJECTED_UNAUTHORIZED_ADMIN",
-                Reason = "Only authorized admin or owner can authorize nodes"
+                Reason = "Only authorized admin, owner, or Genesis control plane can authorize nodes"
             })
             return
         end
@@ -443,18 +444,19 @@ Handlers.add(
     end
 )
 
--- Handler: Revoke SU Node (Admin only)
+-- Handler: Revoke SU Node (Admin or Genesis Control Plane)
 Handlers.add(
     "RevokeNode",
     Handlers.utils.hasMatchingTag("Action", "RevokeNode"),
     function(msg)
         local caller = msg.From
-        if not AuthorizedAdmins[caller] and caller ~= Owner then
+        local is_authorized = AuthorizedAdmins[caller] or (caller == Owner) or (GenesisProcessId ~= "" and caller == GenesisProcessId)
+        if not is_authorized then
             ao.send({
                 Target = msg.From,
                 Action = "RevokeNode-Rejected",
                 Status = "REJECTED_UNAUTHORIZED_ADMIN",
-                Reason = "Only authorized admin or owner can revoke nodes"
+                Reason = "Only authorized admin, owner, or Genesis control plane can revoke nodes"
             })
             return
         end
@@ -468,6 +470,53 @@ Handlers.add(
             Action = "Node-Revoked",
             Status = "REVOKED",
             Node = node
+        })
+    end
+)
+
+-- Handler: Sync Stack Membership from Genesis Control Plane
+Handlers.add(
+    "SyncStackMembership",
+    Handlers.utils.hasMatchingTag("Action", "SyncStackMembership"),
+    function(msg)
+        local caller = msg.From
+        local is_authorized = AuthorizedAdmins[caller] or (caller == Owner) or (GenesisProcessId ~= "" and caller == GenesisProcessId)
+        if not is_authorized then
+            ao.send({
+                Target = msg.From or "CALLER",
+                Action = "SyncStackMembership-Rejected",
+                Status = "REJECTED_UNAUTHORIZED_CALLER",
+                Reason = "Only authorized admin, owner, or Genesis control plane can sync stack membership"
+            })
+            return
+        end
+        local data = json.decode(msg.Data or "{}")
+        if data.authorized_nodes and type(data.authorized_nodes) == "table" then
+            for n, v in pairs(data.authorized_nodes) do
+                if v == true then
+                    AuthorizedNodes[n] = true
+                elseif v == false or v == nil then
+                    AuthorizedNodes[n] = nil
+                end
+            end
+        end
+        if data.add_node then
+            AuthorizedNodes[data.add_node] = true
+        end
+        if data.remove_node then
+            AuthorizedNodes[data.remove_node] = nil
+        end
+        if data.config_epoch then
+            local ep = tonumber(data.config_epoch)
+            if ep and ep > CurrentEpoch then
+                CurrentEpoch = ep
+            end
+        end
+        ao.send({
+            Target = msg.From or "CALLER",
+            Action = "SyncStackMembershipResponse",
+            Status = "MEMBERSHIP_SYNCED",
+            CurrentEpoch = tostring(CurrentEpoch)
         })
     end
 )

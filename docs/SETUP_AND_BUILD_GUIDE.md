@@ -118,22 +118,25 @@ npm run test:genesis
 # 11. Phase 10: SDK Spawner & Stack Genesis Integration (68 Tests)
 npm run test:spawner
 
-# 12. Pre-Sequence Gating & Core Contract Rules (54 Tests)
+# 12. Phase 11: End-to-End Real Local Genesis Stack & Committer Lifecycle (59 Tests)
+npm run test:e2e-genesis
+
+# 13. Pre-Sequence Gating & Core Contract Rules (54 Tests)
 npm run test:contract
 
-# 13. Physical Durability, fsync, and Auth (39 Tests)
+# 14. Physical Durability, fsync, and Auth (39 Tests)
 npm run test:durability
 
-# 14. AO Arbitrator State Machine & Policy Circuit (109 Tests)
+# 15. AO Arbitrator State Machine & Policy Circuit (109 Tests)
 npm run test:ao
 
-# 15. Business Logic Scenarios (Financial Ledger & Gaming - 16 Tests)
+# 16. Business Logic Scenarios (Financial Ledger & Gaming - 16 Tests)
 npm run test:business
 
-# 16. Master Fault-Tolerance & Security Verification (14 End-to-End Phases)
+# 17. Master Fault-Tolerance & Security Verification (14 End-to-End Phases)
 npm run test:integration
 
-# 17. Run All Verified Suites Sequentially
+# 18. Run All Verified Suites Sequentially
 npm run test:all
 ```
 

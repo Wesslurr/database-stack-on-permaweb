@@ -470,6 +470,36 @@ Handlers.add(
             Schemas[payload.add_schema] = { namespace = payload.add_schema, active = true }
         end
 
+        -- Propagate stack mutations to internal Arbitrator Process (Cross-Process Sync)
+        if ArbitratorProcessId and ArbitratorProcessId ~= "" then
+            if payload.add_node then
+                ao.send({
+                    Target = ArbitratorProcessId,
+                    Action = "AuthorizeNode",
+                    Data = json.encode({ node = payload.add_node })
+                })
+            end
+            if payload.remove_node then
+                ao.send({
+                    Target = ArbitratorProcessId,
+                    Action = "RevokeNode",
+                    Data = json.encode({ node = payload.remove_node })
+                })
+            end
+            if has_mutations or payload.config_epoch then
+                ao.send({
+                    Target = ArbitratorProcessId,
+                    Action = "SyncStackMembership",
+                    Data = json.encode({
+                        config_epoch = ConfigEpoch,
+                        authorized_nodes = AuthorizedNodes,
+                        authorized_admins = AuthorizedAdmins,
+                        genesis_hash = GenesisHash
+                    })
+                })
+            end
+        end
+
         ao.send({
             Target = sender,
             Action = "UpdateStackConfigResponse",

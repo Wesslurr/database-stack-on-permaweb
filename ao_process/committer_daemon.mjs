@@ -331,14 +331,24 @@ export async function bootstrapGenesisStackNode(options = {}) {
     });
 
     if (config && config.ok) {
-      // 1. Check Genesis Hash against expected if provided
-      const expectedHash = options.expectedGenesisHash || process.env.AO_GENESIS_HASH;
+      // 1. Check Genesis Hash against expected if provided or required
+      const procIdFile = options.processIdFile || join(DB_DIR, 'ao_process/process_id.txt');
+      const hashFile = join(dirname(procIdFile), 'genesis_hash.txt');
+      const expectedHash = options.expectedGenesisHash ||
+        process.env.AO_GENESIS_HASH ||
+        process.env.HYDB_GENESIS_HASH ||
+        (existsSync(hashFile) ? readFileSync(hashFile, 'utf8').trim() : null);
+
       if (expectedHash && config.genesis?.genesis_hash) {
         if (config.genesis.genesis_hash.toUpperCase() !== expectedHash.toUpperCase()) {
           const err = new Error(`ERR_GENESIS_HASH_MISMATCH: Genesis hash mismatch (expected ${expectedHash}, got ${config.genesis.genesis_hash})`);
           err.code = 'ERR_GENESIS_HASH_MISMATCH';
           throw err;
         }
+      } else if (!expectedHash && (options.strictGenesisHash === true || options.requireGenesisHash === true)) {
+        const err = new Error('ERR_GENESIS_HASH_REQUIRED: AO_GENESIS_HASH is required to verify Genesis Stack in strict mode');
+        err.code = 'ERR_GENESIS_HASH_REQUIRED';
+        throw err;
       }
 
       // 2. Discover and bind Arbitrator process ID
@@ -367,8 +377,9 @@ export async function bootstrapGenesisStackNode(options = {}) {
             role: 'storage_unit',
             endpoint: options.suUrl || process.env.SU_ENDPOINT || 'http://127.0.0.1:8735'
           };
+          let regResp = null;
           if (typeof options.evaluatorFn === 'function') {
-            await options.evaluatorFn({
+            const evRes = await options.evaluatorFn({
               Target: targetGenesisId,
               Action: 'RegisterNode',
               From: nodeAddress,
@@ -379,6 +390,10 @@ export async function bootstrapGenesisStackNode(options = {}) {
               ],
               Data: JSON.stringify(regPayload)
             });
+            const lastMsg = evRes?.Messages?.[evRes.Messages.length - 1] || evRes?.responses?.[evRes.responses?.length - 1];
+            if (lastMsg && lastMsg.Data) {
+              try { regResp = JSON.parse(lastMsg.Data); } catch {}
+            }
           } else if (typeof options.messageFn === 'function') {
             await options.messageFn({
               process: targetGenesisId,
@@ -405,8 +420,20 @@ export async function bootstrapGenesisStackNode(options = {}) {
               });
             }
           }
+
+          if (regResp && (regResp.ok === false || regResp.status === 'REJECTED_UNAUTHORIZED_NODE')) {
+            const regErr = new Error(`ERR_UNAUTHORIZED_NODE: Genesis rejected node registration for ${nodeAddress}: ${regResp.status || 'unknown'}`);
+            regErr.code = 'ERR_UNAUTHORIZED_NODE';
+            throw regErr;
+          }
         } catch (regErr) {
+          if (regErr.code === 'ERR_UNAUTHORIZED_NODE') {
+            throw regErr;
+          }
           console.warn(`[Genesis Bootstrap] Note: Node registration returned: ${regErr.message}`);
+          if (options.strictRegistration === true) {
+            throw regErr;
+          }
         }
       }
 
@@ -422,8 +449,11 @@ export async function bootstrapGenesisStackNode(options = {}) {
       };
     }
   } catch (err) {
-    if (err.code === 'ERR_GENESIS_HASH_MISMATCH') throw err;
+    if (err.code === 'ERR_GENESIS_HASH_MISMATCH' || err.code === 'ERR_UNAUTHORIZED_NODE' || err.code === 'ERR_GENESIS_HASH_REQUIRED') {
+      throw err;
+    }
     console.warn(`[Genesis Bootstrap] Note: Genesis discovery returned: ${err.message}`);
+    return { ok: false, error: err.message };
   }
   return null;
 }
@@ -502,6 +532,7 @@ export async function reportNodeHeartbeatToGenesis(targetGenesisId, heartbeatDat
     }
   } catch (err) {
     console.warn(`[Genesis Heartbeat] Report error: ${err.message}`);
+    return { ok: false, error: err.message };
   }
   return null;
 }
@@ -793,17 +824,41 @@ export async function processCommitterCycle(options = {}) {
     lastCommittedSeq = updatedCursor.last_committed_seq;
 
     // Report heartbeat to Genesis Stack to maintain active quorum status
+    let heartbeatOk = true;
+    let heartbeatError = null;
     const targetGenesisId = options.targetGenesisId || options.genesisProcessId || process.env.AO_GENESIS_ID;
     if (targetGenesisId) {
-      await reportNodeHeartbeatToGenesis(targetGenesisId, {
-        last_seq: lastCommittedSeq,
-        health: 'ACTIVE'
-      }, options).catch(() => null);
+      try {
+        const hbRes = await reportNodeHeartbeatToGenesis(targetGenesisId, {
+          last_seq: lastCommittedSeq,
+          health: 'ACTIVE'
+        }, options);
+        if (hbRes && hbRes.ok !== false) {
+          const lastMsg = hbRes?.Messages?.[hbRes.Messages.length - 1] || hbRes?.responses?.[hbRes.responses?.length - 1];
+          if (lastMsg && lastMsg.Data) {
+            try {
+              const parsed = JSON.parse(lastMsg.Data);
+              if (parsed.ok === false) {
+                heartbeatOk = false;
+                heartbeatError = parsed.status || 'HEARTBEAT_REJECTED';
+              }
+            } catch {}
+          }
+        } else {
+          heartbeatOk = false;
+          heartbeatError = (hbRes && hbRes.error) || 'HEARTBEAT_FAILED';
+        }
+      } catch (hbErr) {
+        heartbeatOk = false;
+        heartbeatError = hbErr.message;
+      }
     }
 
     writeHeartbeatStatus({
       status: 'running',
-      health: 'healthy',
+      health: heartbeatOk ? 'healthy' : 'degraded',
+      heartbeat_acknowledged: heartbeatOk,
+      heartbeat_error: heartbeatError,
       last_committed_seq: lastCommittedSeq,
       verdict: commitRes.verdict,
       from_seq: fromSeq,
@@ -820,7 +875,9 @@ export async function processCommitterCycle(options = {}) {
       from_seq: fromSeq,
       to_seq: toSeq,
       last_committed_seq: lastCommittedSeq,
-      commit: commitRes
+      commit: commitRes,
+      heartbeat_acknowledged: heartbeatOk,
+      health: heartbeatOk ? 'healthy' : 'degraded'
     };
   }
 

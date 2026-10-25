@@ -193,7 +193,11 @@ const requiredScripts = [
   'test:conformance',
   'test:ao',
   'test:sdk',
-  'test:business'
+  'test:business',
+  'test:genesis',
+  'test:spawner',
+  'test:e2e-genesis',
+  'test:integration'
 ];
 
 for (const scriptName of requiredScripts) {

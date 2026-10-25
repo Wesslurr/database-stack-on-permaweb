@@ -53,7 +53,9 @@ import {
 import {
   bootstrapGenesisStackNode,
   reportNodeHeartbeatToGenesis,
-  processCommitterCycle
+  processCommitterCycle,
+  setCommittedCursor,
+  readHeartbeatStatus
 } from '../ao_process/committer_daemon.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -160,12 +162,31 @@ class LiveStackLuaRuntime {
 
   async evaluate(msg) {
     const target = msg.Target || msg.process || '';
+    if (target && target !== this.genesisId && target !== this.arbitratorId) {
+      throw new Error(`Process ${target} not found`);
+    }
     const isGenesis = target === this.genesisId ||
       ['GetGenesisConfig', 'RegisterNode', 'ReportHeartbeat', 'GetStackStatus', 'SetArbitratorProcess', 'UpdateStackConfig'].includes(msg.Action);
 
     if (isGenesis) {
       this.genesisMessages.push(msg);
-      return this.runLua(this.genesisLua, this.genesisMessages, 'genesis');
+      const res = this.runLua(this.genesisLua, this.genesisMessages, 'genesis');
+      if (res && res.Messages && Array.isArray(res.Messages)) {
+        for (const outMsg of res.Messages) {
+          if (outMsg && (outMsg.Target === this.arbitratorId || outMsg.process === this.arbitratorId)) {
+            this.arbitratorMessages.push({
+              From: this.genesisId,
+              Target: this.arbitratorId,
+              Action: outMsg.Action,
+              Tags: outMsg.Tags || [{ name: 'Action', value: outMsg.Action }],
+              Data: outMsg.Data,
+              Timestamp: Date.now()
+            });
+            this.runLua(this.arbitratorLua, this.arbitratorMessages, 'arbitrator');
+          }
+        }
+      }
+      return res;
     } else {
       this.arbitratorMessages.push(msg);
       return this.runLua(this.arbitratorLua, this.arbitratorMessages, 'arbitrator');
@@ -360,6 +381,15 @@ async function runTests() {
       return name.includes('Arbitrator') ? mockArbitratorId : mockGenesisId;
     },
     async message(args) {
+      const action = args.tags?.find((t) => (t.name || t[1]) === 'Action')?.[1] || args.tags?.find((t) => (t.name || t[1]) === 'Action')?.value;
+      if (action && action !== 'Eval') {
+        await liveRuntime.evaluate({
+          Target: args.process,
+          Action: action,
+          Tags: args.tags,
+          Data: args.data || '{}'
+        });
+      }
       return `MSG_${Date.now()}`;
     },
     async dryrun(args) {
@@ -548,6 +578,244 @@ async function runTests() {
   assertEq(replayRes.ok, true, 'Replay batch handled gracefully');
   assertEq(replayRes.verdict, 'DUPLICATE_BATCH_IDEMPOTENT', 'Verdict is DUPLICATE_BATCH_IDEMPOTENT');
   assertEq(replayRes.idempotent_replay, true, 'idempotent_replay flag is true');
+
+  // ==========================================================================
+  // [Suite 6] Dynamic Stack Membership Synchronization (Genesis -> Arbitrator)
+  // ==========================================================================
+  console.log('\n[Suite 6] Dynamic Stack Membership Synchronization (Genesis -> Arbitrator):');
+
+  const dynamicNode = 'SU_DYNAMIC_NODE_999';
+
+  // 1. Initially, Arbitrator rejects commits from dynamicNode
+  const eventsSeq4 = buildValidEvents(4, 1, lastEvent.hash, lastEvent.state_root).map((e) => ({ ...e, epoch: 2 }));
+  const unauthBatch = {
+    su_id: dynamicNode,
+    epoch: 2,
+    from_seq: 4,
+    to_seq: 4,
+    proposed_state_root: eventsSeq4[0].state_root,
+    proposed_hash: eventsSeq4[0].hash,
+    events: eventsSeq4
+  };
+  const unauthCommitRes = await liveRuntime.evaluate({
+    Target: mockArbitratorId,
+    Action: 'CommitCheckpoint',
+    From: dynamicNode,
+    Tags: [{ name: 'Action', value: 'CommitCheckpoint' }],
+    Data: JSON.stringify(unauthBatch)
+  });
+  const unauthCommitMsg = unauthCommitRes.Messages?.[unauthCommitRes.Messages.length - 1];
+  assertEq(unauthCommitMsg?.SubStatus, 'REJECTED_UNAUTHORIZED_SENDER', 'dynamicNode is initially rejected by Arbitrator');
+
+  // 2. Admin adds dynamicNode via Genesis UpdateStackConfig
+  const updateRes = await liveRuntime.evaluate({
+    Target: mockGenesisId,
+    Action: 'UpdateStackConfig',
+    From: adminAddress,
+    Tags: [{ name: 'Action', value: 'UpdateStackConfig' }],
+    Data: JSON.stringify({ add_node: dynamicNode })
+  });
+  const updateMsg = updateRes.Messages?.[updateRes.Messages.length - 1];
+  assert(updateMsg && updateMsg.Data.includes('CONFIG_UPDATED'), 'Genesis UpdateStackConfig successfully added dynamicNode');
+
+  // 3. Genesis cross-process sync forwarded to Arbitrator -> dynamicNode can now commit!
+  const authCommitRes = await liveRuntime.evaluate({
+    Target: mockArbitratorId,
+    Action: 'CommitCheckpoint',
+    From: dynamicNode,
+    Tags: [{ name: 'Action', value: 'CommitCheckpoint' }],
+    Data: JSON.stringify(unauthBatch)
+  });
+  const authCommitMsg = authCommitRes.Messages?.[authCommitRes.Messages.length - 1];
+  assertEq(authCommitMsg?.Status, 'COMMITTED', 'Arbitrator accepts checkpoint from dynamicNode following Genesis cross-process sync');
+  assertEq(authCommitMsg?.OfficialSeq, '4', 'Arbitrator OfficialSeq advanced to 4');
+
+  // 4. Admin removes dynamicNode via Genesis UpdateStackConfig
+  const revokeRes = await liveRuntime.evaluate({
+    Target: mockGenesisId,
+    Action: 'UpdateStackConfig',
+    From: adminAddress,
+    Tags: [{ name: 'Action', value: 'UpdateStackConfig' }],
+    Data: JSON.stringify({ remove_node: dynamicNode })
+  });
+  const revokeMsg = revokeRes.Messages?.[revokeRes.Messages.length - 1];
+  assert(revokeMsg && revokeMsg.Data.includes('CONFIG_UPDATED'), 'Genesis UpdateStackConfig removed dynamicNode');
+
+  // 5. Subsequent commit from dynamicNode is rejected again
+  const eventsSeq5 = buildValidEvents(5, 1, eventsSeq4[0].hash, eventsSeq4[0].state_root).map((e) => ({ ...e, epoch: 3 }));
+  const reRevokedCommitRes = await liveRuntime.evaluate({
+    Target: mockArbitratorId,
+    Action: 'CommitCheckpoint',
+    From: dynamicNode,
+    Tags: [{ name: 'Action', value: 'CommitCheckpoint' }],
+    Data: JSON.stringify({
+      su_id: dynamicNode,
+      epoch: 3,
+      from_seq: 5,
+      to_seq: 5,
+      proposed_state_root: eventsSeq5[0].state_root,
+      proposed_hash: eventsSeq5[0].hash,
+      events: eventsSeq5
+    })
+  });
+  const reRevokedMsg = reRevokedCommitRes.Messages?.[reRevokedCommitRes.Messages.length - 1];
+  assertEq(reRevokedMsg?.SubStatus, 'REJECTED_UNAUTHORIZED_SENDER', 'dynamicNode is revoked in Arbitrator after Genesis sync');
+
+  // ==========================================================================
+  // [Suite 7] Durable Disk Cursor & Daemon Restart Recovery
+  // ==========================================================================
+  console.log('\n[Suite 7] Durable Disk Cursor & Daemon Restart Recovery:');
+
+  const diskCursorPath = join(TEST_TMP_DIR, 'test_e2e_committer_cursor.json');
+  const diskWalPath = join(TEST_TMP_DIR, 'test_wal.log');
+
+  const eventsSeq5to7 = buildValidEvents(5, 3, eventsSeq4[0].hash, eventsSeq4[0].state_root).map((e) => ({ ...e, epoch: 3 }));
+  const allWalEvents = [
+    ...events,       // seq 1..3
+    eventsSeq4[0],   // seq 4
+    ...eventsSeq5to7 // seq 5..7
+  ];
+
+  // Write WAL events to disk WAL file
+  const walLines = allWalEvents.map((e) => JSON.stringify(e)).join('\n') + '\n';
+  writeFileSync(diskWalPath, walLines, 'utf8');
+  assert(existsSync(diskWalPath), 'Real disk wal.log written');
+
+  const mockSuFetch = async (url) => {
+    if (url.endsWith('/status')) {
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          epoch: 3,
+          latest_tick_ram: allWalEvents.length,
+          state_root_str: allWalEvents[allWalEvents.length - 1].state_root,
+          latest_hash: allWalEvents[allWalEvents.length - 1].hash
+        }
+      };
+    }
+    const u = new URL(url);
+    const fromSeq = Number(u.searchParams.get('from_seq') || 1);
+    const toSeq = Number(u.searchParams.get('to_seq') || allWalEvents.length);
+    const slice = allWalEvents.filter((e) => e.seq >= fromSeq && e.seq <= toSeq);
+    const lastEv = slice[slice.length - 1];
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        su_id: 'sd-node-1',
+        epoch: 3,
+        from_seq: fromSeq,
+        to_seq: toSeq,
+        proposed_hash: lastEv?.hash || '',
+        proposed_state_root: lastEv?.state_root || '0',
+        events: slice
+      }
+    };
+  };
+
+  // Re-authorize suAddress for commit
+  // Cycle 1: Committer processes batch with cursor (batchMax: 1 -> commits seq 5)
+  const cycle1Res = await processCommitterCycle({
+    cursorPath: diskCursorPath,
+    processId: mockArbitratorId,
+    targetGenesisId: mockGenesisId,
+    sender: suAddress,
+    walletPath: suWalletFile,
+    suUrl: 'http://127.0.0.1:8735',
+    fetchFn: mockSuFetch,
+    batchMax: 1,
+    forceReconcile: true,
+    useAoConnect: true,
+    messageFn: async () => `MSG_CYCLE1_${Date.now()}`,
+    evaluatorFn: (m) => liveRuntime.evaluate(m)
+  });
+
+  assertEq(cycle1Res.ok, true, 'Committer cycle 1 executed successfully');
+  assert(existsSync(diskCursorPath), 'Durable cursor file created on disk');
+  const savedCursor1 = JSON.parse(readFileSync(diskCursorPath, 'utf8'));
+  assertEq(savedCursor1.last_committed_seq, 5, 'Durable disk cursor persisted at seq=5');
+
+  // Simulate daemon crash & restart: reset in-memory variable, reload cursor from disk
+  setCommittedCursor(null);
+  const cycle2Res = await processCommitterCycle({
+    cursorPath: diskCursorPath,
+    processId: mockArbitratorId,
+    targetGenesisId: mockGenesisId,
+    sender: suAddress,
+    walletPath: suWalletFile,
+    suUrl: 'http://127.0.0.1:8735',
+    fetchFn: mockSuFetch,
+    batchMax: 2,
+    forceReconcile: true,
+    useAoConnect: true,
+    messageFn: async () => `MSG_CYCLE2_${Date.now()}`,
+    evaluatorFn: (m) => liveRuntime.evaluate(m)
+  });
+
+  assertEq(cycle2Res.ok, true, 'Committer cycle 2 after simulated restart succeeded');
+  const savedCursor2 = JSON.parse(readFileSync(diskCursorPath, 'utf8'));
+  assertEq(savedCursor2.last_committed_seq, 7, 'Durable disk cursor advanced to 7 after restart');
+
+  // ==========================================================================
+  // [Suite 8] Committer Registration & Heartbeat Fail-Closed Invariants
+  // ==========================================================================
+  console.log('\n[Suite 8] Committer Registration & Heartbeat Fail-Closed Invariants:');
+
+  // 1. Node registration rejection fails-closed during bootstrap
+  let caughtRegFail = null;
+  try {
+    await bootstrapGenesisStackNode({
+      genesisProcessId: mockGenesisId,
+      address: 'ROGUE_UNAUTHORIZED_NODE_ADDRESS',
+      evaluatorFn: (m) => liveRuntime.evaluate(m)
+    });
+  } catch (err) {
+    caughtRegFail = err;
+  }
+  assert(caughtRegFail !== null, 'Rejected registration threw error during bootstrap');
+  assertEq(caughtRegFail.code, 'ERR_UNAUTHORIZED_NODE', 'Error code is ERR_UNAUTHORIZED_NODE');
+
+  // 2. Strict Genesis Hash requirement throws when missing in strict mode
+  let caughtHashReq = null;
+  try {
+    await bootstrapGenesisStackNode({
+      genesisProcessId: mockGenesisId,
+      strictGenesisHash: true,
+      processIdFile: '/nonexistent/proc.txt',
+      evaluatorFn: (m) => liveRuntime.evaluate(m)
+    });
+  } catch (err) {
+    caughtHashReq = err;
+  }
+  assert(caughtHashReq !== null, 'Missing Genesis Hash threw error in strict mode');
+  assertEq(caughtHashReq.code, 'ERR_GENESIS_HASH_REQUIRED', 'Error code is ERR_GENESIS_HASH_REQUIRED');
+
+  // 3. Heartbeat failure marks committer health as degraded without corrupting committed state
+  const eventsSeq8 = buildValidEvents(8, 1, eventsSeq5to7[2].hash, eventsSeq5to7[2].state_root).map((e) => ({ ...e, epoch: 3 }));
+  allWalEvents.push(eventsSeq8[0]);
+
+  const cycle3Res = await processCommitterCycle({
+    cursorPath: diskCursorPath,
+    processId: mockArbitratorId,
+    targetGenesisId: 'GENESIS_NONEXISTENT_PROCESS_ID',
+    sender: suAddress,
+    walletPath: suWalletFile,
+    suUrl: 'http://127.0.0.1:8735',
+    fetchFn: mockSuFetch,
+    batchMax: 1,
+    forceReconcile: false,
+    useAoConnect: true,
+    messageFn: async () => `MSG_CYCLE3_${Date.now()}`,
+    evaluatorFn: (m) => liveRuntime.evaluate(m)
+  });
+
+  assertEq(cycle3Res.ok, true, 'Commitment to Arbitrator succeeded even when Genesis heartbeat failed');
+  assertEq(cycle3Res.health, 'degraded', 'Committer health is marked as degraded due to heartbeat failure');
+  assertEq(cycle3Res.heartbeat_acknowledged, false, 'Heartbeat acknowledgment is false');
+  const hbStatus = readHeartbeatStatus(diskCursorPath);
+  assertEq(hbStatus?.health, 'degraded', 'Committer status file recorded health: degraded');
+  assertEq(hbStatus?.heartbeat_acknowledged, false, 'Committer status file recorded heartbeat_acknowledged: false');
 
   // ==========================================================================
   // Summary

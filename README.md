@@ -110,6 +110,7 @@ Every guarantee across the HyDB stack is classified as **`Implemented`**, **`Tes
 | **08** | **Developer SDK & Manifest Hashing** | `npm run test:sdk` ([`tests/test_tahap8_sdk_manifest.mjs`](tests/test_tahap8_sdk_manifest.mjs)) | `Implemented` & `Tested` |
 | **09** | **AO Genesis Block & Master Contract** | `npm run test:genesis` ([`tests/test_tahap09_genesis_contract.mjs`](tests/test_tahap09_genesis_contract.mjs)) | `Implemented` & `Tested` |
 | **10** | **SDK Spawner & Stack Genesis Integration** | `npm run test:spawner` ([`tests/test_tahap10_sdk_spawner.mjs`](tests/test_tahap10_sdk_spawner.mjs)) | `Implemented` & `Tested` |
+| **11** | **E2E Live Genesis Stack & Committer Lifecycle** | `npm run test:e2e-genesis` ([`tests/test_tahap11_e2e_genesis_live.mjs`](tests/test_tahap11_e2e_genesis_live.mjs)) | `Implemented` & `Tested` |
 | **Core** | **Arbitrator, Durability & Business Logic** | `npm run test:ao` / `npm run test:durability` / `npm run test:business` | `Implemented` & `Tested` |
 
 ---

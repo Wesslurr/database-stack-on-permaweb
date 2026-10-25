@@ -118,3 +118,9 @@ jobs:
 
       - name: Run Phase 10 SDK Spawner & Stack Genesis Integration Tests
         run: npm run test:spawner
+
+      - name: Run Phase 11 E2E Genesis Stack & Committer Lifecycle Tests
+        run: npm run test:e2e-genesis
+
+      - name: Run End-to-End Integration Tests
+        run: npm run test:integration
