@@ -37,6 +37,7 @@ import {
   commitCheckpointBatch,
   computeBatchId,
   queryOfficialAoState,
+  getOrCreateProcessId,
   isTestProfile
 } from './committer.mjs';
 
@@ -300,6 +301,37 @@ export function saveDurableCursor(cursorState, cursorPath = DEFAULT_CURSOR_PATH)
     // Directory fsync may not be supported on all platforms/filesystems
   }
   return payload;
+}
+
+/**
+ * Bootstrap node with Genesis Stack if AO_GENESIS_ID or process_genesis_id.txt is configured.
+ */
+export async function bootstrapGenesisStackNode(options = {}) {
+  const genesisId = options.genesisProcessId || process.env.AO_GENESIS_ID;
+  const procIdFile = options.processIdFile || join(DB_DIR, 'ao_process/process_id.txt');
+  const genesisFile = join(dirname(procIdFile), 'process_genesis_id.txt');
+  const targetGenesisId = (genesisId && genesisId.trim()) || (existsSync(genesisFile) ? readFileSync(genesisFile, 'utf-8').trim() : null);
+
+  if (!targetGenesisId) return null;
+
+  try {
+    const config = await queryOfficialAoState({
+      ...options,
+      processId: targetGenesisId,
+      action: 'GetGenesisConfig'
+    });
+
+    if (config && config.ok) {
+      console.log(
+        `[Genesis Bootstrap] Bound to Stack '${config.genesis?.stack_id || targetGenesisId}' ` +
+        `(Quorum=${config.genesis?.quorum_size}, Arbitrator=${config.arbitrator_process_id || 'unbound'})`
+      );
+      return config;
+    }
+  } catch (err) {
+    console.warn(`[Genesis Bootstrap] Note: Genesis discovery returned: ${err.message}`);
+  }
+  return null;
 }
 
 /**
@@ -664,6 +696,7 @@ export async function startCommitterDaemon(options = {}) {
   console.log('========================================================================\n');
 
   try {
+    await bootstrapGenesisStackNode(options);
     const initialCursor = await reconcileCursorWithAO(options);
     if (initialCursor && initialCursor.mismatch_detected && !options.allowLocalAhead) {
       console.error('[Fatal CommitterDaemon Error] Cursor reconciliation mismatch detected:', initialCursor.reason);

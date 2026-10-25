@@ -47,6 +47,36 @@ async function main() {
     quorumSize = parseInt(args[quorumIdx + 1], 10);
   }
 
+  // Resolve node and admin signer addresses (auto-detect from secrets/ or CLI args)
+  const suAddrFile = join(ROOT_DIR, 'secrets/address_su.txt');
+  const suAddress = existsSync(suAddrFile) ? readFileSync(suAddrFile, 'utf8').trim() : null;
+
+  const adminAddrFile = join(ROOT_DIR, 'secrets/address.txt');
+  const adminAddress = existsSync(adminAddrFile) ? readFileSync(adminAddrFile, 'utf8').trim() : null;
+
+  const nodeAddrIdx = args.indexOf('--node-address');
+  const customNodeAddr = nodeAddrIdx !== -1 && args[nodeAddrIdx + 1] ? args[nodeAddrIdx + 1] : null;
+
+  const adminAddrIdx = args.indexOf('--admin-address');
+  const customAdminAddr = adminAddrIdx !== -1 && args[adminAddrIdx + 1] ? args[adminAddrIdx + 1] : null;
+
+  const effectiveNode1 = customNodeAddr || suAddress || 'SU_NODE_1';
+  const effectiveAdmin1 = customAdminAddr || adminAddress || 'ADMIN_PRIMARY';
+
+  const nodes = [
+    { id: 'sd-node-1', address: effectiveNode1 },
+    { id: 'sd-node-2', address: 'SU_NODE_2' },
+    { id: 'sd-node-3', address: 'SU_NODE_3' }
+  ];
+  if (effectiveNode1 !== 'SU_NODE_1') {
+    nodes.push({ id: 'su_placeholder_1', address: 'SU_NODE_1' });
+  }
+
+  const admins = [effectiveAdmin1];
+  if (effectiveAdmin1 !== 'ADMIN_PRIMARY') {
+    admins.push('ADMIN_PRIMARY');
+  }
+
   console.log('========================================================================');
   console.log(' HyDB Stack Genesis Spawner CLI');
   console.log('========================================================================');
@@ -54,6 +84,8 @@ async function main() {
   console.log(` Target Network: ${network}`);
   console.log(` Mode:           ${isDryRun ? 'DRY-RUN (Simulation)' : 'LIVE DEPLOYMENT'}`);
   console.log(` Quorum Size:    ${quorumSize}`);
+  console.log(` Primary Node:   ${effectiveNode1}`);
+  console.log(` Primary Admin:  ${effectiveAdmin1}`);
   console.log('========================================================================\n');
 
   const spawnOptions = {
@@ -62,12 +94,8 @@ async function main() {
     quorumSize,
     dryRun: isDryRun,
     walletPath: existsSync(walletPath) ? walletPath : undefined,
-    nodes: [
-      { id: 'sd-node-1', address: 'SU_NODE_1' },
-      { id: 'sd-node-2', address: 'SU_NODE_2' },
-      { id: 'sd-node-3', address: 'SU_NODE_3' }
-    ],
-    admins: ['ADMIN_PRIMARY'],
+    nodes,
+    admins,
     schemas: [
       { namespace: 'default' },
       { namespace: 'finance.balances' },

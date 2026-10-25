@@ -614,10 +614,15 @@ export async function getOrCreateProcessId(options = {}) {
         return arbId.trim();
       }
     } catch {}
-  }
 
-  if (process.env.AO_GENESIS_ID && process.env.AO_GENESIS_ID.trim()) {
-    return process.env.AO_GENESIS_ID.trim();
+    // Never return targetGenesisId as if it were the Arbitrator
+    if (!isTestProfile()) {
+      const err = new Error(
+        `Fatal: Failed to resolve ArbitratorProcessId from Genesis Process ${targetGenesisId} (ERR_ARBITRATOR_NOT_RESOLVED_FROM_GENESIS).`
+      );
+      err.code = 'ERR_ARBITRATOR_NOT_RESOLVED_FROM_GENESIS';
+      throw err;
+    }
   }
 
   // CRITICAL PRODUCTION GATE:
@@ -666,19 +671,34 @@ export async function getOrCreateProcessId(options = {}) {
  * Reconciles local sequence against the authoritative AO Arbitrator via dryrun / CU read.
  */
 export async function queryOfficialAoState(options = {}) {
+  const action = options.action || 'GetOfficialState';
+
   if (typeof options.queryOfficialStateFn === 'function') {
     return await options.queryOfficialStateFn(options);
   }
   if (typeof options.evaluatorFn === 'function') {
     const res = await options.evaluatorFn({
-      Action: 'GetOfficialState',
+      Action: action,
       From: options.sender || 'SU_NODE_1',
-      Tags: [{ name: 'Action', value: 'GetOfficialState' }],
+      Tags: [{ name: 'Action', value: action }],
       Data: '{}'
     });
     const msgs = res?.Messages || res?.responses || [];
     const last = msgs[msgs.length - 1];
     if (last) {
+      if (action === 'GetGenesisConfig') {
+        let dataObj = {};
+        try { if (last.Data) dataObj = JSON.parse(last.Data); } catch {}
+        return {
+          ok: true,
+          status: 'ok',
+          arbitrator_process_id: dataObj.arbitrator_process_id || extractMsgField(last, 'ArbitratorProcessId') || '',
+          genesis: dataObj.genesis || {},
+          authorized_nodes: dataObj.authorized_nodes || {},
+          authorized_admins: dataObj.authorized_admins || {},
+          schemas: dataObj.schemas || {}
+        };
+      }
       return {
         ok: true,
         status: 'ok',
@@ -695,7 +715,6 @@ export async function queryOfficialAoState(options = {}) {
   const processId =
     options.processId ||
     process.env.AO_PROCESS_ID ||
-    process.env.AO_GENESIS_ID ||
     (await getOrCreateProcessId(options).catch(() => null));
 
   if (processId) {
@@ -704,7 +723,7 @@ export async function queryOfficialAoState(options = {}) {
       const res = await aoClient.dryrun({
         process: processId,
         tags: [
-          { name: 'Action', value: 'GetOfficialState' },
+          { name: 'Action', value: action },
           { name: 'Data-Protocol', value: 'ao' },
           { name: 'Variant', value: 'ao.TN.1' }
         ],
@@ -713,6 +732,19 @@ export async function queryOfficialAoState(options = {}) {
       const msgs = res?.Messages || [];
       const last = msgs[msgs.length - 1];
       if (last) {
+        if (action === 'GetGenesisConfig') {
+          let dataObj = {};
+          try { if (last.Data) dataObj = JSON.parse(last.Data); } catch {}
+          return {
+            ok: true,
+            status: 'ok',
+            arbitrator_process_id: dataObj.arbitrator_process_id || extractMsgField(last, 'ArbitratorProcessId') || '',
+            genesis: dataObj.genesis || {},
+            authorized_nodes: dataObj.authorized_nodes || {},
+            authorized_admins: dataObj.authorized_admins || {},
+            schemas: dataObj.schemas || {}
+          };
+        }
         return {
           ok: true,
           status: 'ok',
@@ -743,7 +775,7 @@ export async function queryOfficialAoState(options = {}) {
 export async function commitCheckpointBatch(batchData, options = {}) {
   const batchId = computeBatchId(batchData);
   const env = detectAoEnvironment(options.gatewayUrl || gatewayUrl, options);
-  const processId = options.processId || process.env.AO_PROCESS_ID || process.env.AO_GENESIS_ID || (await getOrCreateProcessId(options));
+  const processId = options.processId || process.env.AO_PROCESS_ID || (await getOrCreateProcessId(options));
 
   const tags = [
     { name: 'Data-Protocol', value: 'ao' },

@@ -703,7 +703,14 @@ export function buildGenesisContractLua(options = {}) {
     .join(',\n');
 
   const adminsTable = (options.admins || [])
-    .map((a) => `    ["${a}"] = true`)
+    .map((a) => `AuthorizedAdmins["${a}"] = true`)
+    .join('\n');
+
+  const schemasTable = (options.schemas || [])
+    .map((s) => {
+      const ns = typeof s === 'string' ? s : s.namespace || s.id;
+      return `    ["${ns}"] = { namespace = "${ns}", active = true }`;
+    })
     .join(',\n');
 
   let dynamicHeader = `
@@ -711,6 +718,9 @@ export function buildGenesisContractLua(options = {}) {
 -- GENESIS BLOCK: DECLARATIVE STACK CONSTITUTION & TOPOLOGY ANCHOR
 -- Protocol: hydb.genesis@1.0 | Dedicated Stack Genesis Process
 -- =========================================================================
+ProcessId = ProcessId or (ao and ao.id) or "HYDB_GENESIS"
+Owner = Owner or (ao and ao.env and ao.env.Process and ao.env.Process.Owner) or (ao and ao.id) or "OWNER_PRIMARY"
+
 StackId = "${stackId}"
 GenesisVersion = "${genesisVersion}"
 GenesisHash = "${genesisHash}"
@@ -719,6 +729,10 @@ QuorumSize = ${quorumSize}
 QuorumMode = "${quorumMode}"
 Network = "${network}"
 ArbitratorProcessId = "${arbitratorProcessId}"
+
+AuthorizedAdmins = AuthorizedAdmins or {}
+if Owner and Owner ~= "" then AuthorizedAdmins[Owner] = true end
+AuthorizedAdmins["ADMIN_PRIMARY"] = true
 `;
 
   if (nodesTable) {
@@ -731,10 +745,14 @@ ${nodesTable}
 
   if (adminsTable) {
     dynamicHeader += `
-AuthorizedAdmins = {
-    [Owner] = true,
-    ["ADMIN_PRIMARY"] = true,
 ${adminsTable}
+`;
+  }
+
+  if (schemasTable) {
+    dynamicHeader += `
+Schemas = {
+${schemasTable}
 }
 `;
   }
@@ -836,13 +854,41 @@ export async function spawnStack(options = {}) {
   const isDryRun = options.dryRun || process.env.HYDB_DRY_RUN === 'true';
   const network = (options.network || process.env.AO_NETWORK || 'testnet').toLowerCase();
 
-  const genesisHash = computeGenesisHash(options);
+  const wallet = options.wallet || (options.walletPath && existsSync(options.walletPath)
+    ? JSON.parse(readFileSync(options.walletPath, 'utf8'))
+    : undefined);
+
+  let deployerAddress = options.deployerAddress;
+  if (!deployerAddress && wallet) {
+    try {
+      const ArweaveModule = (await import('arweave')).default || (await import('arweave'));
+      const arweaveInstance = ArweaveModule.init({ host: '127.0.0.1', port: 1984, protocol: 'http' });
+      deployerAddress = await arweaveInstance.wallets.jwkToAddress(wallet);
+    } catch {}
+  }
+
+  const effectiveAdmins = [...(options.admins || [])];
+  if (deployerAddress && !effectiveAdmins.includes(deployerAddress)) {
+    effectiveAdmins.push(deployerAddress);
+  }
+
+  const effectiveNodes = [...(options.nodes || [])];
+
+  const genesisHash = computeGenesisHash({
+    ...options,
+    nodes: effectiveNodes,
+    admins: effectiveAdmins
+  });
   const genesisLua = buildGenesisContractLua({
     ...options,
+    nodes: effectiveNodes,
+    admins: effectiveAdmins,
     genesisHash
   });
   const arbitratorLua = buildArbitratorContractLua({
     ...options,
+    nodes: effectiveNodes,
+    admins: effectiveAdmins,
     genesisHash
   });
 
@@ -878,9 +924,6 @@ export async function spawnStack(options = {}) {
 
   // Live AO Spawn via @permaweb/aoconnect
   const { connect, createDataItemSigner } = await import('@permaweb/aoconnect');
-  const wallet = options.wallet || (options.walletPath && existsSync(options.walletPath)
-    ? JSON.parse(readFileSync(options.walletPath, 'utf8'))
-    : undefined);
 
   if (!wallet && !options.signer) {
     throw new Error('A valid wallet (JWK) or signer is required to spawn an AO Stack');
@@ -952,7 +995,7 @@ export async function spawnStack(options = {}) {
   });
 
   // 3. Register ArbitratorProcessId in Genesis Process
-  await ao.message({
+  const bindMsgId = await ao.message({
     process: genesisProcessId,
     signer,
     tags: [
@@ -964,14 +1007,66 @@ export async function spawnStack(options = {}) {
     data: JSON.stringify({ arbitrator_process_id: arbitratorProcessId })
   });
 
+  // 4. Post-spawn verification of Genesis configuration & Arbitrator binding
+  let verified = false;
+  let verificationReason = 'pending';
+  if (typeof options.evaluatorFn === 'function') {
+    try {
+      const vRes = await options.evaluatorFn({
+        Target: genesisProcessId,
+        Action: 'GetGenesisConfig',
+        From: deployerAddress || 'ADMIN_PRIMARY',
+        Tags: [{ name: 'Action', value: 'GetGenesisConfig' }],
+        Data: '{}'
+      });
+      const msgs = vRes?.Messages || vRes?.responses || [];
+      const last = msgs[msgs.length - 1];
+      if (last && last.Data) {
+        const parsed = JSON.parse(last.Data);
+        if (parsed.arbitrator_process_id === arbitratorProcessId) {
+          verified = true;
+          verificationReason = 'verified_via_evaluator';
+        }
+      }
+    } catch (e) {
+      verificationReason = `evaluator_verification_failed: ${e.message}`;
+    }
+  } else if (typeof ao.dryrun === 'function') {
+    try {
+      const dryRes = await ao.dryrun({
+        process: genesisProcessId,
+        tags: [
+          { name: 'Action', value: 'GetGenesisConfig' },
+          { name: 'Data-Protocol', value: 'ao' },
+          { name: 'Variant', value: 'ao.TN.1' }
+        ],
+        data: '{}'
+      });
+      const msgs = dryRes?.Messages || [];
+      const last = msgs[msgs.length - 1];
+      if (last && last.Data) {
+        const parsed = JSON.parse(last.Data);
+        if (parsed.arbitrator_process_id === arbitratorProcessId) {
+          verified = true;
+          verificationReason = 'verified_via_ao_dryrun';
+        }
+      }
+    } catch (e) {
+      verificationReason = `dryrun_verification_failed: ${e.message}`;
+    }
+  }
+
   return {
     ok: true,
     deployed: true,
+    verified,
+    verificationReason,
     processId: genesisProcessId,
     genesisProcessId,
     arbitratorProcessId,
     evalMsgId,
     arbitratorEvalMsgId,
+    bindMsgId,
     genesisHash,
     stackId: options.stackId || 'hydb_universal_mesh',
     network

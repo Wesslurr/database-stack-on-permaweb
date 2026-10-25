@@ -65,6 +65,9 @@ end
 -- =========================================================================
 -- DECLARATIVE STACK CONSTITUTION & TOPOLOGY
 -- =========================================================================
+ProcessId = ProcessId or (ao and ao.id) or "HYDB_GENESIS"
+Owner = Owner or (ao and ao.env and ao.env.Process and ao.env.Process.Owner) or (ao and ao.id) or "OWNER_PRIMARY"
+
 StackId = StackId or "hydb_universal_mesh"
 GenesisVersion = GenesisVersion or "1.0.0"
 GenesisHash = GenesisHash or "GENESIS_HASH_PENDING_CALCULATION"
@@ -77,10 +80,11 @@ Network = Network or "testnet"
 ArbitratorProcessId = ArbitratorProcessId or ""
 
 -- Access Control
-AuthorizedAdmins = AuthorizedAdmins or {
-    [Owner] = true,
-    ["ADMIN_PRIMARY"] = true
-}
+AuthorizedAdmins = AuthorizedAdmins or {}
+if Owner and Owner ~= "" then
+    AuthorizedAdmins[Owner] = true
+end
+AuthorizedAdmins["ADMIN_PRIMARY"] = true
 
 AuthorizedNodes = AuthorizedNodes or {}
 
@@ -152,19 +156,33 @@ Handlers.add(
     function(msg)
         local registered_count = 0
         local healthy_count = 0
-        local now = msg.Timestamp or 0
+        local now = tonumber(msg.Timestamp) or 0
+        local is_ms = now > 100000000000
+        local HeartbeatTimeout = is_ms and 60000 or 60
 
         for node_id, node_info in pairs(NodesRegistry) do
             registered_count = registered_count + 1
-            if node_info.status == "READY" or node_info.status == "ACTIVE" then
+            local last_hb = tonumber(node_info.last_heartbeat) or 0
+            local is_stale = (now > 0 and last_hb > 0 and (now - last_hb) > HeartbeatTimeout)
+            if is_stale then
+                node_info.status = "STALE"
+            end
+            if (node_info.status == "READY" or node_info.status == "ACTIVE") and not is_stale then
                 healthy_count = healthy_count + 1
             end
         end
 
+        local required_quorum = QuorumSize
+        if QuorumMode == "all" then
+            required_quorum = math.max(1, registered_count)
+        elseif QuorumMode == "majority" then
+            required_quorum = math.floor(QuorumSize / 2) + 1
+        end
+
         local status = "BOOTSTRAPPING"
-        if healthy_count >= QuorumSize then
+        if healthy_count >= required_quorum and healthy_count > 0 then
             status = "HEALTHY"
-        elseif healthy_count > 0 and healthy_count < QuorumSize then
+        elseif healthy_count > 0 and healthy_count < required_quorum then
             status = "BOOTSTRAPPING"
         elseif registered_count > 0 and healthy_count == 0 then
             status = "DEGRADED"
@@ -179,6 +197,7 @@ Handlers.add(
                 status = status,
                 config_epoch = ConfigEpoch,
                 quorum_size = QuorumSize,
+                quorum_mode = QuorumMode,
                 healthy_nodes_count = healthy_count,
                 registered_nodes_count = registered_count,
                 arbitrator_process_id = ArbitratorProcessId,
@@ -311,6 +330,11 @@ Handlers.add(
         existing.status = payload.health or "ACTIVE"
         existing.throughput = payload.throughput or 0
         existing.last_seq = payload.last_seq or existing.last_seq or 0
+        existing.telemetry = {
+            throughput = payload.throughput or 0,
+            last_seq = payload.last_seq or existing.last_seq or 0,
+            self_reported = true
+        }
         NodesRegistry[nodeId] = existing
 
         ao.send({
@@ -401,9 +425,11 @@ Handlers.add(
         end
 
         local payload = getMessagePayload(msg)
+        local has_mutations = (payload.quorum_size ~= nil) or (payload.quorum_mode ~= nil) or (payload.add_node ~= nil) or (payload.remove_node ~= nil) or (payload.add_schema ~= nil)
+
         if payload.config_epoch then
             local newEpoch = tonumber(payload.config_epoch)
-            if newEpoch and newEpoch >= ConfigEpoch then
+            if newEpoch and newEpoch > ConfigEpoch then
                 ConfigEpoch = newEpoch
             else
                 ao.send({
@@ -412,13 +438,20 @@ Handlers.add(
                     Data = json.encode({
                         ok = false,
                         status = "REJECTED_EPOCH_REGRESSION",
-                        error = "ConfigEpoch cannot be rewound backwards",
+                        error = "ConfigEpoch must strictly advance (newEpoch > ConfigEpoch)",
                         current_epoch = ConfigEpoch
                     })
                 })
                 return
             end
+        elseif has_mutations then
+            ConfigEpoch = ConfigEpoch + 1
         end
+
+        if payload.genesis_hash and type(payload.genesis_hash) == "string" and #payload.genesis_hash == 64 then
+            GenesisHash = payload.genesis_hash
+        end
+
         if payload.quorum_size then
             local q = tonumber(payload.quorum_size)
             if q and q >= 1 then
@@ -433,6 +466,9 @@ Handlers.add(
         if payload.remove_node then
             AuthorizedNodes[payload.remove_node] = nil
         end
+        if payload.add_schema and type(payload.add_schema) == "string" then
+            Schemas[payload.add_schema] = { namespace = payload.add_schema, active = true }
+        end
 
         ao.send({
             Target = sender,
@@ -442,7 +478,8 @@ Handlers.add(
                 status = "CONFIG_UPDATED",
                 config_epoch = ConfigEpoch,
                 quorum_size = QuorumSize,
-                quorum_mode = QuorumMode
+                quorum_mode = QuorumMode,
+                genesis_hash = GenesisHash
             })
         })
     end
@@ -478,6 +515,8 @@ return {
     handle = handle_message,
     Handlers = Handlers,
     ao = ao,
+    Owner = Owner,
+    ProcessId = ProcessId,
     StackId = StackId,
     GenesisVersion = GenesisVersion,
     GenesisHash = GenesisHash,

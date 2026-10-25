@@ -93,6 +93,28 @@ async function runTahap09Tests() {
 
   // [3] Lua In-Memory Dispatch: Genesis Table & GetGenesisConfig Handler
   console.log('\n[3] Lua In-Memory Execution of Genesis & Dispatch Handlers:');
+
+  // 3A. Test Isolated Genesis Process Boot (Verifying Owner self-initialization without leaking from Arbitrator)
+  const tempIsolatedLua = join(__dirname, 'temp_isolated_genesis.lua');
+  const isolatedScript = `
+local json = { decode = function() return {} end, encode = function() return "{}" end }
+package.loaded["json"] = json
+assert(Owner == nil, "Owner must be nil before requiring genesis")
+local gen = require("ao_process.genesis")
+assert(gen.Owner == "OWNER_PRIMARY" or gen.Owner == "HYDB_GENESIS", "Genesis must self-initialize Owner")
+assert(gen.AuthorizedAdmins ~= nil, "AuthorizedAdmins table must be initialized")
+assert(gen.AuthorizedAdmins[gen.Owner] == true, "Owner must be authorized in AuthorizedAdmins")
+print("ISOLATED_GENESIS_BOOT_OK=true")
+`;
+  writeFileSync(tempIsolatedLua, isolatedScript, 'utf8');
+  let isolatedOutput = '';
+  try {
+    isolatedOutput = execFileSync(LUA_BIN, [tempIsolatedLua], { cwd: ROOT_DIR, encoding: 'utf8' });
+  } finally {
+    try { unlinkSync(tempIsolatedLua); } catch {}
+  }
+  assert(isolatedOutput.includes('ISOLATED_GENESIS_BOOT_OK=true'), 'Genesis boots cleanly in fresh isolated Lua environment with no prior Owner global');
+
   const tempTestLua = join(__dirname, 'temp_genesis_runner.lua');
   const runnerScript = `
 local json = {

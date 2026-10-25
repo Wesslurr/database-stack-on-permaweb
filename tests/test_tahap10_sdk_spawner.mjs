@@ -391,13 +391,37 @@ const hbResult = await HyDB.reportHeartbeat('AO_MOCK_GENESIS_ID', {
 assertEq(hbResult.ok, true, 'reportHeartbeat returns ok=true');
 assert(hbResult.msgId !== undefined, 'reportHeartbeat returns msgId');
 
-// Test 4: Dynamic Arbitrator resolution from Genesis in committer
+// Test 4: Dynamic Arbitrator resolution from Genesis in committer via real queryOfficialAoState
 const resolvedArbId = await getOrCreateProcessId({
   processIdFile: '/nonexistent/proc.txt',
   genesisProcessId: 'GENESIS_STACK_999',
-  queryGenesisFn: async () => ({ arbitrator_process_id: 'RESOLVED_ARBITRATOR_777' })
+  evaluatorFn: async (msg) => {
+    assert(msg.Action === 'GetGenesisConfig', 'evaluatorFn receives Action: GetGenesisConfig');
+    return {
+      Messages: [{
+        Data: JSON.stringify({
+          ok: true,
+          arbitrator_process_id: 'RESOLVED_ARBITRATOR_VIA_EVALUATOR_777'
+        })
+      }]
+    };
+  }
 });
-assertEq(resolvedArbId, 'RESOLVED_ARBITRATOR_777', 'getOrCreateProcessId dynamically resolves ArbitratorProcessId from Genesis');
+assertEq(resolvedArbId, 'RESOLVED_ARBITRATOR_VIA_EVALUATOR_777', 'getOrCreateProcessId dynamically resolves ArbitratorProcessId from Genesis via queryOfficialAoState');
+
+// Test 5: Resolution failure does NOT return Genesis ID
+let resolutionFailedClosed = false;
+try {
+  await getOrCreateProcessId({
+    processIdFile: '/nonexistent/proc.txt',
+    genesisProcessId: 'GENESIS_FAIL_STACK',
+    allowAutoCreate: false,
+    queryGenesisFn: async () => ({})
+  });
+} catch (err) {
+  resolutionFailedClosed = (err.code === 'ERR_ARBITRATOR_NOT_RESOLVED_FROM_GENESIS' || err.code === 'ERR_AO_PROCESS_ID_REQUIRED');
+}
+assertEq(resolutionFailedClosed, true, 'Resolution failure fails-closed without returning Genesis ID as Arbitrator ID');
 
 // ============================================================================
 // [9] End-to-End Cold-Start Bootstrap & Node Authorization
