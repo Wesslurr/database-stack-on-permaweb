@@ -4,13 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DB_DIR="${DB_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+export NODE_BIN="${NODE_BIN:-node}"
+
 if [ "${HYDB_COMMITTER_ENABLED:-true}" = "false" ]; then
   echo "[committer-worker] HYDB_COMMITTER_ENABLED=false. Worker disabled."
   exit 0
 fi
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "[committer-worker] ERROR: Node.js runtime not found in PATH. Committer worker cannot start." >&2
+if ! command -v "$NODE_BIN" >/dev/null 2>&1; then
+  echo "[committer-worker] ERROR: Node.js runtime ($NODE_BIN) not found in PATH. Committer worker cannot start." >&2
   exit 1
 fi
 
@@ -38,8 +40,8 @@ BASE_BACKOFF_SEC=2
 echo "[committer-worker] Starting AO Committer Supervisor..."
 
 while true; do
-  echo "[committer-worker] Spawning node $COMMS_SCRIPT..."
-  node "$COMMS_SCRIPT" &
+  echo "[committer-worker] Spawning $NODE_BIN $COMMS_SCRIPT..."
+  "$NODE_BIN" "$COMMS_SCRIPT" &
   CHILD_PID=$!
 
   wait "$CHILD_PID" && EXIT_CODE=0 || EXIT_CODE=$?

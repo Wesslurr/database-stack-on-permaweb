@@ -850,6 +850,27 @@ async function runPhase06Tests() {
     'startCommitterDaemon cleanly exits with status=disabled when HYDB_COMMITTER_ENABLED=false'
   );
 
+  // [5E] SD Node Launcher Fail-Fast when Committer Owner Lacks Node.js Runtime
+  const startSdScript = join(ROOT_DIR, 'scripts/start-sd-node.sh');
+  const mockRunDir = join(TEST_TMP_DIR, 'mock_sd_run');
+  mkdirSync(mockRunDir, { recursive: true });
+
+  const failFastCheck = spawnSync('bash', [startSdScript, '--check-committer'], {
+    env: {
+      ...process.env,
+      HYDB_COMMITTER_ENABLED: 'true',
+      NODE_BIN: 'missing_node_binary_for_test',
+      NODE_SD_RUN_DIR: mockRunDir
+    },
+    encoding: 'utf-8'
+  });
+  const combinedOutput = `${failFastCheck.stdout || ''}\n${failFastCheck.stderr || ''}`;
+  assert(
+    failFastCheck.status !== 0 &&
+      combinedOutput.includes('Committer owner node cannot start without Node.js runtime'),
+    'start-sd-node.sh fails fast (status != 0) when HYDB_COMMITTER_ENABLED=true but node is missing'
+  );
+
   // [6] Daemon Default Option Propagation to commitCheckpointBatch
   let capturedCommitOptions = null;
   const mockCommitFn = async (batch, opts) => {

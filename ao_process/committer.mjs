@@ -20,7 +20,7 @@
  */
 
 import Arweave from 'arweave';
-import { message, result as aoResult, createDataItemSigner } from '@permaweb/aoconnect';
+import { connect, message, result as aoResult, createDataItemSigner } from '@permaweb/aoconnect';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join, basename } from 'node:path';
@@ -40,6 +40,27 @@ const arweave = Arweave.init({
   port: Number(gwUrlObj.port || (gwUrlObj.protocol === 'https:' ? 443 : 80)),
   protocol: gwUrlObj.protocol.replace(':', '')
 });
+
+/**
+ * Returns an aoconnect client instance bound to target MU, CU, and Gateway units.
+ */
+export function getAoInstance(options = {}) {
+  const isAoNetwork = detectAoEnvironment(options.gatewayUrl || gatewayUrl, options) === 'ao_network';
+  const defaultMu = isAoNetwork ? 'https://mu.ao-testnet.xyz' : undefined;
+  const defaultCu = isAoNetwork ? 'https://cu.ao-testnet.xyz' : undefined;
+  const defaultGw = isAoNetwork ? (process.env.ARWEAVE_GATEWAY || 'https://arweave.net') : (options.gatewayUrl || gatewayUrl);
+
+  const muUrl = options.muUrl || process.env.AO_MU_URL || defaultMu;
+  const cuUrl = options.cuUrl || process.env.AO_CU_URL || defaultCu;
+  const gwUrl = options.gatewayUrl || defaultGw;
+
+  const cfg = {};
+  if (muUrl) cfg.MU_URL = muUrl;
+  if (cuUrl) cfg.CU_URL = cuUrl;
+  if (gwUrl) cfg.GATEWAY_URL = gwUrl;
+
+  return connect(cfg);
+}
 
 /**
  * Compute deterministic idempotent Batch ID from sequence range, epoch, state root, and tip hash.
@@ -309,18 +330,62 @@ export async function verifyArweaveL1Finality(l1TxId, batchDataOrId, options = {
 
     for (const gw of gateways) {
       const statusRes = await fetchImpl(`${gw}/tx/${l1TxId}/status`);
-      if (!statusRes || statusRes.status !== 200) {
-        return {
-          verified: false,
-          finalized: false,
-          error_code: 'L1_STATUS_HTTP_ERROR',
-          reason: `L1 tx status on gateway ${gw} returned HTTP ${statusRes?.status ?? 0}`
-        };
+      let blockHeight = 0;
+      let confirmations = 0;
+      let blockIndepHash = '';
+      let isGqlVerified = false;
+      let gqlTags = [];
+
+      if (statusRes && statusRes.status === 200) {
+        const statusBody = await statusRes.json();
+        blockHeight = Number(statusBody?.block_height ?? 0);
+        confirmations = Number(statusBody?.number_of_confirmations ?? 0);
+        blockIndepHash = String(statusBody?.block_indep_hash ?? '');
+      } else {
+        // Fallback: Query GraphQL Gateway for ANS-104 DataItems on live Permaweb
+        try {
+          const gqlRes = await fetchImpl(`${gw}/graphql`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: `query { transaction(id: "${l1TxId}") { id block { id height timestamp } tags { name value } } }`
+            })
+          });
+          if (gqlRes && gqlRes.status === 200) {
+            const gqlData = await gqlRes.json();
+            const txGql = gqlData?.data?.transaction;
+            if (txGql && txGql.block && Number(txGql.block.height) > 0) {
+              blockHeight = Number(txGql.block.height);
+              blockIndepHash = String(txGql.block.id || '');
+              gqlTags = txGql.tags || [];
+              isGqlVerified = true;
+              try {
+                const infoRes = await fetchImpl(`${gw}/info`);
+                if (infoRes && infoRes.status === 200) {
+                  const infoJson = await infoRes.json();
+                  const netHeight = Number(infoJson?.height ?? 0);
+                  confirmations = netHeight >= blockHeight ? (netHeight - blockHeight + 1) : 1;
+                } else {
+                  confirmations = 1;
+                }
+              } catch {
+                confirmations = 1;
+              }
+            }
+          }
+        } catch {
+          // ignore GQL error and fall through
+        }
+
+        if (!isGqlVerified) {
+          return {
+            verified: false,
+            finalized: false,
+            error_code: 'L1_STATUS_HTTP_ERROR',
+            reason: `L1 tx status on gateway ${gw} returned HTTP ${statusRes?.status ?? 0}`
+          };
+        }
       }
-      const statusBody = await statusRes.json();
-      const blockHeight = Number(statusBody?.block_height ?? 0);
-      const confirmations = Number(statusBody?.number_of_confirmations ?? 0);
-      const blockIndepHash = String(statusBody?.block_indep_hash ?? '');
 
       if (blockHeight <= 0 || confirmations < minConf || blockIndepHash.length < 32) {
         return {
@@ -345,27 +410,38 @@ export async function verifyArweaveL1Finality(l1TxId, batchDataOrId, options = {
       }
       minObservedConfirmations = Math.min(minObservedConfirmations, confirmations);
 
-      const txRes = await fetchImpl(`${gw}/tx/${l1TxId}`);
-      if (!txRes || txRes.status !== 200) {
-        return {
-          verified: false,
-          finalized: false,
-          error_code: 'L1_TX_HTTP_ERROR',
-          reason: `L1 tx metadata lookup on ${gw} failed with HTTP ${txRes?.status ?? 0}`
-        };
-      }
-      const txBody = await txRes.json();
-      const rawTags = Array.isArray(txBody?.tags) ? txBody.tags : [];
       const tagMap = new Map();
-      for (const t of rawTags) {
-        const name = t.name_decoded || decodeTag(t.name) || t.name;
-        const value = t.value_decoded || decodeTag(t.value) || t.value;
-        if (name) tagMap.set(name, String(value ?? ''));
-      }
+      let actualTxId = null;
+      let bundleItems = [];
+      let txBody = null;
 
-      // 1. Verify Message / ANS-104 Bundle ID Binding
-      const actualTxId = txBody?.id ? String(txBody.id) : null;
-      const bundleItems = Array.isArray(txBody?.bundle_items) ? txBody.bundle_items.map(String) : [];
+      if (isGqlVerified) {
+        actualTxId = l1TxId;
+        for (const t of gqlTags) {
+          const name = t.name;
+          const value = t.value;
+          if (name) tagMap.set(name, String(value ?? ''));
+        }
+      } else {
+        const txRes = await fetchImpl(`${gw}/tx/${l1TxId}`);
+        if (!txRes || txRes.status !== 200) {
+          return {
+            verified: false,
+            finalized: false,
+            error_code: 'L1_TX_HTTP_ERROR',
+            reason: `L1 tx metadata lookup on ${gw} failed with HTTP ${txRes?.status ?? 0}`
+          };
+        }
+        txBody = await txRes.json();
+        const rawTags = Array.isArray(txBody?.tags) ? txBody.tags : [];
+        for (const t of rawTags) {
+          const name = t.name_decoded || decodeTag(t.name) || t.name;
+          const value = t.value_decoded || decodeTag(t.value) || t.value;
+          if (name) tagMap.set(name, String(value ?? ''));
+        }
+        actualTxId = txBody?.id ? String(txBody.id) : null;
+        bundleItems = Array.isArray(txBody?.bundle_items) ? txBody.bundle_items.map(String) : [];
+      }
       const bundledIn = tagMap.get('Bundled-In') || null;
       const idMatchesDirect = actualTxId === expectedMessageId;
       const idMatchesBundle =
@@ -600,14 +676,15 @@ export async function commitCheckpointBatch(batchData, options = {}) {
     { name: 'Timestamp', value: Date.now().toString() }
   ];
 
-  const useAoConnect = options.useAoConnect || process.env.USE_AO_CONNECT === 'true';
+  const useAoConnect = options.useAoConnect || process.env.USE_AO_CONNECT === 'true' || env === 'ao_network';
 
   if (useAoConnect) {
+    const aoClient = getAoInstance(options);
     const sendFn =
       options.messageFn ||
       (async (args) => {
         const { jwk } = await getWallet(options.walletPath || WALLET_PATH);
-        return await message({ ...args, signer: createDataItemSigner(jwk) });
+        return await aoClient.message({ ...args, signer: createDataItemSigner(jwk) });
       });
 
     const msgId = await sendFn({
@@ -635,7 +712,7 @@ export async function commitCheckpointBatch(batchData, options = {}) {
             })
         : options.skipResultLookup
         ? null
-        : async () => await aoResult({ process: processId, message: msgId }));
+        : async () => await aoClient.result({ process: processId, message: msgId }));
 
     if (resultReader) {
       try {

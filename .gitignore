@@ -27,3 +27,11 @@ ao_process/fraud_batch.json
 # Internal scratch / benchmark scripts
 scratch/
 scripts/ci_watch.py
+
+# Local Agent configuration & Graphify artifacts (private / do not publish)
+.agent/
+.agents/
+AGENTS.md
+GEMINI.md
+graphify-out/
+

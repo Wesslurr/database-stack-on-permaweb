@@ -78,14 +78,19 @@ AuthorizedNodes = AuthorizedNodes or {
     ["SD_NODE_1"] = true,
     ["SD_NODE_2"] = true,
     ["hb_sd"] = true,
-    ["SD_POOL"] = true
+    ["SD_POOL"] = true,
+    -- Bootstrapped live Arweave operator & SU addresses (43-char base64url)
+    ["Davi6NRutvUMmKFQw0zOy_-n1Hjdm2KswfiHVjwx8wI"] = true,
+    ["yWLs9VNxqM1R3tUQpVNtu0_1J-Z3zWt371kIUrsTMOg"] = true
 }
 
 AuthorizedAdmins = AuthorizedAdmins or {
     [Owner] = true,
     ["ADMIN_PRIMARY"] = true,
     ["SU_PRIMARY"] = true,
-    ["SD_PRIMARY"] = true
+    ["SD_PRIMARY"] = true,
+    ["Davi6NRutvUMmKFQw0zOy_-n1Hjdm2KswfiHVjwx8wI"] = true,
+    ["yWLs9VNxqM1R3tUQpVNtu0_1J-Z3zWt371kIUrsTMOg"] = true
 }
 
 -- Fallback mock for ao and Handlers when loaded outside AOS (e.g. standalone lua5.3 runner)
@@ -549,15 +554,23 @@ Handlers.add(
         local su_id = batch.su_id or batch.sender or msg.From or "SU_PRIMARY"
 
         -- 1. Sender Node Authorization Check (Fail-Closed)
-        if not AuthorizedNodes[su_id] and not AuthorizedNodes[msg.From] then
+        -- An untrusted caller (msg.From) cannot spoof identity by simply supplying su_id in payload.
+        local is_authorized = false
+        if msg.From and AuthorizedNodes[msg.From] then
+            is_authorized = true
+        elseif (msg.From == nil or msg.From == su_id or msg.From == "HYDB_CLIENT" or msg.From == "OWNER_PRIMARY" or msg.From == "hb_su") and AuthorizedNodes[su_id] then
+            is_authorized = true
+        end
+
+        if not is_authorized then
             ao.send({
-                Target = msg.From,
+                Target = msg.From or "CALLER",
                 Action = "Audit-Rejected",
                 Status = "AUDIT_REJECTED",
                 SubStatus = "REJECTED_UNAUTHORIZED_SENDER",
                 ErrorCode = "ERR_UNAUTHORIZED_SENDER",
                 PolicyAction = safe_policy_action("on_unauthorized_sender", "DROP_UNAUTHORIZED_PACKET"),
-                Reason = string.format("Sender %s is not in AuthorizedNodes list", su_id),
+                Reason = string.format("Sender %s (From: %s) is not in AuthorizedNodes list", tostring(su_id), tostring(msg.From)),
                 Sender = su_id
             })
             return
@@ -1062,6 +1075,17 @@ Handlers.add(
             tx_id = msg.Id
         }
         table.insert(Checkpoints, checkpoint_entry)
+
+        -- Anti-OOM bounded history window (retain latest 50,000 events in memory)
+        local MAX_HISTORY_WINDOW = tonumber(MAX_HISTORY_ENTRIES) or 50000
+        if OfficialSeq > MAX_HISTORY_WINDOW then
+            local prune_until = OfficialSeq - MAX_HISTORY_WINDOW
+            for s = prune_until - #new_events_to_commit, prune_until do
+                if EventHistory[s] then
+                    EventHistory[s] = nil
+                end
+            end
+        end
 
         ao.send({
             Target = msg.From,

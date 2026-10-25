@@ -956,6 +956,30 @@ store_idempotency(ReqId, Op, Namespace, RawKey, RawVal, Seq, QuorumMode, Result)
 %% ============================================================================
 
 parse_raw_field(Key, Req, Default) when is_map(Req) ->
+    case lookup_key_or_typed(Key, Req) of
+        not_found -> Default;
+        Val -> Val
+    end;
+parse_raw_field(_Key, _Req, Default) ->
+    Default.
+
+lookup_key_or_typed(Key, Req) ->
+    case lookup_exact_field(Key, Req) of
+        not_found ->
+            % HyperBEAM typed query parameter fallback (e.g. key+integer=42)
+            case lookup_exact_field(<< Key/binary, "+integer" >>, Req) of
+                not_found ->
+                    case lookup_exact_field(<< Key/binary, "+string" >>, Req) of
+                        not_found ->
+                            lookup_exact_field(<< Key/binary, "+binary" >>, Req);
+                        V2 -> V2
+                    end;
+                V1 -> V1
+            end;
+        V0 -> V0
+    end.
+
+lookup_exact_field(Key, Req) ->
     case maps:get(Key, Req, not_found) of
         not_found ->
             QueryKey = << "query/", Key/binary >>,
@@ -968,21 +992,18 @@ parse_raw_field(Key, Req, Default) when is_map(Req) ->
                                 Bin when is_binary(Bin), byte_size(Bin) > 0 ->
                                     try json:decode(Bin) of
                                         Decoded when is_map(Decoded) ->
-                                            maps:get(Key, Decoded, Default);
-                                        _ -> Default
-                                    catch _:_ -> Default
+                                            maps:get(Key, Decoded, not_found);
+                                        _ -> not_found
+                                    catch _:_ -> not_found
                                     end;
                                 Map when is_map(Map) ->
-                                    maps:get(Key, Map, Default);
+                                    maps:get(Key, Map, not_found);
                                 _ ->
                                     case hb_safe_get(Key, Req) of
                                         not_found ->
                                             case hb_safe_get(QueryKey, Req) of
                                                 not_found ->
-                                                    case hb_safe_get(BodyKey, Req) of
-                                                        not_found -> Default;
-                                                        V3 -> V3
-                                                    end;
+                                                    hb_safe_get(BodyKey, Req);
                                                 V2 -> V2
                                             end;
                                         V1 -> V1
@@ -993,9 +1014,7 @@ parse_raw_field(Key, Req, Default) when is_map(Req) ->
                 VQ -> VQ
             end;
         VK -> VK
-    end;
-parse_raw_field(_Key, _Req, Default) ->
-    Default.
+    end.
 
 hb_safe_get(Key, Req) ->
     case erlang:function_exported(hb_ao, get, 3) of

@@ -1,0 +1,35 @@
+FROM erlang:27-slim
+
+# Install system dependencies & Node.js 22 LTS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    bash \
+    build-essential \
+    cmake \
+    git \
+    python3 \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy dependency specifications first for optimal layer caching
+COPY package.json package-lock.json* ./
+COPY ao_process/package.json ao_process/package-lock.json* ./ao_process/
+
+# Install exact production dependencies using committed lockfiles
+RUN if [ -f package-lock.json ]; then npm ci --ignore-scripts; else npm install --ignore-scripts; fi \
+    && cd ao_process && if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+# Copy full application code
+COPY . .
+
+# Set execution permissions for distribution scripts
+RUN chmod +x ./scripts/*.sh 2>/dev/null || true
+
+ENV NODE_ENV=production
+ENV HYDB_PROFILE=production
+
+CMD ["./scripts/run-sd-node-foreground.sh"]

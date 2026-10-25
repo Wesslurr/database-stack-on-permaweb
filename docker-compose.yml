@@ -33,17 +33,21 @@ services:
       - TRUSTED_ARWEAVE_GATEWAYS=http://127.0.0.1:1984,http://arlocal:1984,https://arweave.net,https://ar-io.dev
     command: bash -c "./scripts/start-node.sh && tail -f /dev/null"
 
-  # 2A. State Durability Worker Replica 1 (~sd@1.0)
+  # 2A. State Durability Worker Replica 1 (~sd@1.0) - Designated AO Committer Owner
   sd-node-1:
-    image: erlang:27-slim
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sd-node
+    image: hydb-sd-node:latest
     container_name: hydb-sd-node-1
-    restart: unless-stopped
+    restart: on-failure
     working_dir: /app
     depends_on:
       - hot-node
     volumes:
       - .:/app
       - sd_node_1_data:/app/data/node_sd_1
+      - committer_data:/app/data/committer
     ports:
       - "${SU_PORT_1:-8735}:8735"
     environment:
@@ -51,20 +55,34 @@ services:
       - HYDB_PROFILE=${HYDB_PROFILE:-production}
       - HYDB_NODE_ID=sd-node-1
       - HYDB_COMMITTER_ENABLED=${HYDB_COMMITTER_ENABLED:-true}
+      - HYDB_COMMITTER_CURSOR_PATH=/app/data/committer/committer_cursor.json
       - HYDB_CLUSTER_SECRET=${HYDB_CLUSTER_SECRET:?HYDB_CLUSTER_SECRET_must_be_set_min_16_chars}
       - HYDB_ADMIN_TOKEN=${HYDB_ADMIN_TOKEN:?HYDB_ADMIN_TOKEN_must_be_set_min_16_chars}
       - SU_PORT=8735
+      - SU_URL=http://127.0.0.1:8735/~sd@1.0
+      - HOT_URL=http://hot-node:8734/~hymessage@1.0
       - HOT_NODE_HOST=hot-node
       - HOT_NODE_PORT=8736
       - HYDB_WAL_PATH=/app/data/node_sd_1/wal.log
       - HYDB_EPOCH_PATH=/app/data/node_sd_1/epoch.meta
-    command: bash -c "./scripts/start-sd-node.sh && tail -f /dev/null"
+      - ARWEAVE_GATEWAY=${ARWEAVE_GATEWAY:-http://arlocal:1984}
+      - AO_PROCESS_ID=${AO_PROCESS_ID:-}
+      - USE_AO_CONNECT=${USE_AO_CONNECT:-false}
+      - INTERVAL_MS=3000
+      - VERIFY_L1_FINALITY=${VERIFY_L1_FINALITY:-false}
+      - L1_GATEWAYS=${L1_GATEWAYS:-https://arweave.net,https://ar-io.dev}
+      - MIN_CONFIRMATIONS=${MIN_CONFIRMATIONS:-1}
+      - REQUIRE_MULTI_GATEWAY=${REQUIRE_MULTI_GATEWAY:-false}
+    command: ./scripts/run-sd-node-foreground.sh
 
   # 2B. State Durability Worker Replica 2 (~sd@1.0)
   sd-node-2:
-    image: erlang:27-slim
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sd-node
+    image: hydb-sd-node:latest
     container_name: hydb-sd-node-2
-    restart: unless-stopped
+    restart: on-failure
     working_dir: /app
     depends_on:
       - hot-node
@@ -85,13 +103,16 @@ services:
       - HOT_NODE_PORT=8736
       - HYDB_WAL_PATH=/app/data/node_sd_2/wal.log
       - HYDB_EPOCH_PATH=/app/data/node_sd_2/epoch.meta
-    command: bash -c "./scripts/start-sd-node.sh && tail -f /dev/null"
+    command: ./scripts/run-sd-node-foreground.sh
 
   # 2C. State Durability Worker Replica 3 (~sd@1.0)
   sd-node-3:
-    image: erlang:27-slim
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sd-node
+    image: hydb-sd-node:latest
     container_name: hydb-sd-node-3
-    restart: unless-stopped
+    restart: on-failure
     working_dir: /app
     depends_on:
       - hot-node
@@ -112,40 +133,9 @@ services:
       - HOT_NODE_PORT=8736
       - HYDB_WAL_PATH=/app/data/node_sd_3/wal.log
       - HYDB_EPOCH_PATH=/app/data/node_sd_3/epoch.meta
-    command: bash -c "./scripts/start-sd-node.sh && tail -f /dev/null"
+    command: ./scripts/run-sd-node-foreground.sh
 
-  # 3. Autonomous Committer Daemon: State Durability Worker (~sd@1.0) -> AO Process Bridge
-  committer-daemon:
-    image: node:22-slim
-    container_name: hydb-committer-daemon
-    restart: unless-stopped
-    working_dir: /app
-    depends_on:
-      - sd-node-1
-      - sd-node-2
-      - sd-node-3
-    volumes:
-      - .:/app
-      - committer_data:/app/data/committer
-    environment:
-      - DB_DIR=/app
-      - HYDB_PROFILE=${HYDB_PROFILE:-production}
-      - HYDB_COMMITTER_ENABLED=true
-      - HYDB_CLUSTER_SECRET=${HYDB_CLUSTER_SECRET:?HYDB_CLUSTER_SECRET_must_be_set_min_16_chars}
-      - HYDB_COMMITTER_CURSOR_PATH=/app/data/committer/committer_cursor.json
-      - SU_URL=http://sd-node-1:8735/~sd@1.0
-      - HOT_URL=http://hot-node:8734/~hymessage@1.0
-      - ARWEAVE_GATEWAY=${ARWEAVE_GATEWAY:-http://arlocal:1984}
-      - AO_PROCESS_ID=${AO_PROCESS_ID:-}
-      - USE_AO_CONNECT=${USE_AO_CONNECT:-false}
-      - INTERVAL_MS=3000
-      - VERIFY_L1_FINALITY=${VERIFY_L1_FINALITY:-false}
-      - L1_GATEWAYS=${L1_GATEWAYS:-https://arweave.net,https://ar-io.dev}
-      - MIN_CONFIRMATIONS=${MIN_CONFIRMATIONS:-1}
-      - REQUIRE_MULTI_GATEWAY=${REQUIRE_MULTI_GATEWAY:-false}
-    command: bash ./scripts/start-committer-worker.sh
-
-  # 4. Optional Local Arweave Gateway (for local testing/isolated dev)
+  # 3. Optional Local Arweave Gateway (for local testing/isolated dev)
   arlocal:
     image: node:22-slim
     container_name: hydb-arlocal

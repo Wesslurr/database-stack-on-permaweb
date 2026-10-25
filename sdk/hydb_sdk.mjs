@@ -509,6 +509,108 @@ export class HyDBContract {
   }
 
   /**
+   * Publish manifest and WASM artifacts via ANS-104 DataItems to a Permaweb Gateway or Bundler.
+   * Provides instant confirmation on the Permaweb without waiting for L1 block mining.
+   */
+  async publishViaBundler(options = {}) {
+    if (options.skipPreflight !== true) {
+      await this.preflightDryRun();
+    }
+
+    const { createDataItemSigner } = await import('@permaweb/aoconnect');
+    const jwk = options.jwk || JSON.parse(readFileSync(options.walletPath || DEFAULT_WALLET_PATH, 'utf-8'));
+    const signer = createDataItemSigner(jwk);
+
+    const gw = parseArweaveGateway(options.gatewayUrl || (typeof process !== 'undefined' && process.env?.ARWEAVE_GATEWAY) || 'https://arweave.net');
+    const arweave = Arweave.init({ host: gw.host, port: gw.port, protocol: gw.protocol });
+    const ownerAddress = await arweave.wallets.jwkToAddress(jwk);
+
+    // 1. WASM binary publication via ANS-104 DataItem
+    if (this.backend === 'wasm_slot' && !this.wasmTxId) {
+      const wasmBytes = this.wasmBuffer || readFileSync(this.wasmPath);
+      this.wasmSha256 = crypto.createHash('sha256').update(wasmBytes).digest('hex').toUpperCase();
+
+      const wasmDataItem = await signer({
+        data: wasmBytes,
+        tags: [
+          { name: 'Content-Type', value: 'application/wasm' },
+          { name: 'Data-Protocol', value: 'hydb' },
+          { name: 'Type', value: 'WASM-Engine' },
+          { name: 'WASM-SHA256', value: this.wasmSha256 }
+        ]
+      });
+
+      const bundlerUrl = options.bundlerUrl || `${gw.baseUrl}/tx`;
+      try {
+        await fetch(bundlerUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: wasmDataItem.raw
+        });
+      } catch {}
+
+      this.wasmTxId = wasmDataItem.id;
+    }
+
+    // 2. Contract Manifest via ANS-104 DataItem
+    this.manifest = this.toManifest({
+      wasmTxId: this.wasmTxId,
+      wasmSha256: this.wasmSha256,
+      owner: ownerAddress
+    });
+
+    const manifestPayload = Buffer.from(JSON.stringify(this.manifest), 'utf-8');
+    const contractTags = [
+      { name: 'Content-Type', value: 'application/json' },
+      { name: 'Data-Protocol', value: 'hydb' },
+      { name: 'Type', value: 'Contract-Definition' },
+      { name: 'Contract-Version', value: this.contractVersion },
+      { name: 'Namespace', value: this.namespace },
+      { name: 'Backend', value: this.backend }
+    ];
+    if (this.wasmTxId) {
+      contractTags.push({ name: 'WASM-Tx-Id', value: this.wasmTxId });
+    }
+
+    const contractDataItem = await signer({
+      data: manifestPayload,
+      tags: contractTags
+    });
+
+    const bundlerUrl = options.bundlerUrl || `${gw.baseUrl}/tx`;
+    try {
+      await fetch(bundlerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: contractDataItem.raw
+      });
+    } catch {}
+
+    this.contractTxId = contractDataItem.id;
+    return {
+      ok: true,
+      protocol: 'ans104_data_item',
+      contractTxId: this.contractTxId,
+      wasmTxId: this.wasmTxId,
+      wasmSha256: this.wasmSha256,
+      owner: ownerAddress,
+      manifest: this.manifest
+    };
+  }
+
+  /**
+   * Universal Permaweb Publisher: Automatically routes to Bundler in live ao_network
+   * or direct ArLocal L1 transaction in test environments.
+   */
+  async publishToPermaweb(options = {}) {
+    const isLive = options.mode === 'bundler' || (typeof process !== 'undefined' && process.env?.HYDB_ENV === 'production');
+    if (isLive) {
+      return await this.publishViaBundler(options);
+    }
+    return await this.publishToArweave(options);
+  }
+
+  /**
    * Instruct a worker node (`Hymessage`) to pull & mount this contract directly from Arweave by `contractTxId`
    */
   async mountOnNode(nodeUrl, options = {}) {

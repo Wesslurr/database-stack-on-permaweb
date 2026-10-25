@@ -8,13 +8,21 @@ NODE_SD_RUN_DIR="${NODE_SD_RUN_DIR:-$DB_DIR/data/node_sd}"
 if [ -f "$NODE_SD_RUN_DIR/committer.pid" ]; then
   CPID="$(cat "$NODE_SD_RUN_DIR/committer.pid" 2>/dev/null || true)"
   if [ -n "$CPID" ] && kill -0 "$CPID" 2>/dev/null; then
-    echo "[sd-node] Stopping committer worker (PID $CPID)..."
-    kill "$CPID" 2>/dev/null || true
+    echo "[sd-node] Stopping committer worker (PID $CPID and children)..."
+    pkill -P "$CPID" 2>/dev/null || true
+    kill -TERM "$CPID" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+      if ! kill -0 "$CPID" 2>/dev/null; then
+        break
+      fi
+      sleep 0.2
+    done
+    if kill -0 "$CPID" 2>/dev/null; then
+      kill -9 "$CPID" 2>/dev/null || true
+    fi
   fi
   rm -f "$NODE_SD_RUN_DIR/committer.pid"
 fi
-pkill -f "start-committer-worker.sh" 2>/dev/null || true
-pkill -f "ao_process/committer_daemon.mjs" 2>/dev/null || true
 
 if [ -f "$HB_SD_REL/bin/hb" ]; then
   "$HB_SD_REL/bin/hb" stop 2>/dev/null || true
