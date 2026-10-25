@@ -16,6 +16,8 @@ jobs:
   conformance-and-specs:
     name: Conformance, AO & SDK Verification
     runs-on: ubuntu-latest
+    env:
+      LUA_BIN: lua
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -35,6 +37,14 @@ jobs:
         uses: leafo/gh-actions-lua@v10
         with:
           luaVersion: "5.3"
+
+      - name: Verify Lua Environment & Symlinks
+        run: |
+          which lua || true
+          lua -v || true
+          if command -v lua >/dev/null 2>&1 && ! command -v lua5.3 >/dev/null 2>&1; then
+            sudo ln -sf "$(which lua)" /usr/local/bin/lua5.3 || true
+          fi
 
       - name: Setup Erlang/OTP
         uses: erlef/setup-beam@v1

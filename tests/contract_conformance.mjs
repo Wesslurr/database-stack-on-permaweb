@@ -93,10 +93,22 @@ const erlRunner = join(DB_DIR, 'tests/erl_conformance_runner.escript');
 const erlOutputRaw = execFileSync(erlRunner, { encoding: 'utf-8', env: { ...process.env, DB_DIR } }).trim();
 const erl = JSON.parse(erlOutputRaw);
 
+function getLuaBinary() {
+  if (process.env.LUA_BIN) return process.env.LUA_BIN;
+  for (const bin of ['lua', 'lua5.3', 'lua5.4', 'luajit']) {
+    try {
+      execFileSync(bin, ['-v'], { stdio: 'ignore' });
+      return bin;
+    } catch {}
+  }
+  return 'lua';
+}
+const LUA_BIN = getLuaBinary();
+
 // Lua Runner Execution
 console.log('  Executing Lua Conformance Runner...');
 const luaRunner = join(DB_DIR, 'tests/lua_conformance_runner.lua');
-const luaOutputRaw = execFileSync('lua', [luaRunner], { encoding: 'utf-8', env: { ...process.env, DB_DIR } }).trim();
+const luaOutputRaw = execFileSync(LUA_BIN, [luaRunner], { encoding: 'utf-8', env: { ...process.env, DB_DIR } }).trim();
 const lua = JSON.parse(luaOutputRaw);
 
 // Value Assertions across JS, Erlang, Lua

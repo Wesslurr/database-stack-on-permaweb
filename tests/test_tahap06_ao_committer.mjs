@@ -52,7 +52,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '..');
 
 function resolveLuaBinary() {
-  for (const bin of ['lua5.3', 'lua', 'lua5.4', 'luajit']) {
+  if (process.env.LUA_BIN) return process.env.LUA_BIN;
+  for (const bin of ['lua', 'lua5.3', 'lua5.4', 'luajit']) {
     const check = spawnSync(bin, ['-v'], { encoding: 'utf-8' });
     if (check.status === 0) return bin;
   }

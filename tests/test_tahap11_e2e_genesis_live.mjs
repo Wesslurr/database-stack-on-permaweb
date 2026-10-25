@@ -57,7 +57,18 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '..');
-const LUA_BIN = process.env.LUA_BIN || 'lua5.3';
+
+function resolveLuaBinary() {
+  if (process.env.LUA_BIN) return process.env.LUA_BIN;
+  for (const bin of ['lua', 'lua5.3', 'lua5.4', 'luajit']) {
+    try {
+      const res = spawnSync(bin, ['-v'], { stdio: 'ignore' });
+      if (res.status === 0) return bin;
+    } catch {}
+  }
+  return 'lua';
+}
+const LUA_BIN = resolveLuaBinary();
 const TEST_TMP_DIR = join(os.tmpdir(), `hydb_tahap11_${process.pid}_${Date.now()}`);
 
 if (!existsSync(TEST_TMP_DIR)) {
@@ -285,6 +296,9 @@ class LiveStackLuaRuntime {
     try {
       writeFileSync(tmpLuaPath, script, 'utf8');
       const res = spawnSync(LUA_BIN, [tmpLuaPath], { cwd: ROOT_DIR, encoding: 'utf8' });
+      if (res.error) {
+        throw new Error(`Lua spawn failed (${LUA_BIN}): ${res.error.message}`);
+      }
       if (res.status !== 0) {
         throw new Error(`Lua execution failed (${res.status}): ${res.stderr || res.stdout}`);
       }
