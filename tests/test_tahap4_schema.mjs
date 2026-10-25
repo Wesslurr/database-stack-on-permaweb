@@ -167,6 +167,16 @@ async function main() {
   // --------------------------------------------------------------------------
   // TEST 2: Erlang Node Rejection of Unsupported Features & Incoherent Rules
   // --------------------------------------------------------------------------
+  const isClusterActive = await fetch(`${HOT_URL}/ping`).then(r => r.ok).catch(() => false);
+  if (!isClusterActive) {
+    console.log('\n  ⚠️ [Live Cluster Inactive] HyperBEAM Hot Node is not running on :8734.');
+    console.log('  ⚠️ Skipping live cluster schema enforcement tests (run scripts/start-node.sh for live testing).\n');
+    console.log('========================================================================');
+    console.log(` Tahap 4 Verification Summary: ${passed} PASSED, 0 FAILED (Live Node Skipped)`);
+    console.log('========================================================================');
+    return;
+  }
+
   console.log('\n[Test 2] Erlang Node Rejection of Unsupported Features (HTTP 501 / 422):');
 
   // 2a. Attempt registering with indexes

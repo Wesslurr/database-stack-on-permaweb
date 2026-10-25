@@ -135,6 +135,17 @@ async function main() {
     }
   }
 
+  // Check if live cluster is active before attempting live node reset
+  const isClusterActive = await fetch(`${HOT_URL}/ping`).then(r => r.ok).catch(() => false);
+  if (!isClusterActive) {
+    console.log('  ⚠️ [Live Cluster Inactive] HyperBEAM cluster is not running on :8734/:8735.');
+    console.log('  ⚠️ Skipping live cluster durability tests (run scripts/start-node.sh for live testing).\n');
+    console.log('========================================================================');
+    console.log(' Tahap 5 Verification Summary: SKIPPED (Cluster Offline)');
+    console.log('========================================================================');
+    return;
+  }
+
   // Derive cluster secret
   const walletBytes = readFileSync(WALLET_PATH);
   const clusterSecret = crypto.createHash('sha256').update(walletBytes).digest();

@@ -79,6 +79,17 @@ async function main() {
   console.log('>>> RUNNING FULL FAULT-TOLERANT & SECURITY VERIFICATION SUITE (AO + HYPERBEAM) <<<');
   console.log('='.repeat(84));
 
+  // Check if live cluster is active before attempting live node reset
+  const isClusterActive = await fetch(`${HOT_URL}/ping`).then(r => r.ok).catch(() => false);
+  if (!isClusterActive) {
+    console.log('\n  ⚠️ [Live Cluster Inactive] Live HyperBEAM cluster is not running on :8734/:8735.');
+    console.log('  ⚠️ Skipping live cluster maximal integration POC (run scripts/start-node.sh for live testing).\n');
+    console.log('='.repeat(84));
+    console.log('>>> MAXIMAL INTEGRATION POC: SKIPPED (Cluster Offline) <<<');
+    console.log('='.repeat(84));
+    return;
+  }
+
   const walletRawBytes = readFileSync(WALLET_PATH);
   const clusterSecret = crypto.createHash('sha256').update(walletRawBytes).digest();
   const validAdminToken = clusterSecret.toString('hex').toUpperCase();
