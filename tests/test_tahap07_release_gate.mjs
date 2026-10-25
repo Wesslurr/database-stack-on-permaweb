@@ -191,6 +191,8 @@ const requiredScripts = [
   'test:committer',
   'test:release-gate',
   'test:conformance',
+  'test:contract',
+  'test:durability',
   'test:ao',
   'test:sdk',
   'test:business',
