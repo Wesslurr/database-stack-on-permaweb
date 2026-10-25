@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DB_DIR="${DB_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 export HB_SD_REL="$DB_DIR/vendor/HyperBEAM_sd/_build/genesis_wasm+rocksdb/rel/hb_sd"
-export NODE_SD_RUN_DIR="$DB_DIR/data/node_sd"
+export NODE_SD_RUN_DIR="${NODE_SD_RUN_DIR:-$DB_DIR/data/${HYDB_NODE_ID:-node_sd}}"
 
 if [ -d "$HOME/erlang/27.0/bin" ]; then
   export PATH="$HOME/erlang/27.0/bin:$PATH"
@@ -59,6 +59,9 @@ start_committer_if_enabled() {
       if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
         echo "[sd-node] Committer worker already running (PID $EXISTING_PID)"
         return 0
+      else
+        echo "[sd-node] Removing stale committer.pid (PID ${EXISTING_PID:-empty} is not active)"
+        rm -f "$NODE_SD_RUN_DIR/committer.pid"
       fi
     fi
 

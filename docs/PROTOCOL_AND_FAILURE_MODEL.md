@@ -119,8 +119,14 @@ A batch submission to AO is **never** marked `confirmed: true` merely because `m
   - Active container supervision (`scripts/run-sd-node-foreground.sh`) monitors the committer worker directly without using `tail -f /dev/null`. Upon detecting exit code 78, the container immediately terminates fail-closed with code 78, preventing infinite crash-restart loops while preserving transient crash recovery (exponential backoff up to 5 retries on transient network/gateway blips).
 * **Heartbeat & Health Status Reporting**:
   - The daemon maintains a heartbeat health file (`committer_status.json`) in the cursor directory, exposing runtime status (`idle`, `running`, `halted`, `failed_closed`, `retry_pending`, `stopped`), PID, sequence progress, and ISO 8601 timestamps.
-* **Production Gate on AO Process Creation**:
+* **Production Gate on AO Process Creation & Mainnet Protection**:
   - Silent auto-creation of AO processes is strictly prohibited in production mode (`HYDB_PROFILE=production` or `HYDB_ENV=prod`), requiring an explicit `AO_PROCESS_ID` (`ERR_AO_PROCESS_ID_REQUIRED`).
+  - Deployments targeting `AO_NETWORK=mainnet` prohibit defaulting to testnet module/scheduler IDs without explicit configuration.
+* **Strict Startup AO Reconciliation & Fail-Closed Halting**:
+  - In production mode, startup reconciliation executes an authoritative AO dryrun query (`Action: GetOfficialState`). If the AO process is unreachable or returns an error, the daemon halts fail-closed (`ERR_AO_STATE_UNREACHABLE`, exit code 78).
+  - Supervisor script [`scripts/run-sd-node-foreground.sh`](scripts/run-sd-node-foreground.sh) writes `CONTAINER_HALTED` and holds the process alive in an unhealthy state, preventing Docker Compose `restart: on-failure` flapping while signaling `unhealthy` status to orchestration.
+* **Local Lock vs. Distributed Lease Scope**:
+  - File lock (`committer.lock`) enforces mutual exclusion across local processes on the same storage unit. In multi-node deployments, exactly one replica (`sd-node-1`) is designated as `HYDB_COMMITTER_ENABLED=true`. Enabling committers across multiple independent nodes requires an external distributed coordinator lease to prevent split-brain.
 * **Batch Idempotency & Equivocation Detection**: Retrying an already-committed batch `[from_seq, to_seq]` with an identical final hash returns `DUPLICATE_BATCH_IDEMPOTENT` without creating duplicate entries in `Checkpoints`. Submitting an overlapping batch whose hash conflicts with `EventHistory[to_seq].hash` triggers cryptographic fraud rejection (`EQUIVOCATION_PROVEN`).
 * **L1 Finality Trust Boundaries & Multi-Gateway Consensus**:
   - `verifyArweaveL1Finality` validates block inclusion (`block_indep_hash`, `block_height`, confirmations) and full tag binding (`Batch-Id`, `Recipient`, sequence range, state root, event hash).

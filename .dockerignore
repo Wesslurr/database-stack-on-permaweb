@@ -1,0 +1,33 @@
+# Git metadata
+.git
+.gitignore
+.github
+
+# Antigravity & Agent workspace artifacts
+.agent
+.agents
+AGENTS.md
+GEMINI.md
+graphify-out
+scratch/
+
+# Secrets & environment configurations (Fail-Closed)
+secrets/
+.env
+.env.*
+!.env.example
+
+# Local runtime data & logs
+data/
+logs/
+arlocal.log
+.arlocal-db/
+
+# Host dependencies (always rely on docker layer npm ci)
+node_modules/
+ao_process/node_modules/
+hymessage/node_modules/
+
+# Temporary and lock artifacts
+*.log
+*.pid

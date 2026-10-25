@@ -42,6 +42,38 @@ import {
 
 export const FATAL_FAIL_CLOSED_EXIT_CODE = 78;
 
+/**
+ * Checks whether an error is an unrecoverable configuration/state divergence error
+ * that must cause the daemon to fail closed immediately (exit code 78) instead of retrying.
+ */
+export function isFatalFailClosedError(err) {
+  if (!err) return false;
+  if (err.exitCode === FATAL_FAIL_CLOSED_EXIT_CODE) return true;
+  const fatalCodes = [
+    'ERR_AO_PROCESS_ID_REQUIRED',
+    'ERR_INVALID_PROCESS_ID',
+    'ERR_CURSOR_AO_STATE_MISMATCH',
+    'ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ',
+    'ERR_AO_STATE_UNREACHABLE',
+    'ERR_COMMITTER_LOCK_HELD',
+    'ERR_UNAUTHORIZED_NODE',
+    'ERR_UNAUTHORIZED_ADMIN',
+    'ERR_FRAUD_PROOF_DETECTED'
+  ];
+  if (err.code && fatalCodes.includes(err.code)) return true;
+  const msg = String(err.message || '');
+  if (
+    msg.includes('ERR_AO_PROCESS_ID_REQUIRED') ||
+    msg.includes('Auto-creation of AO processes is strictly prohibited in production') ||
+    msg.includes('fail-closed') ||
+    msg.includes('REJECTED_UNAUTHORIZED_NODE') ||
+    msg.includes('REJECTED_UNAUTHORIZED_ADMIN')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
 const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
@@ -68,6 +100,16 @@ function isProcessAlive(pid) {
   }
 }
 
+/**
+ * Acquire local mutual-exclusion lock for the committer cursor directory.
+ *
+ * ARCHITECTURAL NOTICE (Fail-Closed Fencing):
+ * This is a local OS process lock ensuring only a single committer daemon operates against
+ * a designated storage unit directory at any time on this host. It is NOT a distributed fencing lease.
+ * In a multi-replica cluster (sd-node-1, sd-node-2, sd-node-3), only the designated committer owner
+ * (HYDB_COMMITTER_ENABLED=true on sd-node-1) should run the committer. Running active committers across
+ * multiple nodes without a distributed coordinator lease is prohibited to prevent split-brain.
+ */
 export function acquireCursorLock(cursorPath = DEFAULT_CURSOR_PATH) {
   const dir = dirname(cursorPath);
   if (!existsSync(dir)) {
@@ -332,6 +374,25 @@ export async function reconcileCursorWithAO(options = {}) {
         ao_official_seq: aoState.official_seq,
         local_disk_seq: diskCursor.last_committed_seq,
         reason: `Local cursor seq (${diskCursor.last_committed_seq}) is ahead of AO OfficialSeq (${aoState.official_seq})`
+      };
+      if (options.throwOnDivergence === true) {
+        throw new Error(diverged.reason);
+      }
+      return diverged;
+    }
+  } else {
+    // Authoritative AO state could not be verified (unknown / error / unreachable)
+    const isProd = !isTestProfile() || options.strictReconcile === true || process.env.HYDB_STRICT_AO === 'true';
+    if (isProd) {
+      lastCommittedSeq = diskCursor.last_committed_seq;
+      const diverged = {
+        ...diskCursor,
+        reconciliation_status: 'diverged_ao_unreachable',
+        mismatch_detected: true,
+        error_code: 'ERR_AO_STATE_UNREACHABLE',
+        ao_status: aoState?.status || 'unknown',
+        local_disk_seq: diskCursor.last_committed_seq,
+        reason: `Production fail-closed: Authoritative AO state cannot be verified on startup (${aoState?.status || 'unknown'}: ${aoState?.reason || 'unreachable'}). Process ID: ${options.processId || process.env.AO_PROCESS_ID || 'unset'}`
       };
       if (options.throwOnDivergence === true) {
         throw new Error(diverged.reason);
@@ -630,9 +691,25 @@ export async function startCommitterDaemon(options = {}) {
 
     const isRunOnce = options.runOnce !== undefined ? options.runOnce : RUN_ONCE;
     if (isRunOnce) {
-      const res = await processCommitterCycle(options);
-      console.log('[CommitterDaemon] Cycle complete:', res);
-      return res;
+      try {
+        const res = await processCommitterCycle(options);
+        console.log('[CommitterDaemon] Cycle complete:', res);
+        return res;
+      } catch (err) {
+        if (isFatalFailClosedError(err)) {
+          console.error('[Fatal CommitterDaemon Error] Fatal fail-closed error during run-once cycle:', err.message);
+          writeHeartbeatStatus({
+            status: 'halted',
+            health: 'failed_closed',
+            error_code: err.code || 'ERR_FATAL_CYCLE_ERROR',
+            reason: err.message,
+            last_committed_seq: lastCommittedSeq
+          }, cursorPath);
+          err.exitCode = FATAL_FAIL_CLOSED_EXIT_CODE;
+          throw err;
+        }
+        throw err;
+      }
     }
 
     const interval = options.intervalMs || INTERVAL_MS;
@@ -640,7 +717,19 @@ export async function startCommitterDaemon(options = {}) {
       try {
         await processCommitterCycle(options);
       } catch (err) {
-        console.error('[CommitterDaemon] Cycle error:', err.message);
+        if (isFatalFailClosedError(err)) {
+          console.error('[Fatal CommitterDaemon Error] Fatal fail-closed error during cycle:', err.message);
+          writeHeartbeatStatus({
+            status: 'halted',
+            health: 'failed_closed',
+            error_code: err.code || 'ERR_FATAL_CYCLE_ERROR',
+            reason: err.message,
+            last_committed_seq: lastCommittedSeq
+          }, cursorPath);
+          err.exitCode = FATAL_FAIL_CLOSED_EXIT_CODE;
+          throw err;
+        }
+        console.error('[CommitterDaemon] Cycle error (transient, will retry):', err.message);
         writeHeartbeatStatus({
           status: 'cycle_error',
           health: 'healthy',
@@ -675,11 +764,7 @@ if (basename(process.argv[1] || '') === 'committer_daemon.mjs') {
     console.error('[Fatal CommitterDaemon Error]', err.message);
     const exitCode =
       err.exitCode ||
-      (err.message.includes('fail-closed') ||
-       err.code === 'ERR_CURSOR_AO_STATE_MISMATCH' ||
-       err.code === 'ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ' ||
-       err.code === 'ERR_COMMITTER_LOCK_HELD' ||
-       err.code === 'ERR_AO_PROCESS_ID_REQUIRED'
+      (isFatalFailClosedError(err)
         ? FATAL_FAIL_CLOSED_EXIT_CODE
         : 1);
     releaseCursorLock(activeCursorPath);

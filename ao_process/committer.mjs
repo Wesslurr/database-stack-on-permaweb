@@ -43,12 +43,27 @@ const arweave = Arweave.init({
 
 /**
  * Returns an aoconnect client instance bound to target MU, CU, and Gateway units.
+ * Supports explicit AO_NETWORK configuration ('mainnet' | 'testnet' | 'local').
  */
 export function getAoInstance(options = {}) {
   const isAoNetwork = detectAoEnvironment(options.gatewayUrl || gatewayUrl, options) === 'ao_network';
-  const defaultMu = isAoNetwork ? 'https://mu.ao-testnet.xyz' : undefined;
-  const defaultCu = isAoNetwork ? 'https://cu.ao-testnet.xyz' : undefined;
-  const defaultGw = isAoNetwork ? (process.env.ARWEAVE_GATEWAY || 'https://arweave.net') : (options.gatewayUrl || gatewayUrl);
+  const targetNetwork = (options.network || process.env.AO_NETWORK || 'testnet').toLowerCase();
+
+  let defaultMu = undefined;
+  let defaultCu = undefined;
+  let defaultGw = options.gatewayUrl || gatewayUrl;
+
+  if (isAoNetwork) {
+    if (targetNetwork === 'mainnet') {
+      defaultMu = process.env.AO_MU_URL || 'https://mu.ao-mainnet.xyz';
+      defaultCu = process.env.AO_CU_URL || 'https://cu.ao-mainnet.xyz';
+      defaultGw = process.env.ARWEAVE_GATEWAY || 'https://arweave.net';
+    } else {
+      defaultMu = process.env.AO_MU_URL || 'https://mu.ao-testnet.xyz';
+      defaultCu = process.env.AO_CU_URL || 'https://cu.ao-testnet.xyz';
+      defaultGw = process.env.ARWEAVE_GATEWAY || 'https://arweave.net';
+    }
+  }
 
   const muUrl = options.muUrl || process.env.AO_MU_URL || defaultMu;
   const cuUrl = options.cuUrl || process.env.AO_CU_URL || defaultCu;
@@ -587,10 +602,12 @@ export async function getOrCreateProcessId(options = {}) {
   // CRITICAL PRODUCTION GATE:
   // Auto-creation of AO Arbitrator Process is prohibited in production to prevent rogue or unanchored processes.
   if (!isTestProfile() && options.allowAutoCreate !== true) {
-    throw new Error(
+    const err = new Error(
       'Fatal: AO_PROCESS_ID environment variable or process_id.txt is required in production. ' +
       'Auto-creation of AO processes is strictly prohibited in production mode (ERR_AO_PROCESS_ID_REQUIRED).'
     );
+    err.code = 'ERR_AO_PROCESS_ID_REQUIRED';
+    throw err;
   }
 
   const { jwk, address } = await getWallet(options.walletPath || WALLET_PATH);
@@ -625,6 +642,7 @@ export async function getOrCreateProcessId(options = {}) {
 
 /**
  * Query Official Checkpoint State from the AO Arbitrator Process.
+ * Reconciles local sequence against the authoritative AO Arbitrator via dryrun / CU read.
  */
 export async function queryOfficialAoState(options = {}) {
   if (typeof options.queryOfficialStateFn === 'function') {
@@ -642,6 +660,7 @@ export async function queryOfficialAoState(options = {}) {
     if (last) {
       return {
         ok: true,
+        status: 'ok',
         official_seq: Number(extractMsgField(last, 'OfficialSeq') ?? 0),
         current_epoch: Number(extractMsgField(last, 'CurrentEpoch') ?? 1),
         official_state_root: String(extractMsgField(last, 'OfficialStateRoot') ?? '0'),
@@ -650,7 +669,50 @@ export async function queryOfficialAoState(options = {}) {
       };
     }
   }
-  return { ok: false, status: 'unknown', official_seq: null };
+
+  // Live AO Query via dryrun / CU read
+  const processId =
+    options.processId ||
+    process.env.AO_PROCESS_ID ||
+    (await getOrCreateProcessId(options).catch(() => null));
+
+  if (processId) {
+    try {
+      const aoClient = getAoInstance(options);
+      const res = await aoClient.dryrun({
+        process: processId,
+        tags: [
+          { name: 'Action', value: 'GetOfficialState' },
+          { name: 'Data-Protocol', value: 'ao' },
+          { name: 'Variant', value: 'ao.TN.1' }
+        ],
+        data: '{}'
+      });
+      const msgs = res?.Messages || [];
+      const last = msgs[msgs.length - 1];
+      if (last) {
+        return {
+          ok: true,
+          status: 'ok',
+          official_seq: Number(extractMsgField(last, 'OfficialSeq') ?? 0),
+          current_epoch: Number(extractMsgField(last, 'CurrentEpoch') ?? 1),
+          official_state_root: String(extractMsgField(last, 'OfficialStateRoot') ?? '0'),
+          official_hash: String(extractMsgField(last, 'OfficialHash') ?? ''),
+          official_commitment_256: String(extractMsgField(last, 'OfficialCommitment256') ?? '')
+        };
+      }
+      return { ok: false, status: 'empty_response', reason: 'AO dryrun returned no messages', processId };
+    } catch (err) {
+      return { ok: false, status: 'error', reason: `AO dryrun failed: ${err.message}`, error: err, processId };
+    }
+  }
+
+  return {
+    ok: false,
+    status: 'unknown',
+    reason: 'Official AO query hook not configured and AO_PROCESS_ID not available.',
+    official_seq: null
+  };
 }
 
 /**

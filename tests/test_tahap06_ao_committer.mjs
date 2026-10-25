@@ -46,8 +46,10 @@ import {
   writeHeartbeatStatus,
   readHeartbeatStatus,
   resolveDefaultCursorPath,
+  isFatalFailClosedError,
   FATAL_FAIL_CLOSED_EXIT_CODE
 } from '../ao_process/committer_daemon.mjs';
+import { deployAoProcess } from '../ao_process/deploy_ao_process.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '..');
@@ -905,6 +907,82 @@ async function runPhase06Tests() {
       capturedCommitOptions.requireMultiGateway === true &&
       capturedCommitOptions.minConfirmations === 3,
     'processCommitterCycle propagates L1 finality & multi-gateway consensus options to commitCheckpointBatch'
+  );
+
+  // [7] Production Hardening: Fatal Fail-Closed Errors, Startup AO Unreachable Gate, & Access Control
+  console.log('\n[7] Production Hardening: Fatal Error Discrimination & Access Control:');
+
+  // 7A. Error Classification: Fatal Fail-Closed vs Transient Network Retries
+  const fatalErr1 = new Error('Fatal: AO_PROCESS_ID required in production');
+  fatalErr1.code = 'ERR_AO_PROCESS_ID_REQUIRED';
+  assert(isFatalFailClosedError(fatalErr1) === true, 'ERR_AO_PROCESS_ID_REQUIRED is classified as fatal fail-closed');
+
+  const fatalErr2 = new Error('State unreachable');
+  fatalErr2.code = 'ERR_AO_STATE_UNREACHABLE';
+  assert(isFatalFailClosedError(fatalErr2) === true, 'ERR_AO_STATE_UNREACHABLE is classified as fatal fail-closed');
+
+  const fatalErr3 = new Error('Local cursor state diverges');
+  fatalErr3.code = 'ERR_CURSOR_AO_STATE_MISMATCH';
+  assert(isFatalFailClosedError(fatalErr3) === true, 'ERR_CURSOR_AO_STATE_MISMATCH is classified as fatal fail-closed');
+
+  const fatalErr4 = new Error('Lock conflict');
+  fatalErr4.code = 'ERR_COMMITTER_LOCK_HELD';
+  assert(isFatalFailClosedError(fatalErr4) === true, 'ERR_COMMITTER_LOCK_HELD is classified as fatal fail-closed');
+
+  const transientErr = new Error('Fetch failed: connect ECONNREFUSED 127.0.0.1:8735');
+  transientErr.code = 'ECONNREFUSED';
+  assert(isFatalFailClosedError(transientErr) === false, 'Network timeout/refusal (ECONNREFUSED) is classified as transient retry');
+
+  // 7B. Strict Production Startup Gate: Unreachable AO State Triggers Fail-Closed
+  const strictReconcileRes = await reconcileCursorWithAO({
+    cursorPath: cursorFile,
+    strictReconcile: true,
+    queryOfficialStateFn: async () => ({ ok: false, status: 'error', reason: 'AO Compute Unit timeout' })
+  });
+  assert(
+    strictReconcileRes.mismatch_detected === true &&
+      strictReconcileRes.reconciliation_status === 'diverged_ao_unreachable' &&
+      strictReconcileRes.error_code === 'ERR_AO_STATE_UNREACHABLE',
+    'Startup reconciliation in strict/production mode halts fail-closed if authoritative AO state is unreachable'
+  );
+
+  // 7C. Contract Access Restriction in arbitrator.lua
+  const luaSource = readFileSync(join(ROOT_DIR, 'ao_process/arbitrator.lua'), 'utf-8');
+  const suWorkerAddr = 'yWLs9VNxqM1R3tUQpVNtu0_1J-Z3zWt371kIUrsTMOg';
+  const operatorAddr = 'Davi6NRutvUMmKFQw0zOy_-n1Hjdm2KswfiHVjwx8wI';
+
+  // Extract AuthorizedAdmins table
+  const adminsMatch = luaSource.match(/AuthorizedAdmins\s*=\s*AuthorizedAdmins\s*or\s*\{([^}]+)\}/);
+  assert(adminsMatch !== null, 'AuthorizedAdmins table exists in arbitrator.lua');
+  const adminsTableContent = adminsMatch ? adminsMatch[1] : '';
+
+  assert(!adminsTableContent.includes(suWorkerAddr), 'AuthorizedAdmins does NOT grant admin permissions to SU worker node');
+  assert(adminsTableContent.includes(operatorAddr), 'AuthorizedAdmins includes designated Operator wallet');
+
+  // Extract AuthorizedNodes table
+  const nodesMatch = luaSource.match(/AuthorizedNodes\s*=\s*AuthorizedNodes\s*or\s*\{([^}]+)\}/);
+  assert(nodesMatch !== null, 'AuthorizedNodes table exists in arbitrator.lua');
+  const nodesTableContent = nodesMatch ? nodesMatch[1] : '';
+  assert(nodesTableContent.includes(suWorkerAddr), 'AuthorizedNodes includes authorized SU worker node');
+
+  // 7D. AO Network Mainnet Guard in deployAoProcess
+  let mainnetGuardBlocked = false;
+  try {
+    await deployAoProcess({
+      network: 'mainnet',
+      dryRun: true,
+      moduleId: '',
+      scheduler: '',
+      walletPath: join(ROOT_DIR, 'secrets/wallet.json')
+    });
+  } catch (err) {
+    if (err.message.includes('Testnet module/scheduler IDs cannot be used on mainnet')) {
+      mainnetGuardBlocked = true;
+    }
+  }
+  assert(
+    mainnetGuardBlocked === true,
+    'deployAoProcess refuses to default to testnet module/scheduler when target network is mainnet'
   );
 
   console.log('\n========================================================================');

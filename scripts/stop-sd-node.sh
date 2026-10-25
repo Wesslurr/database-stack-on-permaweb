@@ -4,7 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DB_DIR="${DB_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 HB_SD_REL="$DB_DIR/vendor/HyperBEAM_sd/_build/genesis_wasm+rocksdb/rel/hb_sd"
 
-NODE_SD_RUN_DIR="${NODE_SD_RUN_DIR:-$DB_DIR/data/node_sd}"
+NODE_SD_RUN_DIR="${NODE_SD_RUN_DIR:-$DB_DIR/data/${HYDB_NODE_ID:-node_sd}}"
 if [ -f "$NODE_SD_RUN_DIR/committer.pid" ]; then
   CPID="$(cat "$NODE_SD_RUN_DIR/committer.pid" 2>/dev/null || true)"
   if [ -n "$CPID" ] && kill -0 "$CPID" 2>/dev/null; then

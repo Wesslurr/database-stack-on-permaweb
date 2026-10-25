@@ -3,8 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DB_DIR="${DB_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-NODE_SD_RUN_DIR="${NODE_SD_RUN_DIR:-$DB_DIR/data/node_sd}"
+NODE_SD_RUN_DIR="${NODE_SD_RUN_DIR:-$DB_DIR/data/${HYDB_NODE_ID:-node_sd}}"
 SU_PORT="${SU_PORT:-8735}"
+
+# Clean up any stale halted markers from previous runs
+mkdir -p "$NODE_SD_RUN_DIR"
+rm -f "$NODE_SD_RUN_DIR/CONTAINER_HALTED" "$NODE_SD_RUN_DIR/halted.json"
 
 echo "[sd-foreground] Starting HyperBEAM SD Node and Native Services..."
 
@@ -57,8 +61,16 @@ while true; do
       "$SCRIPT_DIR/stop-sd-node.sh" || true
 
       if [ "$IS_FAIL_CLOSED" = "true" ]; then
-        echo "[sd-foreground] Committer exited in fatal fail-closed state (code 78). Halting container without crash loop." >&2
-        exit 78
+        echo "[sd-foreground] FATAL: Committer exited in fatal fail-closed state (code 78)." >&2
+        echo "[sd-foreground] Halting container execution to prevent crash loop. Container status is now halted/unhealthy." >&2
+        echo "fail_closed_fatal" > "$NODE_SD_RUN_DIR/CONTAINER_HALTED"
+        echo "{\"status\":\"halted\",\"reason\":\"fatal_fail_closed_exit_78\",\"timestamp\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}" > "$NODE_SD_RUN_DIR/halted.json"
+
+        # Hold container alive in halted/unhealthy state to prevent Docker on-failure restart loop
+        while true; do
+          sleep 3600 &
+          wait $!
+        done
       else
         echo "[sd-foreground] Committer exited unexpectedly. Exiting container with error code 1." >&2
         exit 1

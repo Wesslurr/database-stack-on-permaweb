@@ -1,0 +1,31 @@
+# Development Docker Compose Override Example
+# To enable live host source mounts during development, copy this file:
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# NOTE: Do NOT use bind mounts in production distributions, as they cover the container's
+# pre-installed node_modules dependencies baked into the image.
+
+version: '3.8'
+
+services:
+  sd-node-1:
+    volumes:
+      - .:/app:cached
+      - /app/node_modules
+      - /app/ao_process/node_modules
+      - sd_node_1_data:/app/data/node_sd_1
+      - committer_data:/app/data/committer
+
+  sd-node-2:
+    volumes:
+      - .:/app:cached
+      - /app/node_modules
+      - /app/ao_process/node_modules
+      - sd_node_2_data:/app/data/node_sd_2
+
+  sd-node-3:
+    volumes:
+      - .:/app:cached
+      - /app/node_modules
+      - /app/ao_process/node_modules
+      - sd_node_3_data:/app/data/node_sd_3

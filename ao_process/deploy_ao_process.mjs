@@ -22,18 +22,35 @@ const DEFAULT_WALLET = join(ROOT_DIR, 'secrets/wallet.json');
 const LUA_PATH = join(ROOT_DIR, 'ao_process/arbitrator.lua');
 const PROCESS_ID_FILE = join(ROOT_DIR, 'ao_process/process_id.txt');
 
-// Standard AO Testnet Module & Scheduler (AOS Lua WASM Engine)
-const DEFAULT_AOS_MODULE = process.env.AO_MODULE || 'Pq2gahioPTspHGvLjQip-B_r4q5LldMZWUC-20CDohM';
-const DEFAULT_SCHEDULER = process.env.AO_SCHEDULER || '_GQ33BkPtZrqxA84vM82zscllkQufHyqDistribution_';
+// Target AO Network configuration
+const targetNetwork = (process.env.AO_NETWORK || 'testnet').toLowerCase();
 
-const MU_URL = process.env.AO_MU_URL || 'https://mu.ao-testnet.xyz';
-const CU_URL = process.env.AO_CU_URL || 'https://cu.ao-testnet.xyz';
+// Standard AO Testnet Module & Scheduler (AOS Lua WASM Engine)
+const DEFAULT_TESTNET_AOS_MODULE = 'Pq2gahioPTspHGvLjQip-B_r4q5LldMZWUC-20CDohM';
+const DEFAULT_TESTNET_SCHEDULER = '_GQ33BkPtZrqxA84vM82zscllkQufHyqDistribution_';
+
+const DEFAULT_AOS_MODULE = process.env.AO_MODULE || (targetNetwork === 'mainnet' ? '' : DEFAULT_TESTNET_AOS_MODULE);
+const DEFAULT_SCHEDULER = process.env.AO_SCHEDULER || (targetNetwork === 'mainnet' ? '' : DEFAULT_TESTNET_SCHEDULER);
+
+const MU_URL = process.env.AO_MU_URL || (targetNetwork === 'mainnet' ? 'https://mu.ao-mainnet.xyz' : 'https://mu.ao-testnet.xyz');
+const CU_URL = process.env.AO_CU_URL || (targetNetwork === 'mainnet' ? 'https://cu.ao-mainnet.xyz' : 'https://cu.ao-testnet.xyz');
 const GATEWAY_URL = process.env.ARWEAVE_GATEWAY || 'https://arweave.net';
 
 export async function deployAoProcess(options = {}) {
   const isDryRun = options.dryRun || process.argv.includes('--dry-run');
   const isForce = options.force || process.argv.includes('--force');
   const walletPath = options.walletPath || process.env.WALLET_PATH || DEFAULT_WALLET;
+  const network = (options.network || process.env.AO_NETWORK || targetNetwork).toLowerCase();
+
+  const moduleId = options.moduleId || process.env.AO_MODULE || (network === 'mainnet' ? '' : DEFAULT_TESTNET_AOS_MODULE);
+  const schedulerId = options.scheduler || process.env.AO_SCHEDULER || (network === 'mainnet' ? '' : DEFAULT_TESTNET_SCHEDULER);
+
+  if (network === 'mainnet' && (!moduleId || !schedulerId)) {
+    throw new Error(
+      'Target network is AO mainnet (AO_NETWORK=mainnet), but AO_MODULE or AO_SCHEDULER is not set. ' +
+      'Testnet module/scheduler IDs cannot be used on mainnet. Please provide explicit AO_MODULE and AO_SCHEDULER.'
+    );
+  }
 
   if (!existsSync(walletPath)) {
     throw new Error(`Wallet file not found at: ${walletPath}. Run 'npm run wallet' first.`);
@@ -46,9 +63,10 @@ export async function deployAoProcess(options = {}) {
   console.log('================================================================');
   console.log('  HyDB Official AO Arbitrator Process Deployment');
   console.log('================================================================');
+  console.log(`Target Network:   ${network.toUpperCase()}`);
   console.log(`Operator Address: ${address}`);
-  console.log(`Module ID:        ${options.moduleId || DEFAULT_AOS_MODULE}`);
-  console.log(`Scheduler:        ${options.scheduler || DEFAULT_SCHEDULER}`);
+  console.log(`Module ID:        ${moduleId}`);
+  console.log(`Scheduler:        ${schedulerId}`);
   console.log(`MU URL:           ${MU_URL}`);
   console.log(`CU URL:           ${CU_URL}`);
   console.log(`Gateway:          ${GATEWAY_URL}`);
