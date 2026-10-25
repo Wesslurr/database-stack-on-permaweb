@@ -1,20 +1,66 @@
-# @hydb/ao-arbitrator — AO Verification Authority & Committer Daemon
+# @hydb/ao-processes — AO Stack Control Plane & Arbitrator Data Plane
 
-This package contains the on-chain consensus, fraud verification, and autonomous committer logic for HyDB on the AO Computer and Arweave.
+This package contains the on-chain consensus, cluster topology constitution, fraud verification, and autonomous committer logic for HyDB running on the AO Computer and Arweave.
 
-## Contents
+## Architecture: Dual Independent AO Process Model
 
-- `arbitrator.lua`: The production Lua smart contract that executes inside the AO process. Handles `CommitCheckpoint`, `SetPolicy`, `PromoteEpoch`, and fraud proofs.
-- `committer_daemon.mjs`: Standalone background service that continuously monitors Storage Unit sequences and commits signed checkpoint batches to AO.
-- `committer.mjs`: Core Arweave & AO transaction builder supporting both `@permaweb/aoconnect` (for live public AO network) and local ArLocal.
-- `real_ao_evaluator.mjs`: High-precision offline AO execution sandbox utilizing `@permaweb/ao-loader`.
+HyDB partitions on-chain responsibilities between two independent AO processes bound cryptographically via canonical hashes:
+
+```
++----------------------------------------------------------------------------------+
+|                           HYDB AO CLUSTER ARCHITECTURE                           |
++----------------------------------------------------------------------------------+
+|                                                                                  |
+|   1. AO Control Plane: Genesis Process (ao_process/genesis.lua)                  |
+|      - Root of Trust & Topology Constitution (StackId, GenesisHash, ConfigEpoch) |
+|      - Cluster Node & Component Registry (AuthorizedNodes, NodesRegistry)        |
+|      - Internal AO Process Pointer (ArbitratorProcessId)                         |
+|      - Observability & Cluster Health (GetStackStatus, ReportHeartbeat)          |
+|      - Lazy / Lightweight: zero fast-path bottleneck                             |
+|                                                                                  |
+|   2. AO Data Plane: Arbitrator Process (ao_process/arbitrator.lua)               |
+|      - Pure Data Plane Consensus & Cryptographic Settlement                      |
+|      - 64-bit Merkle-XOR Accumulator & 256-bit SHA-256 State Commitments         |
+|      - Fraud & Equivocation Proof Verifier                                       |
+|      - Fencing & Constitutional Guardrails                                       |
+|      - Bound to Stack via Genesis-Process-Id & Genesis-Hash tags                 |
+|                                                                                  |
++----------------------------------------------------------------------------------+
+```
+
+## Directory Contents
+
+- **`genesis.lua`**: The AO Genesis Process smart contract. Manages stack topology, authorized nodes, heartbeats, and binds internal stack processes (`ArbitratorProcessId`).
+- **`arbitrator.lua`**: The production AO Arbitrator smart contract. Handles batch checkpoint commits (`CommitCheckpoint`), policy configurations (`SetPolicy`), epoch promotions (`PromoteEpoch`), and fraud proofs.
+- **`committer.mjs`**: Core Arweave & AO transaction builder supporting `@permaweb/aoconnect` (public AO network), local ArLocal, and dynamic stack discovery via `AO_GENESIS_ID`.
+- **`committer_daemon.mjs`**: Autonomous background service that polls Storage Unit sequences and dispatches cryptographically signed checkpoint batches to the Arbitrator.
+- **`real_ao_evaluator.mjs`**: Deterministic offline AO execution sandbox utilizing `@permaweb/ao-loader` and `process.wasm`.
+- **`deploy_ao_process.mjs`**: CLI utility for deploying individual processes to the AO network.
+
+## Spawning a Genesis Stack
+
+You can spawn and bind a complete dual-process stack using the spawner script:
+
+```bash
+# Dry-run compilation and verification
+npm run stack:spawn -- --dry-run
+
+# Live deployment to AO network
+npm run stack:spawn -- --network testnet --stack-id hydb-alpha --wallet secrets/wallet.json
+```
 
 ## Running the Committer Daemon
 
+The committer daemon automatically discovers the Arbitrator process from `AO_PROCESS_ID` or through the Genesis process via `AO_GENESIS_ID`:
+
 ```bash
-# Continuous background daemon
+# Continuous background daemon (polls SU endpoint and commits checkpoints)
 node committer_daemon.mjs --interval 3000 --su-url http://127.0.0.1:8735/~scheduler@1.0
 
-# Or execute a single commit cycle
+# Single execution commit cycle
 node committer_daemon.mjs --once
 ```
+
+## Dynamic Resolution Invariant
+
+When `AO_GENESIS_ID` or `process_genesis_id.txt` is provided, `getOrCreateProcessId()` queries `genesis.lua` (`GetGenesisConfig`) to dynamically resolve `ArbitratorProcessId`. This decouples cluster components while ensuring tamper-evident alignment with the stack constitution.

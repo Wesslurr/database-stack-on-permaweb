@@ -1,6 +1,6 @@
 # HyDB Protocol, Components & Failure Model Specification
 
-> **Normative Specification:** System Guarantees, Quorum & Durability Boundaries, Crash Recovery Semantics, Idempotency Contracts, AO Settlement Lifecycle, and Verification Traceability.
+> **Normative Specification:** System Guarantees, Quorum & Durability Boundaries, Crash Recovery Semantics, Idempotency Contracts, AO Settlement Lifecycle, Dual-Process Genesis Architecture, and Verification Traceability.
 > **Audit Baseline Commit:** `83c76f9` (Branch: `beta`)
 > **Protocol Version:** `hydb.core@1.0` / Canonical TLV Wire Format `hydb.spec/1` (`0x48 0x59`, version `0x01`)
 
@@ -8,7 +8,7 @@
 
 ## 1. Baseline & Component Inventory
 
-This specification is anchored from baseline commit **`83c76f9`** on branch `beta` and tracks the hardened release gates across Phases `00` through `07`. Every guarantee in this document is classified using three strict verification levels:
+This specification is anchored from baseline commit **`83c76f9`** on branch `beta` and tracks the hardened release gates across Phases `00` through `10`. Every guarantee in this document is classified using three strict verification levels:
 
 - **`Implemented`**: Enforced in production code paths (Erlang BEAM, Rust WASM, Lua AO, or ESM SDK).
 - **`Tested`**: Verified by automated deterministic unit, integration, or multi-process fault-injection tests executed in CI (`.github/workflows/ci.yml`).
@@ -21,8 +21,9 @@ This specification is anchored from baseline commit **`83c76f9`** on branch `bet
 | **Hot Node Sequencer** | `hymessage/` | Gleam + Erlang BEAM (`~hymessage@1.0`) | Primary sequencer, HTTP API (`:8734`), Pre-Sequence Gate, Idempotency Ledger, Fixed-Quorum Coordinator, Framed TCP Replication Server (`:8736`). |
 | **SD Worker Pool** | `sd/` | Gleam + Erlang BEAM (`~sd@1.0`, `~scheduler@1.0`) | Shared Data Pool replica, HTTP API (`:8735`), Framed TCP Replication Client (`:8736`), Disk WAL Engine (`sd/wal.log`) with `file:datasync`, fail-closed recovery validator, ETS state mirror. |
 | **HyDB Silicon Engine** | `hydb/` | Rust `no_std` (WASM32 `hydb.wasm`) | $O(1)$ dense slot table (1024 slots), tombstone-preserving linear probing, in-WASM boundary validation (`min_value`, `max_value`, `max_records`), rolling 64-bit Merkle-XOR `StateRoot`. |
+| **AO Genesis Process** | `ao_process/` | Lua (`genesis.lua`) + ESM (`spawn-genesis-stack.mjs`) | Control plane constitution, canonical `GenesisHash`, cluster node registry (`AuthorizedNodes`, `NodesRegistry`), cluster health status machine (`GetStackStatus`), and stack process binding (`ArbitratorProcessId`). |
 | **AO Arbitrator & Committer** | `ao_process/` | Lua (`arbitrator.lua`) + ESM (`committer.mjs`, `committer_daemon.mjs`) | Independent hash-chain & state-commitment verifier, equivocation detector, Constitutional Guardrail C, durable checkpoint cursor (`committer_cursor.json`), evidence-based settlement status classifier. |
-| **Universal Client SDK** | `sdk/` | JavaScript / ESM (`hydb_sdk.mjs`) | Declarative contract builder (`defineContract`), WASM sandbox preflight (`preflightDryRun`), Arweave manifest publisher, namespace client. |
+| **Universal Client SDK** | `sdk/` | JavaScript / ESM (`hydb_sdk.mjs`) | Dual-process stack spawner (`spawnStack`), declarative contract builder (`defineContract`), WASM sandbox preflight (`preflightDryRun`), Arweave manifest publisher, namespace client. |
 | **Normative Specification** | `spec/` | JavaScript / ESM (`hydb_contract_spec.mjs`, `golden_vectors.json`) | Normative Canonical TLV event encoding, FNV-1a / SHA-256 hash chain definitions, 64-bit Merkle-XOR & 256-bit state commitment algorithms, and cross-language golden vectors. |
 
 ---
@@ -120,7 +121,7 @@ A batch submission to AO is **never** marked `confirmed: true` merely because `m
 * **Heartbeat & Health Status Reporting**:
   - The daemon maintains a heartbeat health file (`committer_status.json`) in the cursor directory, exposing runtime status (`idle`, `running`, `halted`, `failed_closed`, `retry_pending`, `stopped`), PID, sequence progress, and ISO 8601 timestamps.
 * **Production Gate on AO Process Creation & Mainnet Protection**:
-  - Silent auto-creation of AO processes is strictly prohibited in production mode (`HYDB_PROFILE=production` or `HYDB_ENV=prod`), requiring an explicit `AO_PROCESS_ID` (`ERR_AO_PROCESS_ID_REQUIRED`).
+  - Silent auto-creation of AO processes is strictly prohibited in production mode (`HYDB_PROFILE=production` or `HYDB_ENV=prod`), requiring an explicit `AO_PROCESS_ID` or `AO_GENESIS_ID` (`ERR_AO_PROCESS_ID_REQUIRED`).
   - Deployments targeting `AO_NETWORK=mainnet` prohibit defaulting to testnet module/scheduler IDs without explicit configuration.
 * **Strict Startup AO Reconciliation & Fail-Closed Halting**:
   - In production mode, startup reconciliation executes an authoritative AO dryrun query (`Action: GetOfficialState`). If the AO process is unreachable or returns an error, the daemon halts fail-closed (`ERR_AO_STATE_UNREACHABLE`, exit code 78).
@@ -134,7 +135,14 @@ A batch submission to AO is **never** marked `confirmed: true` merely because `m
   - *Fail-Closed Multi-Gateway Enforcement*: When `requireMultiGateway: true` (or `REQUIRE_MULTI_GATEWAY=true`) is configured, single-gateway verification is rejected fail-closed with `MULTI_GATEWAY_CONSENSUS_REQUIRED`.
 * **Status**: **Implemented & Tested** (`tests/test_tahap06_ao_committer.mjs`).
 
-### 3.8 Scope Boundaries & Explicit Non-Claims
+### 3.8 Dual-Process Genesis Architecture & Dynamic Discovery (`Phase 09 & 10`)
+* **Independent Process Partitioning**: Genesis (`ao_process/genesis.lua`) acts as the cluster root-of-trust, maintaining canonical `GenesisHash`, authorized node addresses (`AuthorizedNodes`), and internal cluster process bindings (`ArbitratorProcessId`). Data plane verification remains completely decoupled in `ao_process/arbitrator.lua`.
+* **Anti-Impersonation Node Registration**: Node registration (`RegisterNode`) and periodic metrics reporting (`ReportHeartbeat`) enforce that `msg.From` must exist in `AuthorizedNodes` or `AuthorizedAdmins`. Non-admin senders attempting to register or claim a different node ID are rejected fail-closed with `REJECTED_NODE_IMPERSONATION`.
+* **Strict Monotonic Epoch Protection**: Administrative configuration updates (`UpdateStackConfig`) reject backwards epoch modifications (`REJECTED_EPOCH_REGRESSION`), preserving the integrity of cluster epoch fencing across restarts.
+* **Dynamic Arbitrator Resolution**: When committer processes or nodes boot with `AO_GENESIS_ID`, they query `GetGenesisConfig` to discover `ArbitratorProcessId` dynamically, eliminating hardcoded process coupling while cryptographically verifying `genesis_hash`.
+* **Status**: **Implemented & Tested** (`tests/test_tahap09_genesis_contract.mjs`, `tests/test_tahap10_sdk_spawner.mjs`).
+
+### 3.9 Scope Boundaries & Explicit Non-Claims
 To maintain engineering rigor, HyDB explicitly states the boundaries where guarantees depend on external infrastructure:
 1. **No Unqualified "Zero Data Loss"**:
    - mutations with `write_status: "accepted"` (`provisional: true`) reside only in Hot Node RAM until TCP catch-up replication finishes and **can be lost** if the Hot Node process is killed (`SIGKILL`) before replication.
@@ -158,3 +166,6 @@ To maintain engineering rigor, HyDB explicitly states the boundaries where guara
 | **05** | **Multi-Process Chaos & Fault Injection** | `Implemented` & `Tested` | `tests/chaos_node_daemon.escript`, `tests/fault_injection_chaos.mjs` | `npm run test:chaos` (`tests/fault_injection_chaos.mjs`) |
 | **06** | **Evidence-Based AO Committer & Cursor** | `Implemented` & `Tested` | `ao_process/committer.mjs`, `ao_process/committer_daemon.mjs`, `ao_process/arbitrator.lua` | `npm run test:committer` (`tests/test_tahap06_ao_committer.mjs`) |
 | **07** | **Documentation & Release Gate Audit** | `Implemented` & `Tested` | `docs/PROTOCOL_AND_FAILURE_MODEL.md`, `README.md`, `tests/test_tahap07_release_gate.mjs` | `npm run test:release-gate` (`tests/test_tahap07_release_gate.mjs`) |
+| **08** | **Developer SDK & Manifest Hashing** | `Implemented` & `Tested` | `sdk/hydb_sdk.mjs`, `tests/test_tahap8_sdk_manifest.mjs` | `npm run test:sdk` (`tests/test_tahap8_sdk_manifest.mjs`) |
+| **09** | **AO Genesis Block & Master Contract** | `Implemented` & `Tested` | `ao_process/genesis.lua`, `tests/test_tahap09_genesis_contract.mjs` | `npm run test:genesis` (`tests/test_tahap09_genesis_contract.mjs`) |
+| **10** | **SDK Spawner & Stack Genesis Integration** | `Implemented` & `Tested` | `sdk/hydb_sdk.mjs`, `scripts/spawn-genesis-stack.mjs`, `tests/test_tahap10_sdk_spawner.mjs` | `npm run test:spawner` (`tests/test_tahap10_sdk_spawner.mjs`) |

@@ -1,16 +1,21 @@
 # hymessage — Custom Communication Device (Gleam / BEAM)
 
-`hymessage` adalah custom communication device (`hymessage@1.0`) untuk stack database real-time optimistic AO + HyperBEAM.
+`hymessage` is the native custom communication device (`hymessage@1.0`) powering the optimistic real-time sequencer and consensus coordinator for the HyDB + HyperBEAM stack.
 
-## Peran & Tanggung Jawab
+## Roles & Responsibilities
 
-- **Pintu Masuk Protokol**: Menangani rute request AO-Core (`/ping`, `/join`, `/put`, `/get`, `/del`, `/snapshot`, `/restore`, `/state`, `/sync`, `/reset`).
-- **Atomic Sequencer**: Mengalokasikan sequence number monotonik (`seq`) secara aman dan instan di RAM via ETS.
-- **Cryptographic Hash Chain**: Menghitung rantai hash SHA-256 (`prev_hash + seq + action + data`) deterministik.
-- **Session Auth**: Manajemen token sesi 128-bit untuk verifikasi klien mikrodetik.
-- **Sliding Window Buffer**: Menyimpan 100 mutasi event terakhir di RAM untuk kebutuhan failover/sinkronisasi Pool SU.
-- **Bridge ke HyDB (WASM)**: Meneruskan data mutasi ke engine `hydb` (WASM) yang hidup di RAM node HyperBEAM yang sama.
+- **Protocol Ingress**: Implements core HTTP API routes (`/ping`, `/join`, `/put`, `/get`, `/del`, `/snapshot`, `/restore`, `/state`, `/sync`, `/reset`, `/promote_epoch`, `/request_status`).
+- **Atomic Sequencer**: Allocates strictly monotonic sequence numbers (`seq`) in RAM via concurrent ETS tables with sub-millisecond overhead.
+- **Cryptographic Hash Chain**: Computes deterministic SHA-256 event hash chains (`prev_hash + seq + action + data`).
+- **Session Authentication & Fencing**: Evaluates cluster secrets, 128-bit session tokens, and enforces epoch fencing (`hot_epoch.meta`) to prevent split-brain zombies.
+- **Sliding Window Buffer**: Retains recent mutation events in memory for fast-path Storage Unit pool synchronization.
+- **Bridge to HyDB (WASM)**: Feeds sequenced mutations directly into the in-process `hydb.wasm` engine sharing the node's linear memory.
 
-## Packaging
+## Packaging & Deployment
 
-Dipaketkan sebagai Forge Device Archive (`device.zip`) yang berisi generated BEAM module `_hb_device_hymessage_1_0_h0.beam`, didaftarkan via `trusted-devices` operator tanpa fork HyperBEAM.
+Packaged as a Forge Device Archive (`device.zip`) containing the compiled BEAM module `_hb_device_hymessage_1_0_h0.beam`, registered via operator `trusted-devices` without requiring HyperBEAM engine forks:
+
+```bash
+cd hymessage
+bash deploy.sh
+```

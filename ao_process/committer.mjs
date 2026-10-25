@@ -588,7 +588,7 @@ export function isTestProfile() {
 }
 
 export async function getOrCreateProcessId(options = {}) {
-  const envProcId = process.env.AO_PROCESS_ID;
+  const envProcId = options.processId || process.env.AO_PROCESS_ID;
   if (envProcId && envProcId.trim()) {
     return envProcId.trim();
   }
@@ -597,6 +597,27 @@ export async function getOrCreateProcessId(options = {}) {
   if (existsSync(procIdFile)) {
     const id = readFileSync(procIdFile, 'utf-8').trim();
     if (id) return id;
+  }
+
+  // Dynamic stack resolution: If AO_GENESIS_ID or process_genesis_id.txt is set, resolve ArbitratorProcessId from Genesis
+  const genesisId = options.genesisProcessId || process.env.AO_GENESIS_ID;
+  const genesisFile = join(dirname(procIdFile), 'process_genesis_id.txt');
+  const targetGenesisId = (genesisId && genesisId.trim()) || (existsSync(genesisFile) ? readFileSync(genesisFile, 'utf-8').trim() : null);
+
+  if (targetGenesisId) {
+    try {
+      const cfg = typeof options.queryGenesisFn === 'function'
+        ? await options.queryGenesisFn(targetGenesisId, options)
+        : await queryOfficialAoState({ ...options, processId: targetGenesisId, action: 'GetGenesisConfig' });
+      const arbId = cfg?.arbitrator_process_id || cfg?.genesis?.arbitrator_process_id;
+      if (arbId && arbId.trim()) {
+        return arbId.trim();
+      }
+    } catch {}
+  }
+
+  if (process.env.AO_GENESIS_ID && process.env.AO_GENESIS_ID.trim()) {
+    return process.env.AO_GENESIS_ID.trim();
   }
 
   // CRITICAL PRODUCTION GATE:
@@ -674,6 +695,7 @@ export async function queryOfficialAoState(options = {}) {
   const processId =
     options.processId ||
     process.env.AO_PROCESS_ID ||
+    process.env.AO_GENESIS_ID ||
     (await getOrCreateProcessId(options).catch(() => null));
 
   if (processId) {
@@ -721,7 +743,7 @@ export async function queryOfficialAoState(options = {}) {
 export async function commitCheckpointBatch(batchData, options = {}) {
   const batchId = computeBatchId(batchData);
   const env = detectAoEnvironment(options.gatewayUrl || gatewayUrl, options);
-  const processId = options.processId || process.env.AO_PROCESS_ID || (await getOrCreateProcessId(options));
+  const processId = options.processId || process.env.AO_PROCESS_ID || process.env.AO_GENESIS_ID || (await getOrCreateProcessId(options));
 
   const tags = [
     { name: 'Data-Protocol', value: 'ao' },

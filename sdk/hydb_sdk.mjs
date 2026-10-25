@@ -645,6 +645,619 @@ export class HyDBContract {
   }
 }
 
+/**
+ * Compute deterministic SHA-256 hash of canonical Genesis Stack Manifest.
+ */
+export function computeGenesisHash(manifest = {}) {
+  const canonical = {
+    stackId: manifest.stackId || 'hydb_universal_mesh',
+    genesisVersion: manifest.genesisVersion || '1.0.0',
+    configEpoch: Number(manifest.configEpoch || 1),
+    quorumSize: Number(manifest.quorumSize || 3),
+    quorumMode: manifest.quorumMode || 'majority',
+    network: manifest.network || 'testnet',
+    nodes: (manifest.nodes || []).map((n) => (typeof n === 'string' ? { address: n } : n)).sort((a, b) => String(a.address || a.id).localeCompare(String(b.address || b.id))),
+    admins: (manifest.admins || []).slice().sort(),
+    schemas: (manifest.schemas || []).slice().sort((a, b) => String(a.namespace).localeCompare(String(b.namespace)))
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex').toUpperCase();
+}
+
+/**
+ * Build Genesis Contract Lua code embedding dynamic Genesis Constitution & Registry.
+ */
+export function buildGenesisContractLua(options = {}) {
+  const luaPath = options.genesisTemplatePath || resolve(__dirname, '../ao_process/genesis.lua');
+  let baseSource = options.genesisTemplateSource;
+  if (!baseSource && existsSync(luaPath)) {
+    baseSource = readFileSync(luaPath, 'utf8');
+  } else if (!baseSource) {
+    baseSource = '-- HyDB Genesis Contract Stub\nreturn {}';
+  }
+
+  const stackId = options.stackId || options.genesis?.stackId || 'hydb_universal_mesh';
+  const genesisVersion = options.genesisVersion || options.genesis?.genesisVersion || '1.0.0';
+  const configEpoch = Number(options.configEpoch || options.genesis?.configEpoch || 1);
+  const quorumSize = Number(options.quorumSize || options.genesis?.quorumSize || 3);
+  const quorumMode = options.quorumMode || options.genesis?.quorumMode || 'majority';
+  const network = options.network || options.genesis?.network || 'testnet';
+  const arbitratorProcessId = options.arbitratorProcessId || '';
+
+  const genesisHash = options.genesisHash || computeGenesisHash({
+    stackId,
+    genesisVersion,
+    configEpoch,
+    quorumSize,
+    quorumMode,
+    network,
+    nodes: options.nodes,
+    admins: options.admins,
+    schemas: options.schemas
+  });
+
+  const nodesTable = (options.nodes || [])
+    .map((n) => {
+      const addr = typeof n === 'string' ? n : n.address || n.id;
+      return `    ["${addr}"] = true`;
+    })
+    .join(',\n');
+
+  const adminsTable = (options.admins || [])
+    .map((a) => `    ["${a}"] = true`)
+    .join(',\n');
+
+  let dynamicHeader = `
+-- =========================================================================
+-- GENESIS BLOCK: DECLARATIVE STACK CONSTITUTION & TOPOLOGY ANCHOR
+-- Protocol: hydb.genesis@1.0 | Dedicated Stack Genesis Process
+-- =========================================================================
+StackId = "${stackId}"
+GenesisVersion = "${genesisVersion}"
+GenesisHash = "${genesisHash}"
+ConfigEpoch = ${configEpoch}
+QuorumSize = ${quorumSize}
+QuorumMode = "${quorumMode}"
+Network = "${network}"
+ArbitratorProcessId = "${arbitratorProcessId}"
+`;
+
+  if (nodesTable) {
+    dynamicHeader += `
+AuthorizedNodes = {
+${nodesTable}
+}
+`;
+  }
+
+  if (adminsTable) {
+    dynamicHeader += `
+AuthorizedAdmins = {
+    [Owner] = true,
+    ["ADMIN_PRIMARY"] = true,
+${adminsTable}
+}
+`;
+  }
+
+  return `${dynamicHeader}\n${baseSource}`;
+}
+
+/**
+ * Build self-contained "1 Lembar Kontrak" Lua code embedding dynamic Genesis Block.
+ */
+export function buildMasterContractLua(options = {}) {
+  const luaPath = options.templatePath || resolve(__dirname, '../ao_process/arbitrator.lua');
+  let baseSource = options.templateSource;
+  if (!baseSource && existsSync(luaPath)) {
+    baseSource = readFileSync(luaPath, 'utf8');
+  } else if (!baseSource) {
+    baseSource = '-- HyDB Master Contract Stub\nreturn {}';
+  }
+
+  const stackId = options.stackId || options.genesis?.stackId || 'hydb_universal_mesh';
+  const genesisVersion = options.genesisVersion || options.genesis?.genesisVersion || '1.0.0';
+  const configEpoch = Number(options.configEpoch || options.genesis?.configEpoch || 1);
+  const quorumSize = Number(options.quorumSize || options.genesis?.quorumSize || 3);
+  const quorumMode = options.quorumMode || options.genesis?.quorumMode || 'majority';
+  const network = options.network || options.genesis?.network || 'testnet';
+
+  const genesisHash = options.genesisHash || computeGenesisHash({
+    stackId,
+    genesisVersion,
+    configEpoch,
+    quorumSize,
+    quorumMode,
+    network,
+    nodes: options.nodes,
+    admins: options.admins,
+    schemas: options.schemas
+  });
+
+  const nodesTable = (options.nodes || [])
+    .map((n) => {
+      const addr = typeof n === 'string' ? n : n.address || n.id;
+      return `    ["${addr}"] = true`;
+    })
+    .join(',\n');
+
+  const adminsTable = (options.admins || [])
+    .map((a) => `    ["${a}"] = true`)
+    .join(',\n');
+
+  let dynamicHeader = `
+-- =========================================================================
+-- GENESIS BLOCK: DECLARATIVE STACK CONSTITUTION & TOPOLOGY ANCHOR
+-- Protocol: hydb.core@1.0 | Single Master Contract ("1 Lembar")
+-- =========================================================================
+Genesis = {
+    stack_id = "${stackId}",
+    genesis_version = "${genesisVersion}",
+    genesis_hash = "${genesisHash}",
+    config_epoch = ${configEpoch},
+    quorum_size = ${quorumSize},
+    quorum_mode = "${quorumMode}",
+    network = "${network}"
+}
+`;
+
+  if (nodesTable) {
+    dynamicHeader += `
+AuthorizedNodes = {
+${nodesTable}
+}
+`;
+  }
+
+  if (adminsTable) {
+    dynamicHeader += `
+AuthorizedAdmins = {
+    [Owner] = true,
+    ["ADMIN_PRIMARY"] = true,
+${adminsTable}
+}
+`;
+  }
+
+  // Inject or prepend dynamic header to base source
+  if (baseSource.includes('Genesis = Genesis or {')) {
+    return baseSource.replace(/Genesis = Genesis or \{[^}]+\}/s, dynamicHeader.trim());
+  }
+  return `${dynamicHeader}\n${baseSource}`;
+}
+
+export function buildArbitratorContractLua(options = {}) {
+  return buildMasterContractLua(options);
+}
+
+/**
+ * Spawns an official HyDB Stack on AO (Genesis Control Plane + Data Plane Arbitrator).
+ */
+export async function spawnStack(options = {}) {
+  const isDryRun = options.dryRun || process.env.HYDB_DRY_RUN === 'true';
+  const network = (options.network || process.env.AO_NETWORK || 'testnet').toLowerCase();
+
+  const genesisHash = computeGenesisHash(options);
+  const genesisLua = buildGenesisContractLua({
+    ...options,
+    genesisHash
+  });
+  const arbitratorLua = buildArbitratorContractLua({
+    ...options,
+    genesisHash
+  });
+
+  if (isDryRun || options.mockSpawn === true) {
+    const mockGenesisId = options.genesisProcessId || options.processId || `STACK_${genesisHash.slice(0, 16)}`;
+    const mockArbitratorId = options.arbitratorProcessId || `ARBITRATOR_${genesisHash.slice(0, 16)}`;
+    return {
+      ok: true,
+      deployed: false,
+      dryRun: true,
+      processId: mockGenesisId,
+      genesisProcessId: mockGenesisId,
+      arbitratorProcessId: mockArbitratorId,
+      genesisHash,
+      stackId: options.stackId || 'hydb_universal_mesh',
+      network,
+      contractLua: genesisLua,
+      genesisLua,
+      arbitratorLua
+    };
+  }
+
+  const defaultAosModule = network === 'mainnet'
+    ? (options.moduleId || process.env.AO_MODULE)
+    : (options.moduleId || process.env.AO_MODULE || 'Pq2gahioPTspHGvLjQip-B_r4q5LldMZWUC-20CDohM');
+  const defaultScheduler = network === 'mainnet'
+    ? (options.scheduler || process.env.AO_SCHEDULER)
+    : (options.scheduler || process.env.AO_SCHEDULER || '_GQ33BkPtZrqxA84vM82zscllkQufHyqDistribution_');
+
+  if (network === 'mainnet' && (!defaultAosModule || !defaultScheduler)) {
+    throw new Error('Mainnet AO stack spawn requires explicit moduleId and scheduler');
+  }
+
+  // Live AO Spawn via @permaweb/aoconnect
+  const { connect, createDataItemSigner } = await import('@permaweb/aoconnect');
+  const wallet = options.wallet || (options.walletPath && existsSync(options.walletPath)
+    ? JSON.parse(readFileSync(options.walletPath, 'utf8'))
+    : undefined);
+
+  if (!wallet && !options.signer) {
+    throw new Error('A valid wallet (JWK) or signer is required to spawn an AO Stack');
+  }
+
+  const signer = options.signer || createDataItemSigner(wallet);
+
+  const ao = options.ao || connect({
+    GATEWAY_URL: options.gatewayUrl || (network === 'mainnet' ? 'https://arweave.net' : process.env.ARWEAVE_GATEWAY || 'https://arweave.net'),
+    MU_URL: options.muUrl || (network === 'mainnet' ? 'https://mu.ao-mainnet.xyz' : 'https://mu.ao-testnet.xyz'),
+    CU_URL: options.cuUrl || (network === 'mainnet' ? 'https://cu.ao-mainnet.xyz' : 'https://cu.ao-testnet.xyz')
+  });
+
+  // 1. Spawn Genesis Process (Stack Constitution & Control Plane)
+  const genesisProcessId = await ao.spawn({
+    module: defaultAosModule,
+    scheduler: defaultScheduler,
+    signer,
+    tags: [
+      { name: 'App-Name', value: 'aos' },
+      { name: 'Variant', value: 'ao.TN.1' },
+      { name: 'Type', value: 'Process' },
+      { name: 'Name', value: options.stackId || 'HyDB-Master-Stack' },
+      { name: 'Genesis-Hash', value: genesisHash },
+      { name: 'Data-Protocol', value: 'hydb' },
+      { name: 'Contract-Version', value: HYDB_CONTRACT_VERSION }
+    ]
+  });
+
+  // Evaluate Genesis Lua into Genesis Process
+  const evalMsgId = await ao.message({
+    process: genesisProcessId,
+    signer,
+    tags: [
+      { name: 'Action', value: 'Eval' },
+      { name: 'Data-Protocol', value: 'ao' },
+      { name: 'Variant', value: 'ao.TN.1' }
+    ],
+    data: genesisLua
+  });
+
+  // 2. Spawn Arbitrator Process (Data Plane Arbitrator inside Stack)
+  const arbitratorProcessId = await ao.spawn({
+    module: defaultAosModule,
+    scheduler: defaultScheduler,
+    signer,
+    tags: [
+      { name: 'App-Name', value: 'aos' },
+      { name: 'Variant', value: 'ao.TN.1' },
+      { name: 'Type', value: 'Process' },
+      { name: 'Name', value: `${options.stackId || 'HyDB-Master-Stack'}-Arbitrator` },
+      { name: 'Genesis-Process-Id', value: genesisProcessId },
+      { name: 'Genesis-Hash', value: genesisHash },
+      { name: 'Data-Protocol', value: 'hydb' },
+      { name: 'Contract-Version', value: HYDB_CONTRACT_VERSION }
+    ]
+  });
+
+  // Evaluate Arbitrator Lua into Arbitrator Process
+  const arbitratorEvalMsgId = await ao.message({
+    process: arbitratorProcessId,
+    signer,
+    tags: [
+      { name: 'Action', value: 'Eval' },
+      { name: 'Data-Protocol', value: 'ao' },
+      { name: 'Variant', value: 'ao.TN.1' }
+    ],
+    data: arbitratorLua
+  });
+
+  // 3. Register ArbitratorProcessId in Genesis Process
+  await ao.message({
+    process: genesisProcessId,
+    signer,
+    tags: [
+      { name: 'Action', value: 'SetArbitratorProcess' },
+      { name: 'Data-Protocol', value: 'ao' },
+      { name: 'Variant', value: 'ao.TN.1' },
+      { name: 'Arbitrator-Process-Id', value: arbitratorProcessId }
+    ],
+    data: JSON.stringify({ arbitrator_process_id: arbitratorProcessId })
+  });
+
+  return {
+    ok: true,
+    deployed: true,
+    processId: genesisProcessId,
+    genesisProcessId,
+    arbitratorProcessId,
+    evalMsgId,
+    arbitratorEvalMsgId,
+    genesisHash,
+    stackId: options.stackId || 'hydb_universal_mesh',
+    network
+  };
+}
+
+/**
+ * Queries the official Genesis Configuration from a live AO Process.
+ */
+export async function getGenesisConfig(processId, options = {}) {
+  if (!processId) throw new Error('processId is required to query Genesis config');
+
+  if (typeof options.queryGenesisFn === 'function') {
+    return await options.queryGenesisFn(processId, options);
+  }
+
+  if (typeof options.evaluatorFn === 'function') {
+    const res = await options.evaluatorFn({
+      Target: processId,
+      Action: 'GetGenesisConfig',
+      Tags: [
+        { name: 'Action', value: 'GetGenesisConfig' },
+        { name: 'Data-Protocol', value: 'ao' },
+        { name: 'Variant', value: 'ao.TN.1' }
+      ],
+      Data: '{}'
+    });
+    const msgs = res?.Messages || res?.responses || [];
+    const last = msgs[msgs.length - 1];
+    if (last && last.Data) {
+      try {
+        const data = JSON.parse(last.Data);
+        return { ok: true, processId, ...data };
+      } catch {
+        return { ok: true, processId, rawData: last.Data };
+      }
+    }
+  }
+
+  const { connect } = await import('@permaweb/aoconnect');
+  const network = (options.network || process.env.AO_NETWORK || 'testnet').toLowerCase();
+
+  const ao = options.ao || connect({
+    GATEWAY_URL: options.gatewayUrl || (network === 'mainnet' ? 'https://arweave.net' : process.env.ARWEAVE_GATEWAY || 'https://arweave.net'),
+    MU_URL: options.muUrl || (network === 'mainnet' ? 'https://mu.ao-mainnet.xyz' : 'https://mu.ao-testnet.xyz'),
+    CU_URL: options.cuUrl || (network === 'mainnet' ? 'https://cu.ao-mainnet.xyz' : 'https://cu.ao-testnet.xyz')
+  });
+
+  const res = await ao.dryrun({
+    process: processId,
+    tags: [
+      { name: 'Action', value: 'GetGenesisConfig' },
+      { name: 'Data-Protocol', value: 'ao' },
+      { name: 'Variant', value: 'ao.TN.1' }
+    ],
+    data: '{}'
+  });
+
+  const last = res?.Messages?.[res.Messages.length - 1];
+  if (last && last.Data) {
+    try {
+      const data = JSON.parse(last.Data);
+      return { ok: true, processId, ...data };
+    } catch {
+      return { ok: true, processId, rawData: last.Data };
+    }
+  }
+
+  return { ok: false, processId, status: 'no_response' };
+}
+
+/**
+ * Cryptographically verifies that a running AO Process matches the expected Stack Genesis Hash.
+ */
+export async function verifyStackGenesis(processId, expectedGenesisHash, options = {}) {
+  const config = await getGenesisConfig(processId, options);
+  if (!config || !config.ok) {
+    return {
+      ok: false,
+      divergence: true,
+      reason: 'Failed to retrieve genesis configuration from AO process',
+      processId
+    };
+  }
+  const actualHash = config.genesis?.genesis_hash;
+  if (!actualHash || actualHash.toUpperCase() !== String(expectedGenesisHash).toUpperCase()) {
+    return {
+      ok: false,
+      divergence: true,
+      reason: `Genesis hash mismatch: expected ${expectedGenesisHash}, received ${actualHash}`,
+      expectedHash: expectedGenesisHash,
+      actualHash,
+      processId
+    };
+  }
+  return {
+    ok: true,
+    divergence: false,
+    processId,
+    config
+  };
+}
+
+/**
+ * Queries the operational readiness and quorum status of the Stack from the Genesis process.
+ */
+export async function getStackStatus(processId, options = {}) {
+  if (!processId) throw new Error('processId is required to query Stack Status');
+
+  if (typeof options.evaluatorFn === 'function') {
+    const res = await options.evaluatorFn({
+      Target: processId,
+      Action: 'GetStackStatus',
+      Tags: [
+        { name: 'Action', value: 'GetStackStatus' },
+        { name: 'Data-Protocol', value: 'ao' },
+        { name: 'Variant', value: 'ao.TN.1' }
+      ],
+      Data: '{}'
+    });
+    const msgs = res?.Messages || res?.responses || [];
+    const last = msgs[msgs.length - 1];
+    if (last && last.Data) {
+      try {
+        return { ok: true, processId, ...JSON.parse(last.Data) };
+      } catch {
+        return { ok: true, processId, rawData: last.Data };
+      }
+    }
+  }
+
+  const { connect } = await import('@permaweb/aoconnect');
+  const network = (options.network || process.env.AO_NETWORK || 'testnet').toLowerCase();
+
+  const ao = options.ao || connect({
+    GATEWAY_URL: options.gatewayUrl || (network === 'mainnet' ? 'https://arweave.net' : process.env.ARWEAVE_GATEWAY || 'https://arweave.net'),
+    MU_URL: options.muUrl || (network === 'mainnet' ? 'https://mu.ao-mainnet.xyz' : 'https://mu.ao-testnet.xyz'),
+    CU_URL: options.cuUrl || (network === 'mainnet' ? 'https://cu.ao-mainnet.xyz' : 'https://cu.ao-testnet.xyz')
+  });
+
+  const res = await ao.dryrun({
+    process: processId,
+    tags: [
+      { name: 'Action', value: 'GetStackStatus' },
+      { name: 'Data-Protocol', value: 'ao' },
+      { name: 'Variant', value: 'ao.TN.1' }
+    ],
+    data: '{}'
+  });
+
+  const last = res?.Messages?.[res.Messages.length - 1];
+  if (last && last.Data) {
+    try {
+      return { ok: true, processId, ...JSON.parse(last.Data) };
+    } catch {
+      return { ok: true, processId, rawData: last.Data };
+    }
+  }
+
+  return { ok: false, processId, status: 'no_response' };
+}
+
+/**
+ * Registers a node with the Genesis Stack registry.
+ */
+export async function registerNode(processId, nodeInfo = {}, options = {}) {
+  if (!processId) throw new Error('processId is required to register node');
+
+  if (typeof options.evaluatorFn === 'function') {
+    const res = await options.evaluatorFn({
+      Target: processId,
+      From: nodeInfo.node_id || options.sender || 'SU_NODE',
+      Action: 'RegisterNode',
+      Tags: [
+        { name: 'Action', value: 'RegisterNode' },
+        { name: 'Data-Protocol', value: 'ao' },
+        { name: 'Variant', value: 'ao.TN.1' }
+      ],
+      Data: JSON.stringify(nodeInfo)
+    });
+    const msgs = res?.Messages || res?.responses || [];
+    const last = msgs[msgs.length - 1];
+    if (last && last.Data) {
+      try {
+        return { ok: true, ...JSON.parse(last.Data) };
+      } catch {
+        return { ok: true, rawData: last.Data };
+      }
+    }
+  }
+
+  const { connect } = await import('@permaweb/aoconnect');
+  const ao = options.ao || connect({});
+  const msgId = await ao.message({
+    process: processId,
+    signer: options.signer,
+    tags: [
+      { name: 'Action', value: 'RegisterNode' },
+      { name: 'Data-Protocol', value: 'ao' },
+      { name: 'Variant', value: 'ao.TN.1' }
+    ],
+    data: JSON.stringify(nodeInfo)
+  });
+  return { ok: true, msgId };
+}
+
+/**
+ * Reports periodic node heartbeat and operational metrics to Genesis Stack.
+ */
+export async function reportHeartbeat(processId, heartbeatInfo = {}, options = {}) {
+  if (!processId) throw new Error('processId is required to report heartbeat');
+
+  if (typeof options.evaluatorFn === 'function') {
+    const res = await options.evaluatorFn({
+      Target: processId,
+      From: heartbeatInfo.node_id || options.sender || 'SU_NODE',
+      Action: 'ReportHeartbeat',
+      Tags: [
+        { name: 'Action', value: 'ReportHeartbeat' },
+        { name: 'Data-Protocol', value: 'ao' },
+        { name: 'Variant', value: 'ao.TN.1' }
+      ],
+      Data: JSON.stringify(heartbeatInfo)
+    });
+    const msgs = res?.Messages || res?.responses || [];
+    const last = msgs[msgs.length - 1];
+    if (last && last.Data) {
+      try {
+        return { ok: true, ...JSON.parse(last.Data) };
+      } catch {
+        return { ok: true, rawData: last.Data };
+      }
+    }
+  }
+
+  const { connect } = await import('@permaweb/aoconnect');
+  const ao = options.ao || connect({});
+  const msgId = await ao.message({
+    process: processId,
+    signer: options.signer,
+    tags: [
+      { name: 'Action', value: 'ReportHeartbeat' },
+      { name: 'Data-Protocol', value: 'ao' },
+      { name: 'Variant', value: 'ao.TN.1' }
+    ],
+    data: JSON.stringify(heartbeatInfo)
+  });
+  return { ok: true, msgId };
+}
+
+export class HyDB {
+  static defineContract(spec) {
+    return defineContract(spec);
+  }
+  static computeGenesisHash(manifest) {
+    return computeGenesisHash(manifest);
+  }
+  static buildGenesisContractLua(options) {
+    return buildGenesisContractLua(options);
+  }
+  static buildArbitratorContractLua(options) {
+    return buildArbitratorContractLua(options);
+  }
+  static buildMasterContractLua(options) {
+    return buildMasterContractLua(options);
+  }
+  static async spawnStack(options) {
+    return await spawnStack(options);
+  }
+  static async getGenesisConfig(processId, options) {
+    return await getGenesisConfig(processId, options);
+  }
+  static async getStackStatus(processId, options) {
+    return await getStackStatus(processId, options);
+  }
+  static async registerNode(processId, nodeInfo, options) {
+    return await registerNode(processId, nodeInfo, options);
+  }
+  static async reportHeartbeat(processId, heartbeatInfo, options) {
+    return await reportHeartbeat(processId, heartbeatInfo, options);
+  }
+  static async verifyStackGenesis(processId, expectedGenesisHash, options) {
+    return await verifyStackGenesis(processId, expectedGenesisHash, options);
+  }
+}
+
 export function defineContract(spec) {
   return new HyDBContract(spec);
 }

@@ -49,6 +49,20 @@ if not crypto or not crypto.digest then
     end
 end
 
+-- =========================================================================
+-- GENESIS BLOCK: DECLARATIVE STACK CONSTITUTION & TOPOLOGY ANCHOR
+-- Protocol: hydb.core@1.0 | Single Master Contract ("1 Lembar")
+-- =========================================================================
+Genesis = Genesis or {
+    stack_id = "hydb_universal_mesh",
+    genesis_version = "1.0.0",
+    genesis_hash = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+    config_epoch = 1,
+    quorum_size = 3,
+    quorum_mode = "majority",
+    network = "testnet"
+}
+
 -- Official Persistent Process State
 ProcessId = ProcessId or (ao and ao.id) or "HYDB_ARBITRATOR"
 Owner = Owner or (ao and ao.env and ao.env.Process and ao.env.Process.Owner) or "OWNER_PRIMARY"
@@ -1168,6 +1182,32 @@ Handlers.add(
     end
 )
 
+-- Handler: Query Genesis Configuration (Exposing State for ~patch@1.0 and Discovery)
+Handlers.add(
+    "GetGenesisConfig",
+    Handlers.utils.hasMatchingTag("Action", "GetGenesisConfig"),
+    function(msg)
+        ao.send({
+            Target = msg.From,
+            Action = "GenesisConfigResponse",
+            ProcessId = ProcessId,
+            StackId = Genesis.stack_id,
+            GenesisHash = Genesis.genesis_hash,
+            ConfigEpoch = tostring(Genesis.config_epoch),
+            QuorumSize = tostring(Genesis.quorum_size),
+            QuorumMode = Genesis.quorum_mode,
+            Data = json.encode({
+                genesis = Genesis,
+                authorized_nodes = AuthorizedNodes,
+                authorized_admins = AuthorizedAdmins,
+                schemas = Schemas,
+                official_seq = OfficialSeq,
+                current_epoch = CurrentEpoch
+            })
+        })
+    end
+)
+
 -- Direct Dispatcher function for runners / test evaluators
 function handle_message(msg)
     if not msg then return { ok = false, error = "nil message" } end
@@ -1198,6 +1238,10 @@ return {
     handle = handle_message,
     Handlers = Handlers,
     ao = ao,
+    Genesis = Genesis,
+    AuthorizedNodes = AuthorizedNodes,
+    AuthorizedAdmins = AuthorizedAdmins,
+    Schemas = Schemas,
     compute_commitment_256 = compute_commitment_256,
     record_hash_64 = record_hash_64,
     validate_policy = validate_policy,

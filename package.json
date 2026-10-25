@@ -13,6 +13,8 @@
     "committer:live": "HYDB_PROFILE=production USE_AO_CONNECT=true node ao_process/committer_daemon.mjs",
     "deploy:ao": "node ao_process/deploy_ao_process.mjs",
     "deploy:ao:dry-run": "node ao_process/deploy_ao_process.mjs --dry-run",
+    "stack:spawn": "node scripts/spawn-genesis-stack.mjs",
+    "stack:genesis": "node scripts/spawn-genesis-stack.mjs",
     "smoke": "bash tests/smoke.sh",
     "test": "HYDB_PROFILE=test node tests/contract_conformance.mjs",
     "test:security": "node tests/test_tahap01_security.mjs",
@@ -28,8 +30,10 @@
     "test:chaos": "HYDB_PROFILE=test node tests/fault_injection_chaos.mjs",
     "test:committer": "HYDB_PROFILE=test node tests/test_tahap06_ao_committer.mjs",
     "test:release-gate": "node tests/test_tahap07_release_gate.mjs",
+    "test:genesis": "node tests/test_tahap09_genesis_contract.mjs",
+    "test:spawner": "node tests/test_tahap10_sdk_spawner.mjs",
     "test:integration": "HYDB_PROFILE=test node tests/test_maximal_poc.mjs",
-    "test:all": "npm run build:wasm && npm run verify:vectors && npm run test:security && npm run test:recovery && npm run test:quorum && npm run test:idempotency && npm run test:chaos && npm run test:committer && npm run test:release-gate && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:integration"
+    "test:all": "npm run build:wasm && npm run verify:vectors && npm run test:security && npm run test:recovery && npm run test:quorum && npm run test:idempotency && npm run test:chaos && npm run test:committer && npm run test:release-gate && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:genesis && npm run test:spawner && npm run test:integration"
   },
   "devDependencies": {
     "@permaweb/ao-loader": "^0.0.49",

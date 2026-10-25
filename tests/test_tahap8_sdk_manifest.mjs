@@ -215,12 +215,13 @@ assert(pubRes.wasmSha256 && pubRes.wasmSha256.length === 64, `Generated WASM SHA
 console.log('\n[Test 5] Node Mounting by Contract TxID & Client Binding:');
 
 let mockServer = null;
-const isHotRunning = await fetch(`${HOT_URL}/~meta@1.0/info`).then(r => r.ok).catch(() => false);
+let targetHotUrl = HOT_URL;
+const isHotRunning = process.env.USE_LIVE_HOT === 'true' && await fetch(`${HOT_URL}/~meta@1.0/info`).then(r => r.ok).catch(() => false);
 if (!isHotRunning) {
   const store = new Map();
   let seq = 0;
   mockServer = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://127.0.0.1:8734');
+    const url = new URL(req.url, 'http://127.0.0.1');
     const path = url.pathname;
     res.setHeader('Content-Type', 'application/json');
     if (path.includes('/schema')) {
@@ -249,7 +250,8 @@ if (!isHotRunning) {
     }
     res.end(JSON.stringify({ ok: true }));
   });
-  await new Promise(r => mockServer.listen(8734, '127.0.0.1', r));
+  await new Promise(r => mockServer.listen(0, '127.0.0.1', r));
+  targetHotUrl = `http://127.0.0.1:${mockServer.address().port}`;
 }
 
 const walletRawBytes = readFileSync(WALLET_PATH);
@@ -257,7 +259,7 @@ const clusterSecret = crypto.createHash('sha256').update(walletRawBytes).digest(
 const validAdminToken = clusterSecret.toString('hex').toUpperCase();
 
 // Mount published contract onto Hot Node
-const mountRes = await contract1.mountOnNode(HOT_URL, {
+const mountRes = await contract1.mountOnNode(targetHotUrl, {
   adminToken: validAdminToken,
   gatewayUrl: 'http://127.0.0.1:1984'
 });
@@ -273,7 +275,7 @@ assertEq(mountRes.namespace, 'finance.treasury', 'Mounted namespace matches cont
 assertEq(isTrue(mountRes.loaded_from_arweave), true, 'Contract loaded autonomously from Arweave');
 
 // Bind client to namespace and execute data operations
-const client = contract1.bindClient(HOT_URL);
+const client = contract1.bindClient(targetHotUrl);
 assertEq(client.namespace, 'finance.treasury', 'Bound client targets finance.treasury');
 
 // 1. Put value

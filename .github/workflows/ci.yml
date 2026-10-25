@@ -84,6 +84,12 @@ jobs:
       - name: Run AO Arbitrator & Policy Circuit Verification
         run: npm run test:ao
 
+      - name: Run Core Contract & Pre-Sequence Gating Tests
+        run: npm run test:contract
+
+      - name: Run Physical Durability & Auth Tests
+        run: npm run test:durability
+
       - name: Run Business Scenarios (Financial Ledger & Gaming State)
         run: npm run test:business
 
@@ -104,5 +110,11 @@ jobs:
             curl -sf "http://127.0.0.1:1984/mint/$(cat secrets/address_su.txt | tr -d '\n\r')/1000000000000000000000" || true
           fi
 
-      - name: Run SDK Canonical Manifest & Arweave Publication Tests
+      - name: Run Phase 08 SDK Canonical Manifest & Arweave Publication Tests
         run: npm run test:sdk
+
+      - name: Run Phase 09 AO Genesis Block & Master Contract Tests
+        run: npm run test:genesis
+
+      - name: Run Phase 10 SDK Spawner & Stack Genesis Integration Tests
+        run: npm run test:spawner
