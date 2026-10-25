@@ -38,7 +38,11 @@ import {
   computeBatchId,
   queryOfficialAoState,
   getOrCreateProcessId,
-  isTestProfile
+  isTestProfile,
+  resolveDefaultWalletPath,
+  getWallet,
+  createDataItemSigner,
+  getAoInstance
 } from './committer.mjs';
 
 export const FATAL_FAIL_CLOSED_EXIT_CODE = 78;
@@ -59,7 +63,10 @@ export function isFatalFailClosedError(err) {
     'ERR_COMMITTER_LOCK_HELD',
     'ERR_UNAUTHORIZED_NODE',
     'ERR_UNAUTHORIZED_ADMIN',
-    'ERR_FRAUD_PROOF_DETECTED'
+    'ERR_FRAUD_PROOF_DETECTED',
+    'ERR_GENESIS_HASH_MISMATCH',
+    'ERR_ARBITRATOR_NOT_RESOLVED_FROM_GENESIS',
+    'ERR_GENESIS_STATE_UNREACHABLE'
   ];
   if (err.code && fatalCodes.includes(err.code)) return true;
   const msg = String(err.message || '');
@@ -68,7 +75,9 @@ export function isFatalFailClosedError(err) {
     msg.includes('Auto-creation of AO processes is strictly prohibited in production') ||
     msg.includes('fail-closed') ||
     msg.includes('REJECTED_UNAUTHORIZED_NODE') ||
-    msg.includes('REJECTED_UNAUTHORIZED_ADMIN')
+    msg.includes('REJECTED_UNAUTHORIZED_ADMIN') ||
+    msg.includes('ERR_GENESIS_HASH_MISMATCH') ||
+    msg.includes('ERR_ARBITRATOR_NOT_RESOLVED_FROM_GENESIS')
   ) {
     return true;
   }
@@ -77,7 +86,7 @@ export function isFatalFailClosedError(err) {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
-const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
+const WALLET_PATH = resolveDefaultWalletPath();
 
 export function resolveDefaultCursorPath() {
   if (process.env.HYDB_COMMITTER_CURSOR_PATH) {
@@ -322,14 +331,177 @@ export async function bootstrapGenesisStackNode(options = {}) {
     });
 
     if (config && config.ok) {
+      // 1. Check Genesis Hash against expected if provided
+      const expectedHash = options.expectedGenesisHash || process.env.AO_GENESIS_HASH;
+      if (expectedHash && config.genesis?.genesis_hash) {
+        if (config.genesis.genesis_hash.toUpperCase() !== expectedHash.toUpperCase()) {
+          const err = new Error(`ERR_GENESIS_HASH_MISMATCH: Genesis hash mismatch (expected ${expectedHash}, got ${config.genesis.genesis_hash})`);
+          err.code = 'ERR_GENESIS_HASH_MISMATCH';
+          throw err;
+        }
+      }
+
+      // 2. Discover and bind Arbitrator process ID
+      const arbitratorId = config.arbitrator_process_id;
+      if (arbitratorId) {
+        options.processId = arbitratorId;
+        process.env.AO_PROCESS_ID = arbitratorId;
+      }
+
+      // 3. Auto-register node with Genesis stack
+      let nodeAddress = options.nodeId || options.address;
+      let signer = options.signer;
+      let jwk = null;
+      if (!nodeAddress) {
+        try {
+          const w = await getWallet(options.walletPath || WALLET_PATH);
+          nodeAddress = w.address;
+          jwk = w.jwk;
+        } catch {}
+      }
+
+      if (nodeAddress) {
+        try {
+          const regPayload = {
+            node_id: nodeAddress,
+            role: 'storage_unit',
+            endpoint: options.suUrl || process.env.SU_ENDPOINT || 'http://127.0.0.1:8735'
+          };
+          if (typeof options.evaluatorFn === 'function') {
+            await options.evaluatorFn({
+              Target: targetGenesisId,
+              Action: 'RegisterNode',
+              From: nodeAddress,
+              Tags: [
+                { name: 'Action', value: 'RegisterNode' },
+                { name: 'Data-Protocol', value: 'ao' },
+                { name: 'Variant', value: 'ao.TN.1' }
+              ],
+              Data: JSON.stringify(regPayload)
+            });
+          } else if (typeof options.messageFn === 'function') {
+            await options.messageFn({
+              process: targetGenesisId,
+              tags: [
+                { name: 'Action', value: 'RegisterNode' },
+                { name: 'Data-Protocol', value: 'ao' },
+                { name: 'Variant', value: 'ao.TN.1' }
+              ],
+              data: JSON.stringify(regPayload)
+            });
+          } else if (options.ao || options.useAoConnect || process.env.USE_AO_CONNECT === 'true') {
+            const aoClient = getAoInstance(options);
+            if (!signer && jwk) signer = createDataItemSigner(jwk);
+            if (signer) {
+              await aoClient.message({
+                process: targetGenesisId,
+                signer,
+                tags: [
+                  { name: 'Action', value: 'RegisterNode' },
+                  { name: 'Data-Protocol', value: 'ao' },
+                  { name: 'Variant', value: 'ao.TN.1' }
+                ],
+                data: JSON.stringify(regPayload)
+              });
+            }
+          }
+        } catch (regErr) {
+          console.warn(`[Genesis Bootstrap] Note: Node registration returned: ${regErr.message}`);
+        }
+      }
+
       console.log(
         `[Genesis Bootstrap] Bound to Stack '${config.genesis?.stack_id || targetGenesisId}' ` +
         `(Quorum=${config.genesis?.quorum_size}, Arbitrator=${config.arbitrator_process_id || 'unbound'})`
       );
-      return config;
+      return {
+        ok: true,
+        targetGenesisId,
+        arbitrator_process_id: arbitratorId,
+        config
+      };
     }
   } catch (err) {
+    if (err.code === 'ERR_GENESIS_HASH_MISMATCH') throw err;
     console.warn(`[Genesis Bootstrap] Note: Genesis discovery returned: ${err.message}`);
+  }
+  return null;
+}
+
+/**
+ * Reports periodic node heartbeat and operational metrics to Genesis Stack.
+ */
+export async function reportNodeHeartbeatToGenesis(targetGenesisId, heartbeatData = {}, options = {}) {
+  const genesisId = targetGenesisId || options.genesisProcessId || process.env.AO_GENESIS_ID;
+  if (!genesisId) return null;
+
+  let sender = heartbeatData.node_id || options.sender;
+  let signer = options.signer;
+  let jwk = null;
+  if (!sender) {
+    try {
+      const w = await getWallet(options.walletPath || WALLET_PATH);
+      sender = w.address;
+      jwk = w.jwk;
+    } catch {
+      sender = 'SU_NODE_1';
+    }
+  }
+
+  const payload = {
+    node_id: sender,
+    health: heartbeatData.health || 'ACTIVE',
+    throughput: heartbeatData.throughput ?? 0,
+    last_seq: heartbeatData.last_seq ?? (lastCommittedSeq || 0),
+    endpoint: options.suUrl || process.env.SU_ENDPOINT || 'http://127.0.0.1:8735',
+    ...heartbeatData
+  };
+
+  try {
+    if (typeof options.evaluatorFn === 'function') {
+      return await options.evaluatorFn({
+        Target: genesisId,
+        Action: 'ReportHeartbeat',
+        From: sender,
+        Tags: [
+          { name: 'Action', value: 'ReportHeartbeat' },
+          { name: 'Data-Protocol', value: 'ao' },
+          { name: 'Variant', value: 'ao.TN.1' }
+        ],
+        Data: JSON.stringify(payload)
+      });
+    }
+
+    if (typeof options.messageFn === 'function') {
+      return await options.messageFn({
+        process: genesisId,
+        tags: [
+          { name: 'Action', value: 'ReportHeartbeat' },
+          { name: 'Data-Protocol', value: 'ao' },
+          { name: 'Variant', value: 'ao.TN.1' }
+        ],
+        data: JSON.stringify(payload)
+      });
+    }
+
+    if (options.ao || options.useAoConnect || process.env.USE_AO_CONNECT === 'true') {
+      const aoClient = getAoInstance(options);
+      if (!signer && jwk) signer = createDataItemSigner(jwk);
+      if (signer) {
+        return await aoClient.message({
+          process: genesisId,
+          signer,
+          tags: [
+            { name: 'Action', value: 'ReportHeartbeat' },
+            { name: 'Data-Protocol', value: 'ao' },
+            { name: 'Variant', value: 'ao.TN.1' }
+          ],
+          data: JSON.stringify(payload)
+        });
+      }
+    }
+  } catch (err) {
+    console.warn(`[Genesis Heartbeat] Report error: ${err.message}`);
   }
   return null;
 }
@@ -619,6 +791,16 @@ export async function processCommitterCycle(options = {}) {
       cursorPath
     );
     lastCommittedSeq = updatedCursor.last_committed_seq;
+
+    // Report heartbeat to Genesis Stack to maintain active quorum status
+    const targetGenesisId = options.targetGenesisId || options.genesisProcessId || process.env.AO_GENESIS_ID;
+    if (targetGenesisId) {
+      await reportNodeHeartbeatToGenesis(targetGenesisId, {
+        last_seq: lastCommittedSeq,
+        health: 'ACTIVE'
+      }, options).catch(() => null);
+    }
+
     writeHeartbeatStatus({
       status: 'running',
       health: 'healthy',
@@ -696,7 +878,12 @@ export async function startCommitterDaemon(options = {}) {
   console.log('========================================================================\n');
 
   try {
-    await bootstrapGenesisStackNode(options);
+    const genesisRes = await bootstrapGenesisStackNode(options);
+    if (genesisRes && genesisRes.arbitrator_process_id) {
+      options.processId = genesisRes.arbitrator_process_id;
+      process.env.AO_PROCESS_ID = genesisRes.arbitrator_process_id;
+      options.targetGenesisId = genesisRes.targetGenesisId;
+    }
     const initialCursor = await reconcileCursorWithAO(options);
     if (initialCursor && initialCursor.mismatch_detected && !options.allowLocalAhead) {
       console.error('[Fatal CommitterDaemon Error] Cursor reconciliation mismatch detected:', initialCursor.reason);

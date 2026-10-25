@@ -21,6 +21,7 @@
 
 import Arweave from 'arweave';
 import { connect, message, result as aoResult, createDataItemSigner } from '@permaweb/aoconnect';
+export { createDataItemSigner };
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join, basename } from 'node:path';
@@ -28,7 +29,14 @@ import crypto from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_DIR = process.env.DB_DIR || resolve(__dirname, '..');
-const WALLET_PATH = process.env.WALLET_PATH || join(DB_DIR, 'secrets/wallet.json');
+export function resolveDefaultWalletPath() {
+  if (process.env.WALLET_PATH) return process.env.WALLET_PATH;
+  const suWallet = join(DB_DIR, 'secrets/wallet_su.json');
+  if (existsSync(suWallet)) return suWallet;
+  return join(DB_DIR, 'secrets/wallet.json');
+}
+
+const WALLET_PATH = resolveDefaultWalletPath();
 const PROCESS_ID_FILE = join(DB_DIR, 'ao_process/process_id.txt');
 const LUA_PATH = join(DB_DIR, 'ao_process/arbitrator.lua');
 
@@ -564,8 +572,24 @@ export async function verifyArweaveL1Finality(l1TxId, batchDataOrId, options = {
   }
 }
 
-async function getWallet(walletPath = WALLET_PATH) {
-  const jwk = JSON.parse(readFileSync(walletPath, 'utf-8'));
+export async function getWallet(walletPath = WALLET_PATH) {
+  if (process.env.WALLET_JSON && process.env.WALLET_JSON.trim()) {
+    try {
+      const jwk = JSON.parse(process.env.WALLET_JSON);
+      const address = await arweave.wallets.jwkToAddress(jwk);
+      return { jwk, address };
+    } catch {}
+  }
+  let targetPath = walletPath;
+  if (!existsSync(targetPath)) {
+    const fallback = targetPath.includes('wallet_su.json')
+      ? join(DB_DIR, 'secrets/wallet.json')
+      : join(DB_DIR, 'secrets/wallet_su.json');
+    if (existsSync(fallback)) {
+      targetPath = fallback;
+    }
+  }
+  const jwk = JSON.parse(readFileSync(targetPath, 'utf-8'));
   const address = await arweave.wallets.jwkToAddress(jwk);
   return { jwk, address };
 }
@@ -821,7 +845,7 @@ export async function commitCheckpointBatch(batchData, options = {}) {
         ? async () =>
             await options.evaluatorFn({
               Id: msgId,
-              From: batchData.su_id || 'SU_NODE_1',
+              From: options.sender || batchData.su_id || 'SU_NODE_1',
               Action: 'CommitCheckpoint',
               Tags: tags,
               Data: JSON.stringify({ ...batchData, batch_id: batchId })
@@ -923,7 +947,7 @@ export async function commitCheckpointBatch(batchData, options = {}) {
     try {
       evalPayload = await options.evaluatorFn({
         Id: txId || batchId,
-        From: batchData.su_id || 'SU_NODE_1',
+        From: options.sender || batchData.su_id || 'SU_NODE_1',
         Action: 'CommitCheckpoint',
         Timestamp: Date.now(),
         Tags: tags,

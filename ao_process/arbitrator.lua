@@ -49,6 +49,17 @@ if not crypto or not crypto.digest then
     end
 end
 
+-- Official Persistent Process State
+ProcessId = ProcessId or (ao and ao.id) or "HYDB_ARBITRATOR"
+Owner = Owner or (ao and ao.env and ao.env.Process and ao.env.Process.Owner) or "OWNER_PRIMARY"
+GenesisProcessId = GenesisProcessId or (ao and ao.env and ao.env.Process and ao.env.Process.Tags and (ao.env.Process.Tags["Genesis-Process-Id"] or ao.env.Process.Tags["genesis-process-id"])) or ""
+ContractVersion = ContractVersion or "hydb.core@1.0"
+CurrentEpoch = CurrentEpoch or 1
+OfficialSeq = OfficialSeq or 0
+OfficialHash = OfficialHash or "0000000000000000000000000000000000000000000000000000000000000000"
+OfficialStateRoot = OfficialStateRoot or "0"
+OfficialCommitment256 = OfficialCommitment256 or "0000000000000000000000000000000000000000000000000000000000000000"
+
 -- =========================================================================
 -- GENESIS BLOCK: DECLARATIVE STACK CONSTITUTION & TOPOLOGY ANCHOR
 -- Protocol: hydb.core@1.0 | Single Master Contract ("1 Lembar")
@@ -62,16 +73,6 @@ Genesis = Genesis or {
     quorum_mode = "majority",
     network = "testnet"
 }
-
--- Official Persistent Process State
-ProcessId = ProcessId or (ao and ao.id) or "HYDB_ARBITRATOR"
-Owner = Owner or (ao and ao.env and ao.env.Process and ao.env.Process.Owner) or "OWNER_PRIMARY"
-ContractVersion = ContractVersion or "hydb.core@1.0"
-CurrentEpoch = CurrentEpoch or 1
-OfficialSeq = OfficialSeq or 0
-OfficialHash = OfficialHash or "0000000000000000000000000000000000000000000000000000000000000000"
-OfficialStateRoot = OfficialStateRoot or "0"
-OfficialCommitment256 = OfficialCommitment256 or "0000000000000000000000000000000000000000000000000000000000000000"
 
 Records = Records or {}         -- slot_id -> { namespace, raw_key, val, canonical_val, ver, active }
 Schemas = Schemas or {
@@ -1191,12 +1192,14 @@ Handlers.add(
             Target = msg.From,
             Action = "GenesisConfigResponse",
             ProcessId = ProcessId,
+            GenesisProcessId = GenesisProcessId,
             StackId = Genesis.stack_id,
             GenesisHash = Genesis.genesis_hash,
             ConfigEpoch = tostring(Genesis.config_epoch),
             QuorumSize = tostring(Genesis.quorum_size),
             QuorumMode = Genesis.quorum_mode,
             Data = json.encode({
+                genesis_process_id = GenesisProcessId,
                 genesis = Genesis,
                 authorized_nodes = AuthorizedNodes,
                 authorized_admins = AuthorizedAdmins,
@@ -1239,6 +1242,7 @@ return {
     Handlers = Handlers,
     ao = ao,
     Genesis = Genesis,
+    GenesisProcessId = GenesisProcessId,
     AuthorizedNodes = AuthorizedNodes,
     AuthorizedAdmins = AuthorizedAdmins,
     Schemas = Schemas,

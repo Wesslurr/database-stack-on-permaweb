@@ -47,6 +47,7 @@ services:
     volumes:
       - sd_node_1_data:/app/data/node_sd_1
       - committer_data:/app/data/committer
+      - ./secrets:/app/secrets:ro
     ports:
       - "${SU_PORT_1:-8735}:8735"
     environment:
@@ -56,6 +57,7 @@ services:
       - NODE_SD_RUN_DIR=/app/data/node_sd_1
       - HYDB_COMMITTER_ENABLED=${HYDB_COMMITTER_ENABLED:-true}
       - HYDB_COMMITTER_CURSOR_PATH=/app/data/committer/committer_cursor.json
+      - WALLET_PATH=${WALLET_PATH:-/app/secrets/wallet_su.json}
       - HYDB_CLUSTER_SECRET=${HYDB_CLUSTER_SECRET:?HYDB_CLUSTER_SECRET_must_be_set_min_16_chars}
       - HYDB_ADMIN_TOKEN=${HYDB_ADMIN_TOKEN:?HYDB_ADMIN_TOKEN_must_be_set_min_16_chars}
       - SU_PORT=8735
@@ -67,6 +69,7 @@ services:
       - HYDB_EPOCH_PATH=/app/data/node_sd_1/epoch.meta
       - ARWEAVE_GATEWAY=${ARWEAVE_GATEWAY:-http://arlocal:1984}
       - AO_PROCESS_ID=${AO_PROCESS_ID:-}
+      - AO_GENESIS_ID=${AO_GENESIS_ID:-}
       - USE_AO_CONNECT=${USE_AO_CONNECT:-false}
       - INTERVAL_MS=3000
       - VERIFY_L1_FINALITY=${VERIFY_L1_FINALITY:-false}

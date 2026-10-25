@@ -32,8 +32,9 @@
     "test:release-gate": "node tests/test_tahap07_release_gate.mjs",
     "test:genesis": "node tests/test_tahap09_genesis_contract.mjs",
     "test:spawner": "node tests/test_tahap10_sdk_spawner.mjs",
+    "test:e2e-genesis": "node tests/test_tahap11_e2e_genesis_live.mjs",
     "test:integration": "HYDB_PROFILE=test node tests/test_maximal_poc.mjs",
-    "test:all": "npm run build:wasm && npm run verify:vectors && npm run test:security && npm run test:recovery && npm run test:quorum && npm run test:idempotency && npm run test:chaos && npm run test:committer && npm run test:release-gate && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:genesis && npm run test:spawner && npm run test:integration"
+    "test:all": "npm run build:wasm && npm run verify:vectors && npm run test:security && npm run test:recovery && npm run test:quorum && npm run test:idempotency && npm run test:chaos && npm run test:committer && npm run test:release-gate && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:genesis && npm run test:spawner && npm run test:e2e-genesis && npm run test:integration"
   },
   "devDependencies": {
     "@permaweb/ao-loader": "^0.0.49",

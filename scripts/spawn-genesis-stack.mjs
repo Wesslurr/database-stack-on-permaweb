@@ -71,6 +71,9 @@ async function main() {
   if (effectiveNode1 !== 'SU_NODE_1') {
     nodes.push({ id: 'su_placeholder_1', address: 'SU_NODE_1' });
   }
+  if (effectiveAdmin1 && effectiveAdmin1 !== 'ADMIN_PRIMARY' && effectiveAdmin1 !== effectiveNode1) {
+    nodes.push({ id: 'admin_committer', address: effectiveAdmin1 });
+  }
 
   const admins = [effectiveAdmin1];
   if (effectiveAdmin1 !== 'ADMIN_PRIMARY') {
@@ -105,12 +108,12 @@ async function main() {
 
   const result = await HyDB.spawnStack(spawnOptions);
 
-  if (!result.ok) {
-    console.error('❌ Failed to spawn HyDB Stack:', result.error || 'Unknown error');
+  if (!result.ok || (!isDryRun && !result.verified)) {
+    console.error('❌ Failed to spawn or verify HyDB Stack:', result.error || result.verificationReason || 'Post-spawn verification failed');
     process.exit(1);
   }
 
-  console.log('✅ HyDB Stack Spawned Successfully!\n');
+  console.log('✅ HyDB Stack Spawned and Verified Successfully!\n');
   console.log(` • Genesis Process ID:    ${result.genesisProcessId || result.processId}`);
   console.log(` • Arbitrator Process ID: ${result.arbitratorProcessId}`);
   console.log(` • Genesis Hash:          ${result.genesisHash}`);

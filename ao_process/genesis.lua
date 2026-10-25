@@ -257,9 +257,9 @@ Handlers.add(
             endpoint = payload.endpoint or "",
             wasm_sha256 = payload.wasm_sha256 or "",
             version = payload.version or GenesisVersion,
-            status = "READY",
+            status = "REGISTERED",
             registered_at = msg.Timestamp or 0,
-            last_heartbeat = msg.Timestamp or 0
+            last_heartbeat = 0
         }
 
         ao.send({

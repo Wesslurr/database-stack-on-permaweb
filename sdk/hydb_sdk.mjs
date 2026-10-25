@@ -709,7 +709,11 @@ export function buildGenesisContractLua(options = {}) {
   const schemasTable = (options.schemas || [])
     .map((s) => {
       const ns = typeof s === 'string' ? s : s.namespace || s.id;
-      return `    ["${ns}"] = { namespace = "${ns}", active = true }`;
+      const backend = s.backend || 'wasm_slot';
+      const keyType = s.key_type || 'int64';
+      const valType = s.val_type || 'int64';
+      const rulesJson = s.rules ? JSON.stringify(s.rules).replace(/"/g, '\\"') : '{}';
+      return `    ["${ns}"] = { namespace = "${ns}", backend = "${backend}", key_type = "${keyType}", val_type = "${valType}", active = true, rules_raw = "${rulesJson}" }`;
     })
     .join(',\n');
 
@@ -802,11 +806,14 @@ export function buildMasterContractLua(options = {}) {
     .map((a) => `    ["${a}"] = true`)
     .join(',\n');
 
+  const genesisProcessId = options.genesisProcessId || '';
+
   let dynamicHeader = `
 -- =========================================================================
 -- GENESIS BLOCK: DECLARATIVE STACK CONSTITUTION & TOPOLOGY ANCHOR
 -- Protocol: hydb.core@1.0 | Single Master Contract ("1 Lembar")
 -- =========================================================================
+GenesisProcessId = "${genesisProcessId}"
 Genesis = {
     stack_id = "${stackId}",
     genesis_version = "${genesisVersion}",
@@ -828,6 +835,7 @@ ${nodesTable}
 
   if (adminsTable) {
     dynamicHeader += `
+Owner = Owner or (ao and ao.env and ao.env.Process and ao.env.Process.Owner) or (ao and ao.id) or "OWNER_PRIMARY"
 AuthorizedAdmins = {
     [Owner] = true,
     ["ADMIN_PRIMARY"] = true,
@@ -982,6 +990,15 @@ export async function spawnStack(options = {}) {
     ]
   });
 
+  // Recompile Arbitrator Lua with dynamically bound genesisProcessId
+  const effectiveArbitratorLua = buildArbitratorContractLua({
+    ...options,
+    nodes: effectiveNodes,
+    admins: effectiveAdmins,
+    genesisHash,
+    genesisProcessId
+  });
+
   // Evaluate Arbitrator Lua into Arbitrator Process
   const arbitratorEvalMsgId = await ao.message({
     process: arbitratorProcessId,
@@ -991,7 +1008,7 @@ export async function spawnStack(options = {}) {
       { name: 'Data-Protocol', value: 'ao' },
       { name: 'Variant', value: 'ao.TN.1' }
     ],
-    data: arbitratorLua
+    data: effectiveArbitratorLua
   });
 
   // 3. Register ArbitratorProcessId in Genesis Process
@@ -1024,8 +1041,26 @@ export async function spawnStack(options = {}) {
       if (last && last.Data) {
         const parsed = JSON.parse(last.Data);
         if (parsed.arbitrator_process_id === arbitratorProcessId) {
-          verified = true;
-          verificationReason = 'verified_via_evaluator';
+          try {
+            const vArb = await options.evaluatorFn({
+              Target: arbitratorProcessId,
+              Action: 'GetOfficialState',
+              From: deployerAddress || 'ADMIN_PRIMARY',
+              Tags: [{ name: 'Action', value: 'GetOfficialState' }],
+              Data: '{}'
+            });
+            const arbMsgs = vArb?.Messages || vArb?.responses || [];
+            if (arbMsgs.length > 0) {
+              verified = true;
+              verificationReason = 'verified_via_evaluator';
+            } else {
+              verificationReason = 'arbitrator_evaluator_empty_response';
+            }
+          } catch (eArb) {
+            verificationReason = `arbitrator_evaluator_failed: ${eArb.message}`;
+          }
+        } else {
+          verificationReason = `arbitrator_id_mismatch: expected ${arbitratorProcessId}, got ${parsed.arbitrator_process_id}`;
         }
       }
     } catch (e) {
@@ -1047,13 +1082,51 @@ export async function spawnStack(options = {}) {
       if (last && last.Data) {
         const parsed = JSON.parse(last.Data);
         if (parsed.arbitrator_process_id === arbitratorProcessId) {
-          verified = true;
-          verificationReason = 'verified_via_ao_dryrun';
+          try {
+            const dryArb = await ao.dryrun({
+              process: arbitratorProcessId,
+              tags: [
+                { name: 'Action', value: 'GetOfficialState' },
+                { name: 'Data-Protocol', value: 'ao' },
+                { name: 'Variant', value: 'ao.TN.1' }
+              ],
+              data: '{}'
+            });
+            if (dryArb?.Messages && dryArb.Messages.length > 0) {
+              verified = true;
+              verificationReason = 'verified_via_ao_dryrun';
+            } else {
+              verificationReason = 'arbitrator_dryrun_empty_response';
+            }
+          } catch (arbErr) {
+            verificationReason = `arbitrator_dryrun_failed: ${arbErr.message}`;
+          }
+        } else {
+          verificationReason = `arbitrator_id_mismatch: expected ${arbitratorProcessId}, got ${parsed.arbitrator_process_id}`;
         }
       }
     } catch (e) {
       verificationReason = `dryrun_verification_failed: ${e.message}`;
     }
+  }
+
+  if (!isDryRun && options.strictVerify !== false && !verified) {
+    return {
+      ok: false,
+      deployed: false,
+      verified: false,
+      error: 'POST_SPAWN_VERIFICATION_FAILED',
+      verificationReason,
+      processId: genesisProcessId,
+      genesisProcessId,
+      arbitratorProcessId,
+      evalMsgId,
+      arbitratorEvalMsgId,
+      bindMsgId,
+      genesisHash,
+      stackId: options.stackId || 'hydb_universal_mesh',
+      network
+    };
   }
 
   return {
