@@ -106,7 +106,7 @@ npm run test:chaos
 # 7. Phase 06: Evidence-Based AO Settlement & Durable Cursor (81 Tests)
 npm run test:committer
 
-# 8. Phase 07: Semantic & Documentation Release Gate Audit (62 Tests)
+# 8. Phase 07: Semantic & Documentation Release Gate Audit (72 Tests)
 npm run test:release-gate
 
 # 9. Phase 08: Developer SDK & Canonical Manifest (39 Tests)
@@ -121,19 +121,22 @@ npm run test:spawner
 # 12. Phase 11: End-to-End Real Local Genesis Stack & Committer Lifecycle (59 Tests)
 npm run test:e2e-genesis
 
-# 13. Pre-Sequence Gating & Core Contract Rules (54 Tests)
+# 13. Phase 12: Native In-BEAM AO Committer & Gateway Verification (9 Tests)
+npm run test:beam-committer
+
+# 14. Pre-Sequence Gating & Core Contract Rules (54 Tests)
 npm run test:contract
 
-# 14. Physical Durability, fsync, and Auth (39 Tests)
+# 15. Physical Durability, fsync, and Auth (39 Tests)
 npm run test:durability
 
-# 15. AO Arbitrator State Machine & Policy Circuit (109 Tests)
+# 16. AO Arbitrator State Machine & Policy Circuit (109 Tests)
 npm run test:ao
 
-# 16. Business Logic Scenarios (Financial Ledger & Gaming - 16 Tests)
+# 17. Business Logic Scenarios (Financial Ledger & Gaming - 16 Tests)
 npm run test:business
 
-# 17. Master Fault-Tolerance & Security Verification (14 End-to-End Phases)
+# 18. Master Fault-Tolerance & Security Verification (14 End-to-End Phases)
 npm run test:integration
 
 # 18. Run All Verified Suites Sequentially

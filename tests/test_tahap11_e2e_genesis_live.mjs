@@ -47,16 +47,13 @@ import {
   commitCheckpointBatch,
   getOrCreateProcessId,
   queryOfficialAoState,
-  getWallet
-} from '../ao_process/committer.mjs';
-
-import {
+  getWallet,
   bootstrapGenesisStackNode,
   reportNodeHeartbeatToGenesis,
   processCommitterCycle,
   setCommittedCursor,
   readHeartbeatStatus
-} from '../ao_process/committer_daemon.mjs';
+} from '../ao_process/committer.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '..');

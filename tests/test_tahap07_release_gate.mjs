@@ -197,6 +197,7 @@ const requiredScripts = [
   'test:genesis',
   'test:spawner',
   'test:e2e-genesis',
+  'test:beam-committer',
   'test:integration'
 ];
 

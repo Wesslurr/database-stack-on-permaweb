@@ -9,8 +9,8 @@
     "build:wasm": "cd hydb && cargo build --target wasm32-unknown-unknown --release && mkdir -p out && cp target/wasm32-unknown-unknown/release/hydb.wasm out/hydb.wasm",
     "verify:vectors": "node spec/generate_golden_vectors.mjs --check",
     "arlocal": "node scripts/start-arlocal.mjs",
-    "committer": "node ao_process/committer_daemon.mjs",
-    "committer:live": "HYDB_PROFILE=production USE_AO_CONNECT=true node ao_process/committer_daemon.mjs",
+    "committer": "node ao_process/committer.mjs",
+    "committer:live": "HYDB_PROFILE=production USE_AO_CONNECT=true node ao_process/committer.mjs",
     "deploy:ao": "node ao_process/deploy_ao_process.mjs",
     "deploy:ao:dry-run": "node ao_process/deploy_ao_process.mjs --dry-run",
     "stack:spawn": "node scripts/spawn-genesis-stack.mjs",
@@ -33,8 +33,9 @@
     "test:genesis": "node tests/test_tahap09_genesis_contract.mjs",
     "test:spawner": "node tests/test_tahap10_sdk_spawner.mjs",
     "test:e2e-genesis": "node tests/test_tahap11_e2e_genesis_live.mjs",
+    "test:beam-committer": "node tests/test_tahap12_native_beam_committer.mjs",
     "test:integration": "HYDB_PROFILE=test node tests/test_maximal_poc.mjs",
-    "test:all": "npm run build:wasm && npm run verify:vectors && npm run test:security && npm run test:recovery && npm run test:quorum && npm run test:idempotency && npm run test:chaos && npm run test:committer && npm run test:release-gate && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:genesis && npm run test:spawner && npm run test:e2e-genesis && npm run test:integration"
+    "test:all": "npm run build:wasm && npm run verify:vectors && npm run test:security && npm run test:recovery && npm run test:quorum && npm run test:idempotency && npm run test:chaos && npm run test:committer && npm run test:release-gate && npm run test:conformance && npm run test:contract && npm run test:durability && npm run test:ao && npm run test:sdk && npm run test:business && npm run test:genesis && npm run test:spawner && npm run test:e2e-genesis && npm run test:beam-committer && npm run test:integration"
   },
   "devDependencies": {
     "@permaweb/ao-loader": "^0.0.49",

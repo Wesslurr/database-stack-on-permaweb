@@ -33,7 +33,7 @@ flowchart TD
         HotNode["hymessage (Hot Node: hymessage@1.0, Sequencer, Quorum Coordinator, TCP :8736)"]
         SDPool["sd (Storage Unit Worker: sd@1.0, scheduler@1.0, Fail-Closed WAL Engine)"]
         RustWasm["hydb (Rust no_std: wasm_slot, O(1) Memory Engine)"]
-        Committer["ao_process/committer.mjs (Evidence-Based Committer Daemon & Durable Cursor)"]
+        Committer["sd/src/sd_committer.erl (Native In-BEAM AO Committer & Durable Cursor)"]
         SdkClient["sdk/hydb_sdk.mjs (Universal Client Connector & Sandbox)"]
     end
 
@@ -71,12 +71,12 @@ flowchart TD
 - **`write_status: "accepted"` (HTTP 202 / 504 on quorum timeout, `commit_status: "provisional"`, `replicated: false`)**: The event received a monotonic sequence number in memory and was appended to `hot_wal.log` as provisional, but has not yet met SD disk quorum. Startup recovery preserves provisional status and does not promote to durable without verified quorum acknowledgements.
 - **Immediate In-Memory Idempotency**: Deduplication cache is populated in RAM before network replication. Retries reusing a `request_id` are served immediately without re-mutating state or appending duplicate frames. Parameter discrepancies trigger HTTP 409 (`ERR_IDEMPOTENCY_KEY_CONFLICT`).
 
-### 2.3 AO Commitment & Settlement Lifecycle (`ao_process/committer.mjs`)
+### 2.3 AO Commitment & Settlement Lifecycle (`ao_process/committer.mjs` & `sd/src/sd_committer.erl`)
 - **`submitted`**: Checkpoint batch dispatched to the AO network (`msg_id` recorded), pending Arbitrator consensus evaluation.
 - **`evaluated` / `rejected`**: Arbitrator evaluated the batch and rejected it due to a broken hash chain, sequence gap, or cryptographic fraud (`EQUIVOCATION_PROVEN`).
 - **`verified`**: Arbitrator returned an authoritative verdict (`COMMITTED` or `DUPLICATE_BATCH_IDEMPOTENT`) confirming `OfficialSeq`, `OfficialHash`, and `OfficialStateRoot`.
 - **`finalized`**: All verification conditions met on production `ao_network` accompanied by mined Arweave L1 block confirmation proofs bound to the message ID, target process, and commitment tags.
-- **Fail-Closed Cursor Reconciliation**: The committer persists progress atomically (`committer_cursor.json`) with `fsyncSync`. If local cursor state deviates from or runs ahead of the official AO sequence, the daemon terminates fail-closed (`ERR_CURSOR_AO_STATE_MISMATCH` / `ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ`).
+- **Fail-Closed Cursor Reconciliation**: The committer persists progress atomically (`committer_cursor.json`) with `fsyncSync` / `file:datasync`. If local cursor state deviates from or runs ahead of the official AO sequence, the committer terminates fail-closed (`ERR_CURSOR_AO_STATE_MISMATCH` / `ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ`).
 
 ---
 
@@ -111,6 +111,7 @@ Every guarantee across the HyDB stack is classified as **`Implemented`**, **`Tes
 | **09** | **AO Genesis Block & Master Contract** | `npm run test:genesis` ([`tests/test_tahap09_genesis_contract.mjs`](tests/test_tahap09_genesis_contract.mjs)) | `Implemented` & `Tested` |
 | **10** | **SDK Spawner & Stack Genesis Integration** | `npm run test:spawner` ([`tests/test_tahap10_sdk_spawner.mjs`](tests/test_tahap10_sdk_spawner.mjs)) | `Implemented` & `Tested` |
 | **11** | **E2E Live Genesis Stack & Committer Lifecycle** | `npm run test:e2e-genesis` ([`tests/test_tahap11_e2e_genesis_live.mjs`](tests/test_tahap11_e2e_genesis_live.mjs)) | `Implemented` & `Tested` |
+| **12** | **Native In-BEAM AO Committer & Gateway** | `npm run test:beam-committer` ([`tests/test_tahap12_native_beam_committer.mjs`](tests/test_tahap12_native_beam_committer.mjs)) | `Implemented` & `Tested` |
 | **Core** | **Arbitrator, Durability & Business Logic** | `npm run test:ao` / `npm run test:durability` / `npm run test:business` | `Implemented` & `Tested` |
 
 ---

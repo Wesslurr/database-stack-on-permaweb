@@ -178,11 +178,19 @@ init([]) ->
             SubHost = get_hot_host(),
             SubPort = get_hot_port(),
             SubPid = spawn_link(fun() -> subscriber_loop(?SERVER, SubHost, SubPort) end),
+            maybe_start_committer(),
             {ok, #state{sub_pid = SubPid, hot_host = SubHost, hot_port = SubPort}};
         {error, Reason} ->
             {stop, {security_configuration_error, Reason}};
         OtherErr ->
             {stop, {security_configuration_error, OtherErr}}
+    end.
+
+maybe_start_committer() ->
+    case os:getenv("HYDB_COMMITTER_ENABLED") of
+        "true" ->
+            catch sd_committer:ensure_started();
+        _ -> ok
     end.
 
 init_ets() ->
@@ -640,7 +648,11 @@ get_status_map() ->
         <<"gap_rejections">> => GapRej,
         <<"hash_rejections">> => HashRej,
         <<"degraded_rejections">> => DegradedRej,
-        <<"wal_file">> => list_to_binary(wal_path())
+        <<"wal_file">> => list_to_binary(wal_path()),
+        <<"committer">> => case whereis(sd_committer) of
+            undefined -> #{<<"status">> => <<"disabled">>};
+            _ -> (catch sd_committer:get_status())
+        end
     }.
 
 %% HyperBEAM Request Handlers for ~sd@1.0

@@ -38,38 +38,9 @@ SU_PORT="${SU_PORT:-8735}"
 
 start_committer_if_enabled() {
   if [ "${HYDB_COMMITTER_ENABLED:-false}" = "true" ]; then
-    NODE_BIN="${NODE_BIN:-node}"
-    if ! command -v "$NODE_BIN" >/dev/null 2>&1; then
-      echo "[sd-node] FATAL: HYDB_COMMITTER_ENABLED=true but '$NODE_BIN' is not found in PATH." >&2
-      echo "[sd-node] Committer owner node cannot start without Node.js runtime. Failing fast." >&2
-      exit 1
-    fi
-    if [ ! -f "$DB_DIR/ao_process/committer_daemon.mjs" ]; then
-      echo "[sd-node] FATAL: HYDB_COMMITTER_ENABLED=true but $DB_DIR/ao_process/committer_daemon.mjs is missing." >&2
-      exit 1
-    fi
-    if [ ! -d "$DB_DIR/ao_process/node_modules" ] && [ ! -d "$DB_DIR/node_modules" ]; then
-      echo "[sd-node] FATAL: HYDB_COMMITTER_ENABLED=true but AO dependencies (node_modules) are not installed." >&2
-      exit 1
-    fi
-
-    # Check if already running
-    if [ -f "$NODE_SD_RUN_DIR/committer.pid" ]; then
-      EXISTING_PID="$(cat "$NODE_SD_RUN_DIR/committer.pid" 2>/dev/null || true)"
-      if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
-        echo "[sd-node] Committer worker already running (PID $EXISTING_PID)"
-        return 0
-      else
-        echo "[sd-node] Removing stale committer.pid (PID ${EXISTING_PID:-empty} is not active)"
-        rm -f "$NODE_SD_RUN_DIR/committer.pid"
-      fi
-    fi
-
-    echo "[sd-node] Starting colocated AO Committer Worker..."
-    NODE_BIN="$NODE_BIN" "$DB_DIR/scripts/start-committer-worker.sh" > "$NODE_SD_RUN_DIR/committer.log" 2>&1 &
-    COMMITTER_PID=$!
-    echo "$COMMITTER_PID" > "$NODE_SD_RUN_DIR/committer.pid"
-    echo "[sd-node] Committer worker started with PID $COMMITTER_PID"
+    echo "[sd-node] AO Committer is enabled natively inside HyperBEAM (sd_committer)."
+    BEAM_PID="$("$HB_SD_REL/bin/hb" pid 2>/dev/null || echo "$$")"
+    echo "${BEAM_PID:-$$}" > "$NODE_SD_RUN_DIR/committer.pid"
   fi
 }
 

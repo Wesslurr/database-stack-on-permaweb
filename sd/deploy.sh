@@ -11,10 +11,10 @@ ERL="${ERL:-$(command -v erl || echo "$HOME/erlang/27.0/bin/erl")}"
 ERLC="${ERLC:-$(command -v erlc || echo "$HOME/erlang/27.0/bin/erlc")}"
 HB_SD_REL="$DB_DIR/vendor/HyperBEAM_sd/_build/genesis_wasm+rocksdb/rel/hb_sd"
 
-echo '=== 1. Compiling sd_runtime.erl ==='
+echo '=== 1. Compiling sd_ao_client.erl, sd_committer.erl & sd_runtime.erl ==='
 mkdir -p "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin"
-"$ERLC" -o "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin" "$SDD/src/sd_runtime.erl"
-echo "sd_runtime.beam deployed to lib."
+"$ERLC" -I "$SDD/src" -o "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin" "$SDD/src/sd_ao_client.erl" "$SDD/src/sd_committer.erl" "$SDD/src/sd_runtime.erl"
+echo "sd_runtime, sd_ao_client, and sd_committer deployed to lib."
 
 echo '=== 2. Building Gleam sd device ==='
 cd "$SDD"

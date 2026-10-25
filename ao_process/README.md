@@ -32,8 +32,7 @@ HyDB partitions on-chain responsibilities between two independent AO processes b
 
 - **`genesis.lua`**: The AO Genesis Process smart contract. Manages stack topology, authorized nodes, heartbeats, and binds internal stack processes (`ArbitratorProcessId`).
 - **`arbitrator.lua`**: The production AO Arbitrator smart contract. Handles batch checkpoint commits (`CommitCheckpoint`), policy configurations (`SetPolicy`), epoch promotions (`PromoteEpoch`), and fraud proofs.
-- **`committer.mjs`**: Core Arweave & AO transaction builder supporting `@permaweb/aoconnect` (public AO network), local ArLocal, and dynamic stack discovery via `AO_GENESIS_ID`.
-- **`committer_daemon.mjs`**: Autonomous background service that polls Storage Unit sequences and dispatches cryptographically signed checkpoint batches to the Arbitrator.
+- **`committer.mjs`**: Core Arweave & AO transaction builder and autonomous committer supporting `@permaweb/aoconnect` (public AO network), local ArLocal, durable cursor persistence, and dynamic stack discovery via `AO_GENESIS_ID`. Note: In production HyperBEAM deployments, committing is handled natively inside BEAM via `sd_committer.erl`.
 - **`real_ao_evaluator.mjs`**: Deterministic offline AO execution sandbox utilizing `@permaweb/ao-loader` and `process.wasm`.
 - **`deploy_ao_process.mjs`**: CLI utility for deploying individual processes to the AO network.
 
@@ -49,16 +48,16 @@ npm run stack:spawn -- --dry-run
 npm run stack:spawn -- --network testnet --stack-id hydb-alpha --wallet secrets/wallet.json
 ```
 
-## Running the Committer Daemon
+## Running the Committer CLI / Service
 
-The committer daemon automatically discovers the Arbitrator process from `AO_PROCESS_ID` or through the Genesis process via `AO_GENESIS_ID`:
+The committer automatically discovers the Arbitrator process from `AO_PROCESS_ID` or through the Genesis process via `AO_GENESIS_ID`:
 
 ```bash
-# Continuous background daemon (polls SU endpoint and commits checkpoints)
-node committer_daemon.mjs --interval 3000 --su-url http://127.0.0.1:8735/~scheduler@1.0
+# Continuous background mode (polls SU endpoint and commits checkpoints)
+node committer.mjs --interval 3000 --su-url http://127.0.0.1:8735/~scheduler@1.0
 
 # Single execution commit cycle
-node committer_daemon.mjs --once
+node committer.mjs --once
 ```
 
 ## Dynamic Resolution Invariant

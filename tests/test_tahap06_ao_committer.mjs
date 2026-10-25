@@ -31,10 +31,7 @@ import {
   verifyArbitratorEvaluation,
   verifyArweaveL1Finality,
   getOrCreateProcessId,
-  isTestProfile
-} from '../ao_process/committer.mjs';
-
-import {
+  isTestProfile,
   loadDurableCursor,
   saveDurableCursor,
   reconcileCursorWithAO,
@@ -48,7 +45,7 @@ import {
   resolveDefaultCursorPath,
   isFatalFailClosedError,
   FATAL_FAIL_CLOSED_EXIT_CODE
-} from '../ao_process/committer_daemon.mjs';
+} from '../ao_process/committer.mjs';
 import { deployAoProcess } from '../ao_process/deploy_ao_process.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -785,7 +782,7 @@ async function runPhase06Tests() {
   // [5] startCommitterDaemon Fail-Closed on Divergence
   let daemonFailedClosed = false;
   let daemonExitCode = null;
-  const { startCommitterDaemon } = await import('../ao_process/committer_daemon.mjs');
+  const { startCommitterDaemon } = await import('../ao_process/committer.mjs');
   try {
     await startCommitterDaemon({
       cursorPath: cursorFile,
@@ -852,25 +849,24 @@ async function runPhase06Tests() {
     'startCommitterDaemon cleanly exits with status=disabled when HYDB_COMMITTER_ENABLED=false'
   );
 
-  // [5E] SD Node Launcher Fail-Fast when Committer Owner Lacks Node.js Runtime
+  // [5E] SD Node Launcher Native In-BEAM Committer Verification (No Node.js Sidecar Required)
   const startSdScript = join(ROOT_DIR, 'scripts/start-sd-node.sh');
   const mockRunDir = join(TEST_TMP_DIR, 'mock_sd_run');
   mkdirSync(mockRunDir, { recursive: true });
 
-  const failFastCheck = spawnSync('bash', [startSdScript, '--check-committer'], {
+  const beamCheck = spawnSync('bash', [startSdScript, '--check-committer'], {
     env: {
       ...process.env,
       HYDB_COMMITTER_ENABLED: 'true',
-      NODE_BIN: 'missing_node_binary_for_test',
       NODE_SD_RUN_DIR: mockRunDir
     },
     encoding: 'utf-8'
   });
-  const combinedOutput = `${failFastCheck.stdout || ''}\n${failFastCheck.stderr || ''}`;
+  const combinedOutput = `${beamCheck.stdout || ''}\n${beamCheck.stderr || ''}`;
   assert(
-    failFastCheck.status !== 0 &&
-      combinedOutput.includes('Committer owner node cannot start without Node.js runtime'),
-    'start-sd-node.sh fails fast (status != 0) when HYDB_COMMITTER_ENABLED=true but node is missing'
+    beamCheck.status === 0 &&
+      combinedOutput.includes('AO Committer is enabled natively inside HyperBEAM (sd_committer)'),
+    'start-sd-node.sh --check-committer confirms native In-BEAM committer without external Node.js sidecar'
   );
 
   // [6] Daemon Default Option Propagation to commitCheckpointBatch

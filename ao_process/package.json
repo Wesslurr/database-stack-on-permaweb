@@ -7,10 +7,10 @@
   "exports": {
     "./evaluator": "./real_ao_evaluator.mjs",
     "./committer": "./committer.mjs",
-    "./daemon": "./committer_daemon.mjs"
+    "./daemon": "./committer.mjs"
   },
   "scripts": {
-    "start": "node committer_daemon.mjs",
+    "start": "node committer.mjs",
     "commit": "node committer.mjs"
   },
   "dependencies": {

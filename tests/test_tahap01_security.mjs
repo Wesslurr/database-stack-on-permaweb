@@ -58,7 +58,7 @@ console.log('\n[Test 1] Cluster Secret Fail-Fast Invariants:');
 
 // 1. Committer daemon must fail fast if WALLET_PATH points to non-existent file and HYDB_CLUSTER_SECRET is unset
 const committerProbeCode = `
-import { deriveClusterSecret } from './ao_process/committer_daemon.mjs';
+import { deriveClusterSecret } from './ao_process/committer.mjs';
 try {
   deriveClusterSecret('/tmp/non_existent_wallet_hydb_test.json');
   console.log('UNEXPECTED_SUCCESS');
@@ -84,7 +84,7 @@ assert(probeRes.stdout.includes('CAUGHT_EXPECTED_ERROR: Fatal: missing cluster s
 
 // 2. Committer daemon succeeds derivation when HYDB_CLUSTER_SECRET is explicitly provided
 const committerSecretRes = spawnSync('node', ['--input-type=module', '-e', `
-import { deriveClusterSecret } from './ao_process/committer_daemon.mjs';
+import { deriveClusterSecret } from './ao_process/committer.mjs';
 const key = deriveClusterSecret('/tmp/non_existent_wallet_hydb_test.json');
 console.log('DERIVED_LEN=' + key.length);
 `], {

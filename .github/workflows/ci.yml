@@ -122,5 +122,8 @@ jobs:
       - name: Run Phase 11 E2E Genesis Stack & Committer Lifecycle Tests
         run: npm run test:e2e-genesis
 
+      - name: Run Phase 12 Native In-BEAM AO Committer Tests
+        run: npm run test:beam-committer
+
       - name: Run End-to-End Integration Tests
         run: npm run test:integration
