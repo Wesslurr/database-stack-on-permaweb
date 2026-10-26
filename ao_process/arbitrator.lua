@@ -29,9 +29,20 @@ if not ok_json or not json then
     }
 end
 
-local ok_crypto, crypto = pcall(require, ".crypto")
-if not ok_crypto or not crypto then
-    crypto = nil
+local ok_crypto, raw_crypto = pcall(require, ".crypto")
+local crypto = nil
+if ok_crypto and raw_crypto and type(raw_crypto.digest) == "table" and raw_crypto.digest.sha2_256 then
+    crypto = {
+        digest = function(algo, str)
+            if string.lower(algo) == "sha256" then
+                local stream = raw_crypto.utils.stream.fromString(tostring(str))
+                return raw_crypto.digest.sha2_256(stream).asHex()
+            end
+            error("unsupported hash algo: " .. tostring(algo))
+        end
+    }
+elseif ok_crypto and raw_crypto and type(raw_crypto.digest) == "function" then
+    crypto = raw_crypto
 end
 
 -- Fallback to pure-Lua hydb_spec SHA-256 if crypto is unavailable in sandbox
