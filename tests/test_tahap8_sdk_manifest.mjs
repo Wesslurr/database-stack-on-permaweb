@@ -192,17 +192,45 @@ if (!existsSync(WALLET_PATH)) {
 }
 
 // Ensure test wallet has balance on local gateway if ArLocal is running
-try {
-  const arw = (await import('arweave')).default.init({});
-  const jwk = JSON.parse(readFileSync(WALLET_PATH, 'utf-8'));
-  const addr = await arw.wallets.jwkToAddress(jwk);
-  await fetch(`http://127.0.0.1:1984/mint/${addr}/1000000000000000000000`).catch(() => {});
-} catch {}
+const isArLocalRunning = await fetch('http://127.0.0.1:1984/info').then(r => r.ok).catch(() => false);
+if (isArLocalRunning) {
+  try {
+    const arw = (await import('arweave')).default.init({});
+    const jwk = JSON.parse(readFileSync(WALLET_PATH, 'utf-8'));
+    const addr = await arw.wallets.jwkToAddress(jwk);
+    await fetch(`http://127.0.0.1:1984/mint/${addr}/1000000000000000000000`).catch(() => {});
+  } catch {}
+}
 
-const pubRes = await contract1.publishToArweave({
-  gatewayUrl: 'http://127.0.0.1:1984',
-  walletPath: WALLET_PATH
-});
+let pubRes = null;
+if (isArLocalRunning) {
+  pubRes = await contract1.publishToArweave({
+    gatewayUrl: 'http://127.0.0.1:1984',
+    walletPath: WALLET_PATH
+  });
+} else {
+  // Hermetic mock Arweave gateway when ArLocal is offline
+  const mockArw = http.createServer((req, res) => {
+    if (req.url.includes('/tx_anchor')) return res.end('mock_arweave_anchor_hash_0000000000000000000000');
+    if (req.url.includes('/price')) return res.end('1000000');
+    if (req.url.includes('/tx')) {
+      res.setHeader('Content-Type', 'application/json');
+      return res.end(JSON.stringify({ status: 'OK' }));
+    }
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise(r => mockArw.listen(0, '127.0.0.1', r));
+  const mockArwPort = mockArw.address().port;
+  try {
+    pubRes = await contract1.publishToArweave({
+      gatewayUrl: `http://127.0.0.1:${mockArwPort}`,
+      walletPath: WALLET_PATH
+    });
+  } finally {
+    mockArw.close();
+  }
+}
 
 assertEq(pubRes.ok, true, 'publishToArweave succeeds');
 assert(pubRes.contractTxId && pubRes.contractTxId.length > 0, `Generated Contract TxID: ${pubRes.contractTxId}`);

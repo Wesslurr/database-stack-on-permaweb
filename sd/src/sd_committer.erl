@@ -6,17 +6,18 @@
 %% ============================================================================
 %% Responsibilities:
 %% 1. Direct memory/WAL polling from `sd_runtime` without external HTTP proxy.
-%% 2. Cryptographic batch assembly, canonical hashing, and HMAC/RSA signing.
+%% 2. Cryptographic RSA-PSS SHA-256 message signing with Arweave JWK wallet.
 %% 3. Autonomous dispatch of `CommitCheckpoint` to AO Arbitrator on Permaweb.
-%% 4. Durable disk cursor management & cold-start sequence reconciliation.
+%% 4. Strict fail-closed durable disk cursor management & cold-start sequence reconciliation.
 %% 5. Autonomous heartbeat emission and quorum health tracking on Genesis Stack.
-%% 6. Strict fail-closed circuit breaker on split-brain or sequence tampering.
+%% 6. Strict fail-closed circuit breaker on split-brain, sequence tampering, or state divergence.
 %% ============================================================================
 
 -export([start_link/0, start_link/1, ensure_started/0, ensure_started/1, stop/0]).
 -export([get_status/0, get_status_map/0, commit_now/0, report_heartbeat/0]).
 -export([bootstrap_genesis/0, bootstrap_genesis/1, reload_cursor/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+-export([load_disk_cursor/1, save_disk_cursor/6, parse_arbitrator_verdict/3]).
 
 -define(SERVER, ?MODULE).
 -define(DEFAULT_POLL_INTERVAL_MS, 1000).
@@ -32,6 +33,7 @@
     arbitrator_id = <<>>,
     wallet_path = "",
     wallet_address = <<"SU_NODE_1">>,
+    wallet_info = #{},
     cluster_secret = <<>>,
     cursor_path = "",
     batch_max = ?DEFAULT_BATCH_MAX,
@@ -123,50 +125,67 @@ init(Opts) ->
 
     WalletInfo = case sd_ao_client:load_wallet(WalletPath) of
         {ok, WI} -> WI;
-        _ -> #{address => <<"SU_NODE_1">>}
+        _ -> #{address => <<"SU_NODE_1">>, owner => <<>>, privkey => undefined}
     end,
     Address = maps:get(address, WalletInfo, <<"SU_NODE_1">>),
     ClusterSec = sd_ao_client:derive_cluster_secret(WalletPath),
 
-    DiskCursor = load_disk_cursor(CursorPath),
-    LastSeq = maps:get(last_committed_seq, DiskCursor, 0),
-    LastHash = maps:get(last_committed_hash, DiskCursor, <<>>),
-    LastRoot = maps:get(last_state_root, DiskCursor, <<"0">>),
-    Epoch = maps:get(epoch, DiskCursor, 1),
+    %% Strict cursor loading with fail-closed guardrails
+    case load_disk_cursor(CursorPath) of
+        {ok, DiskCursor} ->
+            LastSeq = maps:get(last_committed_seq, DiskCursor, 0),
+            LastHash = maps:get(last_committed_hash, DiskCursor, <<>>),
+            LastRoot = maps:get(last_state_root, DiskCursor, <<"0">>),
+            Epoch = maps:get(epoch, DiskCursor, 1),
 
-    InitialState = #state{
-        status = idle,
-        health = healthy,
-        cursor_path = CursorPath,
-        wallet_path = WalletPath,
-        wallet_address = Address,
-        cluster_secret = ClusterSec,
-        gateway_url = GatewayUrl,
-        batch_max = BatchMax,
-        poll_interval_ms = PollMs,
-        last_committed_seq = LastSeq,
-        last_committed_hash = LastHash,
-        last_state_root = LastRoot,
-        epoch = Epoch,
-        genesis_id = resolve_genesis_id(Opts, DbDir),
-        expected_genesis_hash = resolve_genesis_hash(Opts, DbDir),
-        arbitrator_id = resolve_arbitrator_id(Opts, DbDir)
-    },
+            InitialState = #state{
+                status = idle,
+                health = healthy,
+                cursor_path = CursorPath,
+                wallet_path = WalletPath,
+                wallet_address = Address,
+                wallet_info = WalletInfo,
+                cluster_secret = ClusterSec,
+                gateway_url = GatewayUrl,
+                batch_max = BatchMax,
+                poll_interval_ms = PollMs,
+                last_committed_seq = LastSeq,
+                last_committed_hash = LastHash,
+                last_state_root = LastRoot,
+                epoch = Epoch,
+                genesis_id = resolve_genesis_id(Opts, DbDir),
+                expected_genesis_hash = resolve_genesis_hash(Opts, DbDir),
+                arbitrator_id = resolve_arbitrator_id(Opts, DbDir)
+            },
 
-    %% Cold-start bootstrap via Genesis stack if configured
-    State1 = case InitialState#state.genesis_id of
-        <<>> -> InitialState#state{status = running};
-        _GenId ->
-            case do_bootstrap_genesis(InitialState) of
-                {ok, BootstrappedState} -> BootstrappedState;
-                {error, Reason} ->
-                    InitialState#state{status = degraded, health = degraded, reason = Reason}
-            end
-    end,
+            %% Cold-start bootstrap & on-chain reconciliation via Genesis/Arbitrator stack
+            State1 = case InitialState#state.genesis_id of
+                <<>> ->
+                    InitialState#state{status = running};
+                _GenId ->
+                    case do_bootstrap_genesis(InitialState) of
+                        {ok, BootstrappedState} ->
+                            reconcile_arbitrator_state(BootstrappedState#state.arbitrator_id, BootstrappedState);
+                        {error, Reason} ->
+                            InitialState#state{status = degraded, health = degraded, reason = Reason}
+                    end
+            end,
 
-    TRef = erlang:send_after(100, self(), commit_tick),
-    write_status_file(State1),
-    {ok, State1#state{timer_ref = TRef}}.
+            TRef = erlang:send_after(100, self(), commit_tick),
+            write_status_file(State1),
+            {ok, State1#state{timer_ref = TRef}};
+
+        {error, CursorErr} ->
+            HaltedState = #state{
+                status = halted,
+                health = failed_closed,
+                error_code = err_cursor_corrupted,
+                reason = CursorErr,
+                cursor_path = CursorPath
+            },
+            write_status_file(HaltedState),
+            {stop, {cursor_corrupted, CursorErr}}
+    end.
 
 handle_call(get_status, _From, State) ->
     Resp = #{
@@ -196,7 +215,8 @@ handle_call(report_heartbeat, _From, State) ->
 
 handle_call(bootstrap_genesis, _From, State) ->
     case do_bootstrap_genesis(State) of
-        {ok, NewState} ->
+        {ok, S1} ->
+            NewState = reconcile_arbitrator_state(S1#state.arbitrator_id, S1),
             write_status_file(NewState),
             {reply, {ok, true}, NewState};
         {error, Reason} ->
@@ -207,32 +227,37 @@ handle_call(bootstrap_genesis, _From, State) ->
 
 handle_call({bootstrap_genesis, Opts}, _From, State) ->
     DbDir = get_db_dir(),
-    S1 = State#state{
+    S0 = State#state{
         genesis_id = maps:get(genesis_id, Opts, resolve_genesis_id(Opts, DbDir)),
         expected_genesis_hash = maps:get(expected_genesis_hash, Opts, resolve_genesis_hash(Opts, DbDir))
     },
-    case do_bootstrap_genesis(S1) of
-        {ok, NewState} ->
+    case do_bootstrap_genesis(S0) of
+        {ok, S1} ->
+            NewState = reconcile_arbitrator_state(S1#state.arbitrator_id, S1),
             write_status_file(NewState),
             {reply, {ok, true}, NewState};
         {error, Reason} ->
-            NewState = S1#state{status = degraded, health = degraded, reason = Reason},
+            NewState = S0#state{status = degraded, health = degraded, reason = Reason},
             write_status_file(NewState),
             {reply, {error, Reason}, NewState}
     end;
 
 handle_call(reload_cursor, _From, State) ->
-    DiskCursor = load_disk_cursor(State#state.cursor_path),
-    NewSeq = maps:get(last_committed_seq, DiskCursor, State#state.last_committed_seq),
-    NewHash = maps:get(last_committed_hash, DiskCursor, State#state.last_committed_hash),
-    NewRoot = maps:get(last_state_root, DiskCursor, State#state.last_state_root),
-    NewState = State#state{
-        last_committed_seq = NewSeq,
-        last_committed_hash = NewHash,
-        last_state_root = NewRoot
-    },
-    write_status_file(NewState),
-    {reply, {ok, NewSeq}, NewState};
+    case load_disk_cursor(State#state.cursor_path) of
+        {ok, DiskCursor} ->
+            NewSeq = maps:get(last_committed_seq, DiskCursor, State#state.last_committed_seq),
+            NewHash = maps:get(last_committed_hash, DiskCursor, State#state.last_committed_hash),
+            NewRoot = maps:get(last_state_root, DiskCursor, State#state.last_state_root),
+            NewState = State#state{
+                last_committed_seq = NewSeq,
+                last_committed_hash = NewHash,
+                last_state_root = NewRoot
+            },
+            write_status_file(NewState),
+            {reply, {ok, NewSeq}, NewState};
+        {error, Err} ->
+            {reply, {error, Err}, State}
+    end;
 
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_call}, State}.
@@ -321,33 +346,40 @@ do_commit_cycle(State) ->
                                 <<"CommitCheckpoint">>,
                                 Tags,
                                 FinalBatch,
-                                #{sender => State#state.wallet_address}
+                                #{
+                                    sender => State#state.wallet_address,
+                                    wallet => State#state.wallet_info
+                                }
                             )
                     end,
 
                     case DispatchRes of
                         {ok, _HttpStatus, Resp} ->
-                            case parse_arbitrator_verdict(Resp) of
+                            case parse_arbitrator_verdict(Resp, PropHash, PropRoot) of
                                 {ok, committed, OfficialSeq} ->
                                     AdvSeq = max(ToSeq, OfficialSeq),
-                                    save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"COMMITTED">>, State#state.cursor_path),
-                                    {_, StateAfterHb} = do_report_heartbeat(State#state{
-                                        last_committed_seq = AdvSeq,
-                                        last_committed_hash = PropHash,
-                                        last_state_root = PropRoot,
-                                        epoch = Epoch,
-                                        status = running,
-                                        health = healthy
-                                    }),
-                                    {{ok, true, committed}, StateAfterHb};
+                                    case save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"COMMITTED">>, State#state.cursor_path) of
+                                        ok ->
+                                            {_, StateAfterHb} = do_report_heartbeat(State#state{
+                                                last_committed_seq = AdvSeq,
+                                                last_committed_hash = PropHash,
+                                                last_state_root = PropRoot,
+                                                epoch = Epoch,
+                                                status = running,
+                                                health = healthy
+                                            }),
+                                            {{ok, true, committed}, StateAfterHb};
+                                        {error, SaveErr} ->
+                                            {{error, {cursor_save_failed, SaveErr}}, State#state{status = degraded, health = degraded, reason = SaveErr}}
+                                    end;
                                 {ok, duplicate, OfficialSeq} ->
                                     AdvSeq = max(LastSeq, OfficialSeq),
-                                    save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path),
+                                    _ = save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path),
                                     {{ok, true, idempotent_duplicate}, State#state{status = running, health = healthy}};
                                 {rejected, Code, Reason} ->
                                     {{ok, false, rejected}, State#state{status = degraded, health = degraded, error_code = Code, reason = Reason}};
-                                other ->
-                                    {{ok, true, unverified_response}, State#state{last_committed_seq = ToSeq, status = running}}
+                                {error, ErrReason} ->
+                                    {{ok, false, error}, State#state{status = degraded, health = degraded, reason = ErrReason}}
                             end;
                         {error, ErrReason} ->
                             {{error, ErrReason}, State#state{status = degraded, health = degraded, reason = ErrReason}}
@@ -367,16 +399,31 @@ do_commit_cycle(State) ->
             end
     end.
 
-parse_arbitrator_verdict(#{<<"Status">> := <<"COMMITTED">>, <<"OfficialSeq">> := OSeq}) ->
-    {ok, committed, to_int(OSeq, 0)};
-parse_arbitrator_verdict(#{<<"Status">> := <<"DUPLICATE_BATCH_IDEMPOTENT">>, <<"OfficialSeq">> := OSeq}) ->
-    {ok, duplicate, to_int(OSeq, 0)};
-parse_arbitrator_verdict(#{<<"Status">> := <<"AUDIT_REJECTED">>, <<"SubStatus">> := Sub, <<"Reason">> := R}) ->
-    {rejected, Sub, R};
-parse_arbitrator_verdict(#{<<"SubStatus">> := Sub, <<"Reason">> := R}) ->
-    {rejected, Sub, R};
-parse_arbitrator_verdict(_) ->
-    unverified.
+parse_arbitrator_verdict(Resp, PropHash, PropRoot) ->
+    case Resp of
+        #{<<"Status">> := <<"COMMITTED">>, <<"OfficialSeq">> := OSeq} ->
+            OfficialSeq = to_int(OSeq, 0),
+            HashMatch = case maps:get(<<"OfficialHash">>, Resp, undefined) of
+                undefined -> true;
+                OHash -> string:uppercase(to_bin(OHash)) =:= string:uppercase(to_bin(PropHash))
+            end,
+            RootMatch = case maps:get(<<"OfficialStateRoot">>, Resp, undefined) of
+                undefined -> true;
+                ORoot -> to_bin(ORoot) =:= to_bin(PropRoot)
+            end,
+            case HashMatch andalso RootMatch of
+                true -> {ok, committed, OfficialSeq};
+                false -> {rejected, err_state_divergence, <<"Official hash or state root diverged from proposed batch">>}
+            end;
+        #{<<"Status">> := <<"DUPLICATE_BATCH_IDEMPOTENT">>, <<"OfficialSeq">> := OSeq} ->
+            {ok, duplicate, to_int(OSeq, 0)};
+        #{<<"Status">> := <<"AUDIT_REJECTED">>, <<"SubStatus">> := Sub, <<"Reason">> := R} ->
+            {rejected, Sub, R};
+        #{<<"SubStatus">> := Sub, <<"Reason">> := R} ->
+            {rejected, Sub, R};
+        Other ->
+            {rejected, err_unrecognized_verdict, Other}
+    end.
 
 %% ============================================================================
 %% Genesis Bootstrap & Heartbeat
@@ -389,16 +436,21 @@ do_bootstrap_genesis(State) ->
     QueryRes = sd_ao_client:query_state(State#state.gateway_url, GenesisId, <<"GetGenesisConfig">>, #{}),
     case QueryRes of
         {ok, _Status, Resp} ->
-            %% 1. Verify Genesis Hash if configured
+            %% 1. Strict verification of Genesis Hash if configured
             ExpectedHash = State#state.expected_genesis_hash,
             ActualHash = extract_genesis_hash(Resp),
             if
-                ExpectedHash =/= <<>> andalso ActualHash =/= <<>> ->
-                    case string:uppercase(ExpectedHash) =:= string:uppercase(ActualHash) of
-                        false ->
-                            {error, {err_genesis_hash_mismatch, ExpectedHash, ActualHash}};
+                ExpectedHash =/= <<>> ->
+                    if
+                        ActualHash =:= <<>> ->
+                            {error, {err_genesis_hash_missing, <<"Genesis response did not contain genesis_hash">>}};
                         true ->
-                            finish_bootstrap_with_config(Resp, State)
+                            case string:uppercase(ExpectedHash) =:= string:uppercase(ActualHash) of
+                                false ->
+                                    {error, {err_genesis_hash_mismatch, ExpectedHash, ActualHash}};
+                                true ->
+                                    finish_bootstrap_with_config(Resp, State)
+                            end
                     end;
                 true ->
                     finish_bootstrap_with_config(Resp, State)
@@ -413,13 +465,23 @@ finish_bootstrap_with_config(Config, State) ->
         ArbitratorId =/= <<>> -> State#state{arbitrator_id = ArbitratorId};
         true -> State
     end,
-    %% Register node identity with Genesis
+    %% Register node identity with Genesis using signed envelope
     RegPayload = #{
         <<"node_id">> => State#state.wallet_address,
         <<"role">> => <<"SU_WORKER">>,
         <<"endpoint">> => <<"http://127.0.0.1:8735">>
     },
-    case sd_ao_client:send_message(State#state.gateway_url, State#state.genesis_id, <<"RegisterNode">>, [], RegPayload, #{sender => State#state.wallet_address}) of
+    case sd_ao_client:send_message(
+        State#state.gateway_url,
+        State#state.genesis_id,
+        <<"RegisterNode">>,
+        [],
+        RegPayload,
+        #{
+            sender => State#state.wallet_address,
+            wallet => State#state.wallet_info
+        }
+    ) of
         {ok, _Status, RegResp} ->
             case parse_reg_response(RegResp) of
                 ok -> {ok, S1#state{status = running, health = healthy}};
@@ -429,12 +491,38 @@ finish_bootstrap_with_config(Config, State) ->
             {error, {register_node_failed, RegErr}}
     end.
 
+parse_reg_response(#{<<"ok">> := true}) -> ok;
+parse_reg_response(#{<<"status">> := <<"REGISTERED">>}) -> ok;
+parse_reg_response(#{<<"status">> := <<"ALREADY_REGISTERED">>}) -> ok;
 parse_reg_response(#{<<"status">> := <<"REJECTED_UNAUTHORIZED_NODE">>}) ->
     {error, err_unauthorized_node};
-parse_reg_response(#{<<"ok">> := false}) ->
-    {error, err_unauthorized_node};
-parse_reg_response(_) ->
-    ok.
+parse_reg_response(#{<<"ok">> := false, <<"reason">> := Reason}) ->
+    {error, {err_unauthorized_node, Reason}};
+parse_reg_response(Other) ->
+    {error, {err_registration_unverified, Other}}.
+
+reconcile_arbitrator_state(<<>>, State) ->
+    State;
+reconcile_arbitrator_state(ArbitratorId, State) ->
+    case sd_ao_client:query_state(State#state.gateway_url, ArbitratorId, <<"GetOfficialState">>, #{}) of
+        {ok, _Status, #{<<"OfficialSeq">> := AoSeq} = AoState} ->
+            OfficialSeq = to_int(AoSeq, 0),
+            if
+                OfficialSeq > State#state.last_committed_seq ->
+                    AoHash = to_bin(maps:get(<<"OfficialHash">>, AoState, <<>>)),
+                    AoRoot = to_bin(maps:get(<<"OfficialStateRoot">>, AoState, <<"0">>)),
+                    _ = save_disk_cursor(OfficialSeq, AoHash, AoRoot, State#state.epoch, <<"RECONCILED">>, State#state.cursor_path),
+                    State#state{
+                        last_committed_seq = OfficialSeq,
+                        last_committed_hash = AoHash,
+                        last_state_root = AoRoot
+                    };
+                true ->
+                    State
+            end;
+        _ ->
+            State
+    end.
 
 do_report_heartbeat(#state{genesis_id = <<>>} = State) ->
     {{ok, skipped_no_genesis}, State#state{heartbeat_acknowledged = true, last_heartbeat_time = erlang:system_time(second)}};
@@ -450,7 +538,10 @@ do_report_heartbeat(State) ->
         <<"ReportHeartbeat">>,
         [],
         Payload,
-        #{sender => State#state.wallet_address}
+        #{
+            sender => State#state.wallet_address,
+            wallet => State#state.wallet_info
+        }
     ),
     Now = erlang:system_time(second),
     case Res of
@@ -464,8 +555,8 @@ do_report_heartbeat(State) ->
             {{error, ErrStatus}, State#state{health = degraded, heartbeat_acknowledged = false, heartbeat_error = ErrStatus, last_heartbeat_time = Now}};
         {error, ErrReason} ->
             {{error, ErrReason}, State#state{health = degraded, heartbeat_acknowledged = false, heartbeat_error = ErrReason, last_heartbeat_time = Now}};
-        _ ->
-            {{ok, dispatched}, State#state{heartbeat_acknowledged = true, last_heartbeat_time = Now}}
+        {ok, _Status, Unrecognized} ->
+            {{error, unverified_heartbeat_response}, State#state{health = degraded, heartbeat_acknowledged = false, heartbeat_error = {unrecognized_resp, Unrecognized}, last_heartbeat_time = Now}}
     end.
 
 %% ============================================================================
@@ -477,17 +568,33 @@ load_disk_cursor(CursorPath) ->
         {ok, Bin} ->
             try json:decode(Bin) of
                 Map when is_map(Map) ->
-                    #{
-                        last_committed_seq => to_int(maps:get(<<"last_committed_seq">>, Map, 0), 0),
-                        last_committed_hash => to_bin(maps:get(<<"last_committed_hash">>, Map, <<>>)),
-                        last_state_root => to_bin(maps:get(<<"last_state_root">>, Map, <<"0">>)),
-                        epoch => to_int(maps:get(<<"epoch">>, Map, 1), 1)
-                    };
-                _ -> #{}
+                    Seq = to_int(maps:get(<<"last_committed_seq">>, Map, -1), -1),
+                    Epoch = to_int(maps:get(<<"epoch">>, Map, 0), 0),
+                    if
+                        Seq >= 0 andalso Epoch >= 1 ->
+                            {ok, #{
+                                last_committed_seq => Seq,
+                                last_committed_hash => to_bin(maps:get(<<"last_committed_hash">>, Map, <<>>)),
+                                last_state_root => to_bin(maps:get(<<"last_state_root">>, Map, <<"0">>)),
+                                epoch => Epoch
+                            }};
+                        true ->
+                            {error, {invalid_cursor_fields, Map}}
+                    end;
+                _ ->
+                    {error, {invalid_cursor_json_structure, CursorPath}}
             catch
-                _:_ -> #{}
+                _:Err -> {error, {json_decode_failed, Err}}
             end;
-        _ -> #{}
+        {error, enoent} ->
+            {ok, #{
+                last_committed_seq => 0,
+                last_committed_hash => <<>>,
+                last_state_root => <<"0">>,
+                epoch => 1
+            }};
+        {error, Reason} ->
+            {error, {file_read_failed, Reason}}
     end.
 
 save_disk_cursor(Seq, Hash, StateRoot, Epoch, Verdict, CursorPath) ->
@@ -570,10 +677,10 @@ resolve_gateway_url(Opts) ->
         undefined ->
             case os:getenv("AO_GATEWAY_URL") of
                 false ->
-                    case os:getenv("ARWEAVE_GATEWAY") of
+                    case os:getenv("AO_MU_URL") of
                         false -> "http://127.0.0.1:8735";
                         "" -> "http://127.0.0.1:8735";
-                        Gw -> Gw
+                        MuUrl -> MuUrl
                     end;
                 "" -> "http://127.0.0.1:8735";
                 Gw -> Gw

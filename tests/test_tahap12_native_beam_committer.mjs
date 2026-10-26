@@ -71,6 +71,10 @@ function runTests() {
     'In-BEAM batch ID and HMAC signature match canonical vector'
   );
   assert(
+    erlOut.includes('PASS: In-BEAM RSA-PSS message signature verified against wallet public key'),
+    'In-BEAM RSA-PSS message signature verified against wallet public key'
+  );
+  assert(
     erlOut.includes('PASS: In-BEAM committer initializes with sequence 0'),
     'In-BEAM committer initializes with sequence 0'
   );
@@ -79,12 +83,28 @@ function runTests() {
     'Durable disk cursor persisted and reloaded from disk atomically'
   );
   assert(
+    erlOut.includes('PASS: Corrupted disk cursor strictly rejected with fail-closed error'),
+    'Corrupted disk cursor strictly rejected with fail-closed error'
+  );
+  assert(
     erlOut.includes('PASS: Native Erlang HTTP client dispatches CommitCheckpoint and parses COMMITTED verdict'),
     'Native Erlang HTTP client dispatches CommitCheckpoint and parses COMMITTED verdict'
   );
   assert(
+    erlOut.includes('PASS: Dispatched message envelope cryptographically signed with RSA-PSS and owner public key'),
+    'Dispatched message envelope cryptographically signed with RSA-PSS and owner public key'
+  );
+  assert(
+    erlOut.includes('PASS: Divergent official hash strictly rejected by arbitrator verdict parser'),
+    'Divergent official hash strictly rejected by arbitrator verdict parser'
+  );
+  assert(
     erlOut.includes('PASS: Genesis hash divergence triggers fail-closed error in Erlang committer'),
     'Genesis hash divergence triggers fail-closed error in Erlang committer'
+  );
+  assert(
+    erlOut.includes('PASS: Missing genesis hash or connection failure triggers strict fail-closed rejection'),
+    'Missing genesis hash or connection failure triggers strict fail-closed rejection'
   );
   assert(
     erlOut.includes('PASS: In-BEAM committer status reporting and health state machine verified'),

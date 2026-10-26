@@ -30,8 +30,8 @@ mkdir -p "$NODE_SD_RUN_DIR"
 cd "$NODE_SD_RUN_DIR"
 
 if [ ! -f "$DB_DIR/secrets/wallet_su.json" ]; then
-  echo "[sd-node] Generating fresh SU wallet..."
-  (cd "$DB_DIR" && node "$DB_DIR/scripts/gen-wallet-su.mjs")
+  echo "[sd-node] Generating fresh SU wallet via native Erlang keygen..."
+  (cd "$DB_DIR" && escript "$DB_DIR/scripts/gen_wallet.escript" "$DB_DIR/secrets/wallet_su.json" "$DB_DIR/secrets/address_su.txt")
 fi
 
 SU_PORT="${SU_PORT:-8735}"
@@ -39,8 +39,7 @@ SU_PORT="${SU_PORT:-8735}"
 start_committer_if_enabled() {
   if [ "${HYDB_COMMITTER_ENABLED:-false}" = "true" ]; then
     echo "[sd-node] AO Committer is enabled natively inside HyperBEAM (sd_committer)."
-    BEAM_PID="$("$HB_SD_REL/bin/hb" pid 2>/dev/null || echo "$$")"
-    echo "${BEAM_PID:-$$}" > "$NODE_SD_RUN_DIR/committer.pid"
+    echo "in_beam_worker" > "$NODE_SD_RUN_DIR/committer.pid"
   fi
 }
 

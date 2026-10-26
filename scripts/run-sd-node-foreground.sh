@@ -32,49 +32,40 @@ while true; do
     exit 1
   fi
 
-  # B. Check Colocated Committer Worker (if this node is the designated committer owner)
+  # B. Check Colocated In-BEAM Committer Worker (if this node is the designated committer owner)
   if [ "${HYDB_COMMITTER_ENABLED:-false}" = "true" ]; then
-    PID_FILE="$NODE_SD_RUN_DIR/committer.pid"
-    if [ ! -f "$PID_FILE" ]; then
-      echo "[sd-foreground] FATAL: HYDB_COMMITTER_ENABLED=true but committer PID file ($PID_FILE) is missing!" >&2
-      "$SCRIPT_DIR/stop-sd-node.sh" || true
-      exit 1
+    STATUS_FILE="${HYDB_COMMITTER_CURSOR_PATH:-$DB_DIR/data/committer/committer_cursor.json}"
+    STATUS_DIR="$(dirname "$STATUS_FILE")"
+    HEARTBEAT_JSON="$STATUS_DIR/committer_status.json"
+
+    # 1. Check for fatal fail-closed condition (exit code 78 / halted)
+    IS_FAIL_CLOSED=false
+    if [ -f "$HEARTBEAT_JSON" ]; then
+      if grep -q '"health": "failed_closed"' "$HEARTBEAT_JSON" 2>/dev/null || \
+         grep -q '"status": "halted"' "$HEARTBEAT_JSON" 2>/dev/null; then
+        IS_FAIL_CLOSED=true
+      fi
     fi
 
-    CPID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if [ -z "$CPID" ] || ! kill -0 "$CPID" 2>/dev/null; then
-      echo "[sd-foreground] FATAL: Committer worker process (PID ${CPID:-unknown}) has terminated!" >&2
-
-      # Check if committer died due to fatal fail-closed condition (exit code 78)
-      STATUS_FILE="${HYDB_COMMITTER_CURSOR_PATH:-$DB_DIR/data/committer/committer_cursor.json}"
-      STATUS_DIR="$(dirname "$STATUS_FILE")"
-      HEARTBEAT_JSON="$STATUS_DIR/committer_status.json"
-
-      IS_FAIL_CLOSED=false
-      if [ -f "$HEARTBEAT_JSON" ]; then
-        if grep -q '"health": "failed_closed"' "$HEARTBEAT_JSON" 2>/dev/null || \
-           grep -q '"status": "halted"' "$HEARTBEAT_JSON" 2>/dev/null; then
-          IS_FAIL_CLOSED=true
-        fi
-      fi
-
+    if [ "$IS_FAIL_CLOSED" = "true" ]; then
+      echo "[sd-foreground] FATAL: Committer exited in fatal fail-closed state (code 78)." >&2
+      echo "[sd-foreground] Halting container execution to prevent crash loop. Container status is now halted/unhealthy." >&2
       "$SCRIPT_DIR/stop-sd-node.sh" || true
+      echo "fail_closed_fatal" > "$NODE_SD_RUN_DIR/CONTAINER_HALTED"
+      echo "{\"status\":\"halted\",\"reason\":\"fatal_fail_closed_exit_78\",\"timestamp\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}" > "$NODE_SD_RUN_DIR/halted.json"
 
-      if [ "$IS_FAIL_CLOSED" = "true" ]; then
-        echo "[sd-foreground] FATAL: Committer exited in fatal fail-closed state (code 78)." >&2
-        echo "[sd-foreground] Halting container execution to prevent crash loop. Container status is now halted/unhealthy." >&2
-        echo "fail_closed_fatal" > "$NODE_SD_RUN_DIR/CONTAINER_HALTED"
-        echo "{\"status\":\"halted\",\"reason\":\"fatal_fail_closed_exit_78\",\"timestamp\":\"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}" > "$NODE_SD_RUN_DIR/halted.json"
+      while true; do
+        sleep 3600 &
+        wait $!
+      done
+    fi
 
-        # Hold container alive in halted/unhealthy state to prevent Docker on-failure restart loop
-        while true; do
-          sleep 3600 &
-          wait $!
-        done
-      else
-        echo "[sd-foreground] Committer exited unexpectedly. Exiting container with error code 1." >&2
-        exit 1
-      fi
+    # 2. Check if in-BEAM committer GenServer is still alive and responsive via status query
+    SD_STATUS="$(curl -sf --max-time 2 -H 'Accept: application/json' "http://127.0.0.1:$SU_PORT/~sd@1.0/status" 2>/dev/null || echo "{}")"
+    if echo "$SD_STATUS" | grep -q '"committer"' && echo "$SD_STATUS" | grep -q '"status":"disabled"'; then
+      echo "[sd-foreground] FATAL: In-BEAM committer GenServer died or is disabled while HYDB_COMMITTER_ENABLED=true!" >&2
+      "$SCRIPT_DIR/stop-sd-node.sh" || true
+      exit 1
     fi
   fi
 

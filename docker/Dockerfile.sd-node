@@ -17,8 +17,13 @@ WORKDIR /app
 COPY . .
 
 # Set execution permissions for distribution scripts
-RUN chmod +x ./scripts/*.sh 2>/dev/null || true
+RUN chmod +x ./scripts/*.sh ./scripts/*.escript 2>/dev/null || true
 
+# Pre-compile Erlang runtime and native committer modules into library path
+RUN mkdir -p /app/sd/out/ebin && \
+    erlc -I /app/sd/src -o /app/sd/out/ebin /app/sd/src/*.erl
+
+ENV ERL_LIBS="/app/sd/out/ebin:${ERL_LIBS:-}"
 ENV HYDB_PROFILE=production
 
 CMD ["./scripts/run-sd-node-foreground.sh"]

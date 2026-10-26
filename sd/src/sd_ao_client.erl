@@ -6,13 +6,16 @@
 %% Responsibilities:
 %% 1. Pure Erlang HTTP communication with AO Scheduler Unit (SU) & Gateways.
 %% 2. Native Arweave JWK parsing & cryptographic address calculation.
-%% 3. Formatting of AO Messages (Tags, Action, Variant, Data).
-%% 4. Dryrun / query evaluation against AO Genesis & Arbitrator processes.
+%% 3. Cryptographic RSA-PSS SHA-256 message signing & verification (ANS-104 compliant).
+%% 4. Formatting of AO Messages (Tags, Action, Variant, Data, Owner, Signature).
+%% 5. Dryrun / query evaluation against AO Genesis & Arbitrator processes.
 %% ============================================================================
 
 -export([load_wallet/1, b64url_encode/1, b64url_decode/1, get_arweave_address/1]).
+-export([sign_payload/2, verify_payload_sig/3]).
 -export([send_message/5, send_message/6, query_state/4, query_state/5]).
 -export([compute_batch_id/1, compute_batch_sig/2, derive_cluster_secret/1]).
+-export([format_ao_url/3]).
 
 %% ----------------------------------------------------------------------------
 %% Wallet & Cryptographic Utilities
@@ -24,8 +27,12 @@ load_wallet(WalletPath) ->
             try json:decode(Bin) of
                 Map when is_map(Map) ->
                     Addr = get_arweave_address(Map),
+                    OwnerB64 = maps:get(<<"n">>, Map, maps:get(n, Map, <<>>)),
+                    PrivKey = extract_rsa_privkey(Map),
                     {ok, #{
                         address => Addr,
+                        owner => to_bin(OwnerB64),
+                        privkey => PrivKey,
                         jwk => Map,
                         raw => Bin
                     }};
@@ -35,6 +42,21 @@ load_wallet(WalletPath) ->
                 _:Err -> {error, {json_decode_failed, Err}}
             end;
         Err -> Err
+    end.
+
+extract_rsa_privkey(Map) ->
+    try
+        Keys = [<<"e">>, <<"n">>, <<"d">>, <<"p">>, <<"q">>, <<"dp">>, <<"dq">>, <<"qi">>],
+        AltKeys = [e, n, d, p, q, dp, dq, qi],
+        Vals = lists:map(fun({K1, K2}) ->
+            b64url_decode(maps:get(K1, Map, maps:get(K2, Map, <<>>)))
+        end, lists:zip(Keys, AltKeys)),
+        case lists:all(fun(B) -> is_binary(B) andalso byte_size(B) > 0 end, Vals) of
+            true -> Vals;
+            false -> undefined
+        end
+    catch
+        _:_ -> undefined
     end.
 
 b64url_decode(Bin) when is_binary(Bin) ->
@@ -61,13 +83,37 @@ get_arweave_address(#{n := N_b64}) ->
 get_arweave_address(_) ->
     <<"unknown_address">>.
 
+sign_payload(PayloadBin, PrivKey) when is_binary(PayloadBin), is_list(PrivKey) ->
+    Digest = crypto:hash(sha256, PayloadBin),
+    Opts = [{rsa_padding, rsa_pkcs1_pss_padding}, {rsa_pss_saltlen, 32}],
+    Sig = crypto:sign(rsa, sha256, Digest, PrivKey, Opts),
+    b64url_encode(Sig).
+
+verify_payload_sig(PayloadBin, SigB64, OwnerB64) ->
+    try
+        Digest = crypto:hash(sha256, PayloadBin),
+        Sig = b64url_decode(SigB64),
+        Modulus = b64url_decode(OwnerB64),
+        E = <<1, 0, 1>>, %% standard 65537 public exponent
+        Opts = [{rsa_padding, rsa_pkcs1_pss_padding}, {rsa_pss_saltlen, 32}],
+        crypto:verify(rsa, sha256, Digest, Sig, [E, Modulus], Opts)
+    catch
+        _:_ -> false
+    end.
+
 derive_cluster_secret(WalletPath) ->
     case file:read_file(WalletPath) of
         {ok, Bytes} -> crypto:hash(sha256, Bytes);
         _ ->
             case os:getenv("HYDB_CLUSTER_SECRET") of
-                false -> crypto:hash(sha256, <<"hydb_default_cluster_secret">>);
-                Sec -> crypto:hash(sha256, list_to_binary(Sec))
+                false ->
+                    error({missing_cluster_secret, "HYDB_CLUSTER_SECRET must be configured in environment or wallet provided"});
+                "" ->
+                    error({missing_cluster_secret, "HYDB_CLUSTER_SECRET must not be empty"});
+                Sec when length(Sec) >= 16 ->
+                    crypto:hash(sha256, list_to_binary(Sec));
+                _ ->
+                    error({invalid_cluster_secret, "HYDB_CLUSTER_SECRET must be at least 16 bytes"})
             end
     end.
 
@@ -124,6 +170,23 @@ send_message(GatewayUrl, ProcessId, Action, Tags, PayloadMap, Opts) ->
         true -> <<>>
     end,
     Sender = maps:get(sender, Opts, maps:get(<<"From">>, Opts, <<"SU_NODE_1">>)),
+    WalletInfo = maps:get(wallet, Opts, #{}),
+    Owner = maps:get(owner, WalletInfo, maps:get(<<"Owner">>, Opts, <<>>)),
+    PrivKey = maps:get(privkey, WalletInfo, maps:get(privkey, Opts, undefined)),
+
+    %% Cryptographic message payload for signing
+    CanonicalToSign = list_to_binary([
+        to_bin(ProcessId), <<"|">>,
+        to_bin(Action), <<"|">>,
+        to_bin(Sender), <<"|">>,
+        DataBin
+    ]),
+
+    SigB64 = case PrivKey of
+        undefined -> <<>>;
+        PK when is_list(PK) -> sign_payload(CanonicalToSign, PK)
+    end,
+
     BaseTags = [
         #{<<"name">> => <<"Data-Protocol">>, <<"value">> => <<"ao">>},
         #{<<"name">> => <<"Variant">>, <<"value">> => <<"ao.TN.1">>},
@@ -137,6 +200,9 @@ send_message(GatewayUrl, ProcessId, Action, Tags, PayloadMap, Opts) ->
         <<"Tags">> => AllTags,
         <<"Data">> => DataBin,
         <<"From">> => to_bin(Sender),
+        <<"Owner">> => to_bin(Owner),
+        <<"Signature">> => to_bin(SigB64),
+        <<"Signature-Type">> => 1,
         <<"Timestamp">> => erlang:system_time(millisecond)
     },
     EnvelopeJson = iolist_to_binary(json:encode(Envelope)),
@@ -178,8 +244,18 @@ format_ao_url(GatewayUrl, ProcessId, Action) ->
     CleanProc = to_list(ProcessId),
     CleanAction = to_list(Action),
     case CleanGw of
-        "" -> "http://127.0.0.1:8735/ao/" ++ CleanProc ++ "/" ++ CleanAction;
-        Gw -> Gw ++ "/message"
+        "" ->
+            "http://127.0.0.1:8735/ao/" ++ CleanProc ++ "/" ++ CleanAction;
+        Gw ->
+            case string:find(Gw, "/ao/") of
+                nomatch ->
+                    case string:find(Gw, "/message") of
+                        nomatch -> Gw ++ "/message";
+                        _ -> Gw
+                    end;
+                _ ->
+                    Gw
+            end
     end.
 
 to_bin(V) when is_binary(V) -> V;

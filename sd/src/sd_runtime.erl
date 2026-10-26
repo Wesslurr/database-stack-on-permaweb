@@ -178,8 +178,11 @@ init([]) ->
             SubHost = get_hot_host(),
             SubPort = get_hot_port(),
             SubPid = spawn_link(fun() -> subscriber_loop(?SERVER, SubHost, SubPort) end),
-            maybe_start_committer(),
-            {ok, #state{sub_pid = SubPid, hot_host = SubHost, hot_port = SubPort}};
+            case maybe_start_committer() of
+                ok -> {ok, #state{sub_pid = SubPid, hot_host = SubHost, hot_port = SubPort}};
+                {ok, _} -> {ok, #state{sub_pid = SubPid, hot_host = SubHost, hot_port = SubPort}};
+                {error, CommErr} -> {stop, {committer_startup_failed, CommErr}}
+            end;
         {error, Reason} ->
             {stop, {security_configuration_error, Reason}};
         OtherErr ->
@@ -189,7 +192,13 @@ init([]) ->
 maybe_start_committer() ->
     case os:getenv("HYDB_COMMITTER_ENABLED") of
         "true" ->
-            catch sd_committer:ensure_started();
+            case sd_committer:start_link() of
+                {ok, Pid} -> {ok, Pid};
+                {error, {already_started, Pid}} -> {ok, Pid};
+                {error, Reason} ->
+                    io:format(standard_error, "[sd_runtime] FATAL: Failed to start native committer: ~p~n", [Reason]),
+                    {error, {committer_startup_failed, Reason}}
+            end;
         _ -> ok
     end.
 
@@ -623,8 +632,29 @@ get_status_map() ->
         _ -> false
     end,
     Repaired = lookup_val(wal_truncated_repaired, false),
-    Health = case WalCorrupted of true -> <<"degraded">>; false -> <<"healthy">> end,
-    Ready = not WalCorrupted,
+    CommitterStatus = case os:getenv("HYDB_COMMITTER_ENABLED") of
+        "true" ->
+            case whereis(sd_committer) of
+                undefined ->
+                    #{<<"status">> => <<"crashed">>, <<"health">> => <<"failed_closed">>};
+                _ ->
+                    case catch sd_committer:get_status() of
+                        {'EXIT', _} -> #{<<"status">> => <<"unresponsive">>, <<"health">> => <<"failed_closed">>};
+                        StatusMap when is_map(StatusMap) -> StatusMap;
+                        _ -> #{<<"status">> => <<"unknown">>, <<"health">> => <<"degraded">>}
+                    end
+            end;
+        _ ->
+            #{<<"status">> => <<"disabled">>, <<"health">> => <<"healthy">>}
+    end,
+    CommitterHealth = maps:get(<<"health">>, CommitterStatus, <<"healthy">>),
+    Health = if
+        WalCorrupted -> <<"degraded">>;
+        CommitterHealth =:= <<"failed_closed">> -> <<"failed_closed">>;
+        CommitterHealth =:= <<"degraded">> -> <<"degraded">>;
+        true -> <<"healthy">>
+    end,
+    Ready = (not WalCorrupted) andalso (CommitterHealth =/= <<"failed_closed">>),
     NodeId = try get_sd_node_id() catch _:_ -> <<"hb_su">> end,
     #{
         <<"ok">> => true,
@@ -649,10 +679,7 @@ get_status_map() ->
         <<"hash_rejections">> => HashRej,
         <<"degraded_rejections">> => DegradedRej,
         <<"wal_file">> => list_to_binary(wal_path()),
-        <<"committer">> => case whereis(sd_committer) of
-            undefined -> #{<<"status">> => <<"disabled">>};
-            _ -> (catch sd_committer:get_status())
-        end
+        <<"committer">> => CommitterStatus
     }.
 
 %% HyperBEAM Request Handlers for ~sd@1.0
