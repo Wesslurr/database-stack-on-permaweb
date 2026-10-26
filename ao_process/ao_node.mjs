@@ -67,6 +67,7 @@ export class WasmAoProcess {
         ]
       }
     };
+    this.executionQueue = Promise.resolve();
     this.readyPromise = this._initProcess();
   }
 
@@ -144,6 +145,20 @@ export class WasmAoProcess {
       await this.readyPromise;
     }
 
+    // Strictly serialize all message evaluations per process in FIFO order
+    return new Promise((resolve, reject) => {
+      this.executionQueue = this.executionQueue.then(async () => {
+        try {
+          const res = await this._executeMessage(msg, isDryRun);
+          resolve(res);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+  }
+
+  async _executeMessage(msg, isDryRun) {
     const rawTags = Array.isArray(msg.Tags) ? msg.Tags : [];
     const tags = rawTags.map((t) => ({
       name: t.name || t[0] || '',
@@ -206,7 +221,7 @@ export class WasmAoProcess {
       Output: evalRes.Output || {},
       Messages: normalizedMessages,
       Spawns: evalRes.Spawns || [],
-      Error: evalRes.Error
+      Error: evalRes.Error || null
     };
   }
 }
@@ -273,7 +288,8 @@ export async function startAoNode(options = {}) {
         res.end(JSON.stringify({
           Messages: evalRes.Messages || [],
           Output: evalRes.Output || {},
-          Spawns: evalRes.Spawns || []
+          Spawns: evalRes.Spawns || [],
+          Error: evalRes.Error || null
         }));
         return;
       }
@@ -286,7 +302,8 @@ export async function startAoNode(options = {}) {
         res.end(JSON.stringify({
           Messages: evalRes?.Messages || [],
           Output: evalRes?.Output || {},
-          Spawns: evalRes?.Spawns || []
+          Spawns: evalRes?.Spawns || [],
+          Error: evalRes?.Error || null
         }));
         return;
       }
@@ -320,8 +337,14 @@ export async function startAoNode(options = {}) {
           msgId = item.id;
         }
 
-        // B. Standard JSON envelope (for test runners / internal clients)
+        // B. Standard JSON envelope (for local test adapters only)
         if (!target) {
+          if (options.strictAns104Only || (host !== '127.0.0.1' && host !== 'localhost')) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthenticated JSON rejected: AO Message Unit requires cryptographically signed ANS-104 binary DataItem' }));
+            return;
+          }
+          res.setHeader('X-AO-Auth-Mode', 'unsigned-json-test-adapter');
           try {
             const json = JSON.parse(rawBuf.toString('utf8'));
             target = json.Target || json.target || json.process;
@@ -332,6 +355,8 @@ export async function startAoNode(options = {}) {
             owner = json.Owner || json.owner || from;
             msgId = json.Id || json.id || ('msg_' + crypto.randomUUID());
           } catch {}
+        } else {
+          res.setHeader('X-AO-Auth-Mode', 'ans104-cryptographic-verified');
         }
 
         if (!msgId) msgId = 'msg_' + crypto.randomUUID();
