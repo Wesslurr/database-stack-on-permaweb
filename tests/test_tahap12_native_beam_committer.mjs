@@ -36,6 +36,7 @@ import {
   buildGenesisContractLua,
   buildArbitratorContractLua
 } from '../sdk/hydb_sdk.mjs';
+import { startAoNode } from '../ao_process/ao_node.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '..');
@@ -106,151 +107,6 @@ function buildValidEvents(startSeq, count, prevHashInit, prevRootInit) {
     prevHash = hash;
   }
   return events;
-}
-
-class LiveStackLuaRuntime {
-  constructor(genesisId, arbitratorId, genesisLua, arbitratorLua) {
-    this.genesisId = genesisId;
-    this.arbitratorId = arbitratorId;
-    this.genesisLua = genesisLua;
-    this.arbitratorLua = arbitratorLua;
-    this.genesisMessages = [];
-    this.arbitratorMessages = [];
-  }
-
-  async evaluate(msg) {
-    const target = msg.Target || msg.process || '';
-    const isGenesis = target === this.genesisId ||
-      ['GetGenesisConfig', 'RegisterNode', 'ReportHeartbeat', 'GetStackStatus', 'SetArbitratorProcess', 'UpdateStackConfig'].includes(msg.Action);
-
-    if (isGenesis) {
-      this.genesisMessages.push(msg);
-      const res = this.runLua(this.genesisLua, this.genesisMessages, 'genesis');
-      if (res && res.Messages && Array.isArray(res.Messages)) {
-        for (const outMsg of res.Messages) {
-          if (outMsg && (outMsg.Target === this.arbitratorId || outMsg.process === this.arbitratorId)) {
-            this.arbitratorMessages.push({
-              From: this.genesisId,
-              Target: this.arbitratorId,
-              Action: outMsg.Action,
-              Tags: outMsg.Tags || [{ name: 'Action', value: outMsg.Action }],
-              Data: outMsg.Data,
-              Timestamp: Date.now()
-            });
-            this.runLua(this.arbitratorLua, this.arbitratorMessages, 'arbitrator');
-          }
-        }
-      }
-      return res;
-    } else {
-      this.arbitratorMessages.push(msg);
-      return this.runLua(this.arbitratorLua, this.arbitratorMessages, 'arbitrator');
-    }
-  }
-
-  runLua(contractSource, historyMsgs, label) {
-    const tmpLuaPath = join(TEST_TMP_DIR, `run_${label}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.lua`);
-    const toLuaVal = (v) => {
-      if (v === null || v === undefined) return 'nil';
-      if (typeof v === 'boolean') return v ? 'true' : 'false';
-      if (typeof v === 'number') return String(v);
-      if (typeof v === 'string') return JSON.stringify(v);
-      if (Array.isArray(v)) return '{ ' + v.map(toLuaVal).join(', ') + ' }';
-      if (typeof v === 'object') {
-        const entries = Object.entries(v).map(([k, val]) => `[${JSON.stringify(k)}] = ${toLuaVal(val)}`);
-        return '{ ' + entries.join(', ') + ' }';
-      }
-      return 'nil';
-    };
-
-    const parsedMsgs = historyMsgs.map((m) => {
-      let decodedData = {};
-      if (typeof m.Data === 'string' && m.Data.trim().startsWith('{')) {
-        try { decodedData = JSON.parse(m.Data); } catch {}
-      } else if (m.Data && typeof m.Data === 'object') {
-        decodedData = m.Data;
-      }
-      return {
-        From: m.From || m.sender || 'SU_NODE_1',
-        Target: m.Target || m.process || '',
-        Action: m.Action || (m.Tags?.find((t) => (t.name || t[1]) === 'Action')?.[1] || m.Tags?.find((t) => (t.name || t[1]) === 'Action')?.value) || '',
-        Tags: m.Tags || [],
-        Timestamp: m.Timestamp || 1000,
-        _decodedData: decodedData
-      };
-    });
-
-    const script = `
-      package.path = "${ROOT_DIR.replace(/\\/g, '/')}/ao_process/?.lua;" .. package.path
-
-      local decoded_Registry = {}
-      package.loaded["json"] = {
-        decode = function(s)
-          return decoded_Registry[s] or {}
-        end,
-        encode = function(t)
-          local function serialize(o)
-            if type(o) == "number" then return tostring(o)
-            elseif type(o) == "boolean" then return tostring(o)
-            elseif type(o) == "string" then return string.format("%q", o)
-            elseif type(o) == "table" then
-              local is_array = #o > 0
-              local parts = {}
-              if is_array then
-                for _, v in ipairs(o) do table.insert(parts, serialize(v)) end
-                return "[" .. table.concat(parts, ",") .. "]"
-              else
-                for k, v in pairs(o) do
-                  table.insert(parts, string.format("%q", tostring(k)) .. ":" .. serialize(v))
-                end
-                return "{" .. table.concat(parts, ",") .. "}"
-              end
-            else return "null" end
-          end
-          return serialize(t)
-        end
-      }
-
-      -- Load Contract Script
-      local contract = (function()
-        ${contractSource}
-      end)()
-
-      local msgs = ${toLuaVal(parsedMsgs)}
-      local last_res = nil
-      for idx, m in ipairs(msgs) do
-        local key = "DATA_" .. tostring(idx)
-        decoded_Registry[key] = m._decodedData
-        m.Data = key
-        last_res = handle_message(m)
-      end
-
-      local outbox = (last_res and last_res.responses) or ao._outbox or {}
-      local last_msg = outbox[#outbox] or {}
-      local output = {
-        ok = true,
-        handled = last_res and last_res.handled,
-        Messages = outbox,
-        responses = outbox,
-        last = last_msg,
-        official_seq = OfficialSeq,
-        current_epoch = CurrentEpoch
-      }
-
-      io.write(package.loaded["json"].encode(output))
-    `;
-
-    try {
-      writeFileSync(tmpLuaPath, script, 'utf8');
-      const res = spawnSync(LUA_BIN, [tmpLuaPath], { cwd: ROOT_DIR, encoding: 'utf8' });
-      if (res.error) throw new Error(`Lua spawn failed: ${res.error.message}`);
-      if (res.status !== 0) throw new Error(`Lua execution failed (${res.status}): ${res.stderr || res.stdout}`);
-      const raw = (res.stdout || '').trim();
-      return JSON.parse(raw);
-    } finally {
-      if (existsSync(tmpLuaPath)) unlinkSync(tmpLuaPath);
-    }
-  }
 }
 
 let passed = 0;
@@ -479,7 +335,7 @@ async function runTests() {
   const matchCrashedOut = execFileSync('bash', ['-c', matchCrashedCmd], { encoding: 'utf8' }).trim();
   assert(matchCrashedOut === 'DEAD_COMMITTER_DETECTED', 'Supervisor detects dead/crashed in-BEAM committer GenServer and halts');
 
-  console.log('\n[Suite 4] Real Local AO Runtime Integration (LiveStackLuaRuntime MU -> CU & Advanced Duplicate Handling):');
+  console.log('\n[Suite 4] Authentic AO MU & CU Node Integration (Stateful AOS Lua Engine & In-BEAM Committer):');
 
   const suAddress = readFileSync(join(ROOT_DIR, 'secrets/address_su.txt'), 'utf8').trim();
   const adminWallet = JSON.parse(readFileSync(join(ROOT_DIR, 'secrets/wallet.json'), 'utf8'));
@@ -531,106 +387,14 @@ async function runTests() {
     genesisProcessId: mockGenesisId
   });
 
-  const liveRuntime = new LiveStackLuaRuntime(mockGenesisId, mockArbitratorId, genesisLua, arbitratorLua);
-  const pendingResults = new Map();
-
   const LOCAL_AO_PORT = 8996;
-  const aoServer = http.createServer(async (req, res) => {
-    try {
-      const urlObj = new URL(req.url, `http://127.0.0.1:${LOCAL_AO_PORT}`);
-      let rawBuf = Buffer.alloc(0);
-      if (req.method === 'POST' || req.method === 'PUT') {
-        const chunks = [];
-        for await (const chunk of req) chunks.push(chunk);
-        rawBuf = Buffer.concat(chunks);
-      }
-
-      if (req.method === 'POST' && urlObj.pathname.endsWith('/dry-run')) {
-        let json = {};
-        try { json = JSON.parse(rawBuf.toString('utf8')); } catch {}
-        const target = json.Target || json.target || urlObj.searchParams.get('process-id') || '';
-        const action = json.Action || (json.Tags || []).find(t => (t.name || t[0]) === 'Action')?.[1] || (json.Tags || []).find(t => (t.name || t[0]) === 'Action')?.value || '';
-        const evalRes = await liveRuntime.evaluate({
-          From: json.From || json.sender || suAddress,
-          Target: target,
-          Action: action,
-          Tags: json.Tags || [],
-          Data: json.Data || '',
-          Timestamp: Date.now()
-        });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ Messages: evalRes?.Messages || evalRes?.responses || [] }));
-        return;
-      }
-
-      if (req.method === 'GET' && urlObj.pathname.startsWith('/result/')) {
-        const msgId = urlObj.pathname.replace('/result/', '');
-        const evalRes = pendingResults.get(msgId);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          Messages: evalRes?.Messages || evalRes?.responses || [],
-          Output: evalRes?.Output || {},
-          Spawns: []
-        }));
-        return;
-      }
-
-      if (req.method === 'POST' && (urlObj.pathname.endsWith('/message') || urlObj.pathname === '/message' || urlObj.pathname.includes('/ao/'))) {
-        let target = '';
-        let action = '';
-        let from = suAddress;
-        let data = '';
-        let tags = [];
-
-        if (rawBuf.length > 2 && (rawBuf[0] === 1 || rawBuf[0] === 0)) {
-          try {
-            const DataItemCtor = arbundles.DataItem || arbundles.default?.DataItem;
-            const item = new DataItemCtor(rawBuf);
-            target = item.target;
-            action = item.tags.find(t => t.name === 'Action')?.value || '';
-            tags = item.tags.map(t => ({ name: t.name, value: t.value }));
-            data = item.rawData.toString('utf8');
-            from = await arweaveInstance.wallets.ownerToAddress(item.owner);
-          } catch (e) {
-            console.error('[local-ao-server] ANS-104 decode error:', e);
-          }
-        }
-        if (!target) {
-          try {
-            const json = JSON.parse(rawBuf.toString('utf8'));
-            target = json.Target || json.target || json.process;
-            action = json.Action || json.action;
-            tags = json.Tags || json.tags || [];
-            data = json.Data || json.data;
-            from = json.From || json.from || json.sender || suAddress;
-          } catch (e) {}
-        }
-
-        const msgId = 'msg_' + crypto.randomUUID();
-        const evalRes = await liveRuntime.evaluate({
-          From: from,
-          Target: target,
-          Action: action,
-          Tags: tags,
-          Data: data,
-          Timestamp: Date.now()
-        });
-        pendingResults.set(msgId, evalRes);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ id: msgId, messageId: msgId }));
-        return;
-      }
-
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found' }));
-    } catch (err) {
-      console.error('[local-ao-server] Request error:', err);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
+  const aoNode = await startAoNode({
+    port: LOCAL_AO_PORT,
+    processes: {
+      [mockGenesisId]: genesisLua,
+      [mockArbitratorId]: arbitratorLua
     }
   });
-
-  await new Promise((resolve) => aoServer.listen(LOCAL_AO_PORT, '127.0.0.1', resolve));
 
   try {
     // Generate valid events for Batch 1 (seq 1..3)
@@ -709,7 +473,7 @@ async function runTests() {
       proposed_state_root: b2PropRoot,
       events: b2Events
     };
-    const b2Res = await liveRuntime.evaluate({
+    const b2Res = await aoNode.processes.get(mockArbitratorId).send({
       From: suAddress,
       Target: mockArbitratorId,
       Action: 'CommitCheckpoint',
@@ -866,7 +630,7 @@ async function runTests() {
     const walCursorFile = join(ROOT_DIR, 'data/test_suite4_live_cursor.json');
     if (existsSync(walFile)) unlinkSync(walFile);
     if (existsSync(walCursorFile)) unlinkSync(walCursorFile);
-    await new Promise((resolve) => aoServer.close(resolve));
+    if (aoNode) await aoNode.stop();
   }
 
   console.log('\n========================================================================');

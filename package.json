@@ -9,6 +9,7 @@
     "build:wasm": "cd hydb && cargo build --target wasm32-unknown-unknown --release && mkdir -p out && cp target/wasm32-unknown-unknown/release/hydb.wasm out/hydb.wasm",
     "verify:vectors": "node spec/generate_golden_vectors.mjs --check",
     "arlocal": "node scripts/start-arlocal.mjs",
+    "ao:node": "node ao_process/ao_node.mjs",
     "committer": "node ao_process/committer.mjs",
     "committer:live": "HYDB_PROFILE=production USE_AO_CONNECT=true node ao_process/committer.mjs",
     "deploy:ao": "node ao_process/deploy_ao_process.mjs",
