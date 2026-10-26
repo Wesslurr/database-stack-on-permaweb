@@ -19,7 +19,7 @@
  *    - Health state machine (`healthy` -> `degraded`).
  */
 
-import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
@@ -351,6 +351,14 @@ async function runTests() {
   assert(
     erlOut.includes('PASS: Arbitrator sequence advance with missing hash/root strictly halts fail-closed'),
     'Arbitrator sequence advance with missing hash/root strictly halts fail-closed'
+  );
+  assert(
+    erlOut.includes('PASS: Lagging local WAL strictly halts fail-closed on advanced Arbitrator tip'),
+    'Lagging local WAL strictly halts fail-closed on advanced Arbitrator tip'
+  );
+  assert(
+    erlOut.includes('PASS: Disk cursor strictly preserved without unapplied sequence advance'),
+    'Disk cursor strictly preserved without unapplied sequence advance'
   );
   assert(
     erlOut.includes('PASS: Incomplete verdict missing official hash strictly rejected'),
@@ -712,88 +720,152 @@ async function runTests() {
     const b2Msg = b2Res?.Messages?.[b2Res.Messages.length - 1];
     assert(b2Msg?.Status === 'COMMITTED' && b2Msg?.OfficialSeq === '6', 'Arbitrator on-chain tip advanced to sequence 6');
 
-    // Step 4E: Retry older Batch 1 (seq 1..3) from In-BEAM committer against advanced tip
-    const erlRetryScript = `
+    // Step 4E: Full in-BEAM committer cycle with lagging local WAL (local seq 3 vs Arbitrator tip 6)
+    const walFile = join(ROOT_DIR, 'data/test_suite4_wal.log');
+    const walCursorFile = join(ROOT_DIR, 'data/test_suite4_live_cursor.json');
+    if (existsSync(walFile)) unlinkSync(walFile);
+    if (existsSync(walCursorFile)) unlinkSync(walCursorFile);
+
+    // Node only has WAL records up to sequence 3
+    const walLines1 = b1Events.map((e) => JSON.stringify(e)).join('\n') + '\n';
+    writeFileSync(walFile, walLines1, 'utf8');
+
+    // Initial cursor starts at sequence 0
+    const initialCursorJson = JSON.stringify({
+      last_committed_seq: 0,
+      last_committed_hash: '0000000000000000000000000000000000000000000000000000000000000000',
+      last_state_root: '0',
+      epoch: 1,
+      verdict: 'GENESIS'
+    });
+    writeFileSync(walCursorFile, initialCursorJson, 'utf8');
+
+    const erlLagScript = `
       _ = application:ensure_all_started(inets),
       _ = application:ensure_all_started(ssl),
-      {ok, WI} = sd_ao_client:load_wallet("secrets/wallet_su.json"),
+      os:putenv("HYDB_PROFILE", "test"),
+      os:putenv("HYDB_WAL_PATH", "${walFile.replace(/\\/g, '/')}"),
+      _ = sd_runtime:ensure_started(),
+      _ = sd_runtime:simulate_restart_from_wal(),
+      InitialTick = sd_runtime:get_current_tick(),
+      io:format("INITIAL_LOCAL_WAL_TICK:~p~n", [InitialTick]),
+
       GwUrl = "http://127.0.0.1:${LOCAL_AO_PORT}",
       CuUrl = "http://127.0.0.1:${LOCAL_AO_PORT}",
       ArbId = <<"${mockArbitratorId}">>,
+      CursorPath = "${walCursorFile.replace(/\\/g, '/')}",
 
-      Batch1 = #{
-          <<"contract_version">> => <<"hydb.core@1.0">>,
-          <<"epoch">> => 1,
-          <<"from_seq">> => 1,
-          <<"to_seq">> => 3,
-          <<"prev_hash">> => <<"0000000000000000000000000000000000000000000000000000000000000000">>,
-          <<"proposed_hash">> => <<"${b1PropHash}">>,
-          <<"proposed_state_root">> => <<"${b1PropRoot}">>,
-          <<"events">> => json:decode(<<"${JSON.stringify(b1Events).replace(/\\/g, '\\\\').replace(/"/g, '\\"') }">>)
-      },
-      BatchId1 = sd_ao_client:compute_batch_id(Batch1),
-      FinalBatch1 = Batch1#{<<"batch_id">> => BatchId1},
-      Tags1 = [
-          {<<"Data-Protocol">>, <<"ao">>},
-          {<<"Action">>, <<"CommitCheckpoint">>},
-          {<<"Batch-Id">>, BatchId1},
-          {<<"From-Seq">>, <<"1">>},
-          {<<"To-Seq">>, <<"3">>},
-          {<<"Epoch">>, <<"1">>}
-      ],
-      {ok, 200, DupRes1} = sd_ao_client:send_message(GwUrl, ArbId, <<"CommitCheckpoint">>, Tags1, FinalBatch1, #{sender => maps:get(address, WI), wallet => WI, cu_url => CuUrl, timeout => 15000, cu_retries => 10, cu_retry_delay_ms => 300}),
-      io:format("DUP_RESP_STATUS:~s_TIP_SEQ:~s~n", [maps:get(<<"Status">>, DupRes1), maps:get(<<"OfficialSeq">>, DupRes1)]),
+      %% 1. Startup reconciliation lag guard: starting with arbitrator_id strictly halts fail-closed
+      {error, {chain_divergence, LagReason}} = sd_committer:start_link(#{
+          gateway_url => GwUrl,
+          cu_url => CuUrl,
+          arbitrator_id => ArbId,
+          wallet_path => "secrets/wallet_su.json",
+          cursor_path => CursorPath,
+          poll_interval_ms => 60000
+      }),
+      io:format("STARTUP_LAG_HALTED:true_REASON:~s~n", [LagReason]),
 
-      %% Parse verdict with parse_arbitrator_verdict/4 for ToSeq=3
-      case sd_committer:parse_arbitrator_verdict(DupRes1, 3, <<"${b1PropHash}">>, <<"${b1PropRoot}">>) of
-          {ok, duplicate, 6, TipHash, TipRoot} ->
-              io:format("DUP_PARSED_SEQ:~p~n", [6]),
-              %% Verify tip hash matches advanced seq 6 hash
-              case TipHash =:= <<"${b2PropHash}">> andalso TipRoot =:= <<"${b2PropRoot}">> of
-                  true -> io:format("TIP_HASH_ROOT_MATCHES_CANONICAL:true~n");
-                  false -> io:format("TIP_HASH_ROOT_MISMATCH:~p~n", [{TipHash, TipRoot}])
-              end,
-              %% Persist durable cursor with the authoritative tip state
-              CursorPath = "data/test_suite4_live_cursor.json",
-              ok = sd_committer:save_disk_cursor(6, TipHash, TipRoot, 1, <<"DUPLICATE_BATCH_IDEMPOTENT">>, CursorPath),
-              {ok, LoadedCur} = sd_committer:load_disk_cursor(CursorPath),
-              io:format("LOADED_CUR_SEQ:~p~n", [maps:get(last_committed_seq, LoadedCur)]),
+      %% 2. Running committer lag guard: start without arbitrator_id, then attach and run commit cycle
+      {ok, _} = sd_committer:start_link(#{
+          gateway_url => GwUrl,
+          cu_url => CuUrl,
+          arbitrator_id => <<>>,
+          wallet_path => "secrets/wallet_su.json",
+          cursor_path => CursorPath,
+          poll_interval_ms => 60000
+      }),
+      ok = sd_committer:set_arbitrator_id(ArbId),
 
-              %% Reconcile against live Arbitrator GetOfficialState via CU dry-run
-              InitState = sd_committer:reconcile_arbitrator_state(ArbId, #{
-                  gateway_url => GwUrl,
-                  cu_url => CuUrl,
-                  wallet_info => WI,
-                  last_committed_seq => 6,
-                  last_committed_hash => TipHash,
-                  last_state_root => TipRoot,
-                  cursor_path => CursorPath,
-                  epoch => 1,
-                  status => running,
-                  health => healthy
-              }),
-              io:format("RECONCILE_HEALTH:~s~n", [maps:get(health, InitState)]),
-              _ = file:delete(CursorPath);
-          OtherDup ->
-              io:format("DUP_FAILED:~p~n", [OtherDup]),
-              halt(1)
-      end,
+      %% Run full commit cycle while local WAL only has seq 1..3, but Arbitrator is already at seq 6
+      CycleRes = sd_committer:commit_now(),
+      io:format("FULL_CYCLE_RES:~p~n", [CycleRes]),
+      StatusMap = sd_committer:get_status(),
+      io:format("FULL_CYCLE_STATUS:~s_HEALTH:~s_ERR:~s~n", [
+          maps:get(<<"status">>, StatusMap, <<"unknown">>),
+          maps:get(<<"health">>, StatusMap, <<"unknown">>),
+          maps:get(<<"error_code">>, StatusMap, <<"none">>)
+      ]),
 
+      %% Verify durable cursor on disk did NOT skip to 6!
+      {ok, DiskCurAfterLag} = sd_committer:load_disk_cursor(CursorPath),
+      io:format("CURSOR_SEQ_AFTER_LAG:~p~n", [maps:get(last_committed_seq, DiskCurAfterLag)]),
+
+      sd_committer:stop(),
       halt(0).
     `;
 
     const { stdout: outStep2 } = await execFileAsync('erl', [
       '-pa', 'sd/out/ebin',
       '-noshell',
-      '-eval', erlRetryScript
+      '-eval', erlLagScript
     ], { cwd: ROOT_DIR, encoding: 'utf8', env: { ...process.env, HYDB_PROFILE: 'test' } });
 
-    assert(outStep2.includes('DUP_RESP_STATUS:DUPLICATE_BATCH_IDEMPOTENT_TIP_SEQ:6'), 'Live Arbitrator Lua contract returns DUPLICATE_BATCH_IDEMPOTENT with tip advanced to seq 6');
-    assert(outStep2.includes('TIP_HASH_ROOT_MATCHES_CANONICAL:true'), 'In-BEAM verdict parser resolves authoritative tip hash and state root at seq 6 from duplicate verdict');
-    assert(outStep2.includes('LOADED_CUR_SEQ:6'), 'Durable disk cursor persists seq 6 with authoritative tip state for old duplicate batch');
-    assert(outStep2.includes('RECONCILE_HEALTH:healthy'), 'Cold-start reconciliation against live Arbitrator Lua contract succeeds cleanly with zero divergence');
+    assert(outStep2.includes('INITIAL_LOCAL_WAL_TICK:3'), 'Local node WAL initializes strictly at sequence 3');
+    assert(outStep2.includes('STARTUP_LAG_HALTED:true'), 'Startup reconciliation strictly halts fail-closed on lagging local WAL');
+    assert(outStep2.includes('err_local_wal_lagging'), 'Full committer cycle detects lagging local WAL (seq 3 < seq 6) and halts fail-closed');
+    assert(outStep2.includes('FULL_CYCLE_STATUS:halted_HEALTH:failed_closed_ERR:err_local_wal_lagging'), 'Committer state machine records status=halted and health=failed_closed');
+    assert(outStep2.includes('CURSOR_SEQ_AFTER_LAG:0'), 'Durable disk cursor strictly refuses to skip unapplied local events (remains seq 0)');
+
+    // Step 4F: Catch-up local WAL to sequence 6 and recover committer state cleanly
+    const walLines2 = b2Events.map((e) => JSON.stringify(e)).join('\n') + '\n';
+    appendFileSync(walFile, walLines2, 'utf8');
+
+    const erlCatchupScript = `
+      _ = application:ensure_all_started(inets),
+      _ = application:ensure_all_started(ssl),
+      os:putenv("HYDB_PROFILE", "test"),
+      os:putenv("HYDB_WAL_PATH", "${walFile.replace(/\\/g, '/')}"),
+      _ = sd_runtime:ensure_started(),
+      _ = sd_runtime:simulate_restart_from_wal(),
+      CatchupTick = sd_runtime:get_current_tick(),
+      io:format("CATCHUP_LOCAL_WAL_TICK:~p~n", [CatchupTick]),
+
+      GwUrl = "http://127.0.0.1:${LOCAL_AO_PORT}",
+      CuUrl = "http://127.0.0.1:${LOCAL_AO_PORT}",
+      ArbId = <<"${mockArbitratorId}">>,
+      CursorPath = "${walCursorFile.replace(/\\/g, '/')}",
+
+      %% Start in-BEAM committer: startup reconciliation runs against live Arbitrator
+      %% Since local WAL has caught up to seq 6 and matches Arbitrator tip, reconciliation succeeds!
+      {ok, _} = sd_committer:start_link(#{
+          gateway_url => GwUrl,
+          cu_url => CuUrl,
+          arbitrator_id => ArbId,
+          wallet_path => "secrets/wallet_su.json",
+          cursor_path => CursorPath,
+          poll_interval_ms => 60000
+      }),
+      StatusMapCatchup = sd_committer:get_status(),
+      io:format("CATCHUP_STATUS:~s_HEALTH:~s_SEQ:~p~n", [
+          maps:get(<<"status">>, StatusMapCatchup, <<"unknown">>),
+          maps:get(<<"health">>, StatusMapCatchup, <<"unknown">>),
+          maps:get(<<"last_committed_seq">>, StatusMapCatchup, 0)
+      ]),
+
+      %% Verify cursor on disk now safely records sequence 6
+      {ok, DiskCurAfterCatchup} = sd_committer:load_disk_cursor(CursorPath),
+      io:format("DURABLE_CURSOR_SEQ_AFTER_CATCHUP:~p~n", [maps:get(last_committed_seq, DiskCurAfterCatchup)]),
+
+      sd_committer:stop(),
+      halt(0).
+    `;
+
+    const { stdout: outStep3 } = await execFileAsync('erl', [
+      '-pa', 'sd/out/ebin',
+      '-noshell',
+      '-eval', erlCatchupScript
+    ], { cwd: ROOT_DIR, encoding: 'utf8', env: { ...process.env, HYDB_PROFILE: 'test' } });
+
+    assert(outStep3.includes('CATCHUP_LOCAL_WAL_TICK:6'), 'Local node WAL catches up and applies events to sequence 6');
+    assert(outStep3.includes('CATCHUP_STATUS:running_HEALTH:healthy_SEQ:6'), 'Committer startup reconciliation against live Arbitrator succeeds cleanly after WAL catch-up');
+    assert(outStep3.includes('DURABLE_CURSOR_SEQ_AFTER_CATCHUP:6'), 'Durable disk cursor safely advances to seq 6 after local WAL matches Arbitrator tip');
 
   } finally {
+    const walFile = join(ROOT_DIR, 'data/test_suite4_wal.log');
+    const walCursorFile = join(ROOT_DIR, 'data/test_suite4_live_cursor.json');
+    if (existsSync(walFile)) unlinkSync(walFile);
+    if (existsSync(walCursorFile)) unlinkSync(walCursorFile);
     await new Promise((resolve) => aoServer.close(resolve));
   }
 

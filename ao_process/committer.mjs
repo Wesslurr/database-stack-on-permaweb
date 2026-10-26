@@ -1052,6 +1052,7 @@ export function isFatalFailClosedError(err) {
     'ERR_INVALID_PROCESS_ID',
     'ERR_CURSOR_AO_STATE_MISMATCH',
     'ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ',
+    'ERR_LOCAL_WAL_LAGGING',
     'ERR_AO_STATE_UNREACHABLE',
     'ERR_COMMITTER_LOCK_HELD',
     'ERR_UNAUTHORIZED_NODE',
@@ -1536,6 +1537,19 @@ export async function reconcileCursorWithAO(options = {}) {
 
   if (aoState && aoState.ok && Number.isInteger(aoState.official_seq) && aoState.official_seq >= 0) {
     if (aoState.official_seq > diskCursor.last_committed_seq) {
+      const localTick = options.latestTick ?? options.localTick;
+      if (localTick !== undefined && localTick < aoState.official_seq) {
+        lastCommittedSeq = diskCursor.last_committed_seq;
+        return {
+          ...diskCursor,
+          source: 'local_disk',
+          reconciliation_status: 'local_wal_lagging',
+          mismatch_detected: true,
+          error_code: 'ERR_LOCAL_WAL_LAGGING',
+          reason: `Local WAL tick (${localTick}) is lagging behind AO official sequence (${aoState.official_seq}); refusing to advance cursor`
+        };
+      }
+
       const reconciled = saveDurableCursor(
         {
           last_committed_seq: aoState.official_seq,
@@ -1677,9 +1691,23 @@ export async function processCommitterCycle(options = {}) {
   const batchMax = options.batchMax || BATCH_MAX;
   const fetchFn = options.fetchFn || httpFetch;
 
+  const suStatus = await fetchFn(`${suUrl}/status`);
+  if (suStatus.status !== 200 || !suStatus.body) {
+    writeHeartbeatStatus({
+      status: 'waiting_su',
+      health: 'healthy',
+      last_committed_seq: lastCommittedSeq,
+      reason: 'SU node unreachable'
+    }, cursorPath);
+    return { skipped: true, reason: 'SU node unreachable', lastCommitted: lastCommittedSeq };
+  }
+
+  const latestTick = Number(suStatus.body.latest_tick_ram ?? suStatus.body.latest_tick ?? suStatus.body.tick ?? 0);
+  const epoch = Number(suStatus.body.epoch || 1);
+
   // Ensure cursor is initialized from durable storage or AO state before first cycle
   if (lastCommittedSeq === null || options.forceReconcile || options.reconcileEveryCycle) {
-    const reconcileRes = await reconcileCursorWithAO({ ...options, cursorPath });
+    const reconcileRes = await reconcileCursorWithAO({ ...options, cursorPath, latestTick });
     if (reconcileRes && reconcileRes.mismatch_detected && !options.allowLocalAhead) {
       writeHeartbeatStatus({
         status: 'halted',
@@ -1701,20 +1729,6 @@ export async function processCommitterCycle(options = {}) {
       };
     }
   }
-
-  const suStatus = await fetchFn(`${suUrl}/status`);
-  if (suStatus.status !== 200 || !suStatus.body) {
-    writeHeartbeatStatus({
-      status: 'waiting_su',
-      health: 'healthy',
-      last_committed_seq: lastCommittedSeq,
-      reason: 'SU node unreachable'
-    }, cursorPath);
-    return { skipped: true, reason: 'SU node unreachable', lastCommitted: lastCommittedSeq };
-  }
-
-  const latestTick = Number(suStatus.body.latest_tick_ram ?? suStatus.body.latest_tick ?? suStatus.body.tick ?? 0);
-  const epoch = Number(suStatus.body.epoch || 1);
 
   if (latestTick <= lastCommittedSeq) {
     writeHeartbeatStatus({
@@ -1799,6 +1813,21 @@ export async function processCommitterCycle(options = {}) {
   // Only advance `lastCommittedSeq` and persist cursor if evaluation proof is VERIFIED!
   if (commitRes && commitRes.ok && commitRes.verified === true) {
     const newSeq = Number(commitRes.official_seq ?? toSeq);
+    if (newSeq > toSeq && latestTick < newSeq) {
+      const errMsg = `Local WAL tick (${latestTick}) is lagging behind Arbitrator tip (${newSeq}); refusing to skip unapplied events`;
+      writeHeartbeatStatus({
+        status: 'halted',
+        health: 'failed_closed',
+        error_code: 'ERR_LOCAL_WAL_LAGGING',
+        last_committed_seq: lastCommittedSeq,
+        reason: errMsg
+      }, cursorPath);
+      const err = new Error(errMsg);
+      err.code = 'ERR_LOCAL_WAL_LAGGING';
+      err.exitCode = 78;
+      throw err;
+    }
+
     const finalHash =
       commitRes.verdict === 'DUPLICATE_BATCH_IDEMPOTENT' && newSeq > toSeq
         ? String(commitRes.official_hash || proposedHash).toUpperCase()

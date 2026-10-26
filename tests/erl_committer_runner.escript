@@ -551,6 +551,58 @@ main(_) ->
     end,
     _ = file:delete(FailClosedCursorPath),
 
+    %% Test 4E-2: Lagging local WAL strictly halts fail-closed on advanced Arbitrator tip
+    LagMockPort = 8995,
+    {ok, LagListen} = gen_tcp:listen(LagMockPort, [binary, {packet, 0}, {active, false}, {reuseaddr, true}]),
+    spawn_link(fun() ->
+        case gen_tcp:accept(LagListen, 5000) of
+            {ok, LSock} ->
+                _LReq = recv_full_http(LSock, <<>>),
+                LRespBody = iolist_to_binary(json:encode(#{
+                    <<"OfficialSeq">> => 10,
+                    <<"OfficialHash">> => <<"1111222233334444555566667777888811112222333344445555666677778888">>,
+                    <<"OfficialStateRoot">> => <<"999888777">>
+                })),
+                LHttpResp = [
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: ", integer_to_list(byte_size(LRespBody)), "\r\n",
+                    "\r\n",
+                    binary_to_list(LRespBody)
+                ],
+                ok = gen_tcp:send(LSock, LHttpResp),
+                gen_tcp:close(LSock);
+            _ -> ok
+        end,
+        gen_tcp:close(LagListen)
+    end),
+
+    LagCursorPath = filename:join([DbDir, "data/test_lag_cursor.json"]),
+    _ = file:delete(LagCursorPath),
+    %% Local WAL tick is only 3, but Arbitrator is at 10!
+    LagReconcileRes = sd_committer:reconcile_arbitrator_state(<<"MOCK_ARB">>, #{
+        cursor_path => LagCursorPath,
+        gateway_url => "http://127.0.0.1:8995",
+        cu_url => "http://127.0.0.1:8995",
+        local_tick => 3,
+        last_committed_seq => 0
+    }),
+    case maps:get(health, LagReconcileRes) =:= failed_closed andalso maps:get(error_code, LagReconcileRes) =:= err_local_wal_lagging of
+        true ->
+            io:format("PASS: Lagging local WAL strictly halts fail-closed on advanced Arbitrator tip~n");
+        false ->
+            io:format("FAIL: expected err_local_wal_lagging on lagging WAL, got: ~p~n", [LagReconcileRes]),
+            halt(1)
+    end,
+    %% Verify cursor was NOT saved with 10 on disk
+    case file:read_file(LagCursorPath) of
+        {error, enoent} ->
+            io:format("PASS: Disk cursor strictly preserved without unapplied sequence advance~n");
+        {ok, LagCurBin} ->
+            io:format("FAIL: cursor should not have been written on lagging WAL: ~s~n", [LagCurBin]),
+            halt(1)
+    end,
+
     %% Test 4F: Strict verdict hash matching and fail-closed divergence
     MismatchedVerdict = #{
         <<"Status">> => <<"COMMITTED">>,

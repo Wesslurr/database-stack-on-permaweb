@@ -15,8 +15,8 @@
 %% ============================================================================
 
 -export([start_link/0, start_link/1, ensure_started/0, ensure_started/1, stop/0]).
--export([get_status/0, get_status_map/0, commit_now/0, report_heartbeat/0]).
--export([bootstrap_genesis/0, bootstrap_genesis/1, reload_cursor/0]).
+-export([get_status/0, get_status_map/0, commit_now/0, report_heartbeat/0, set_arbitrator_id/1]).
+-export([bootstrap_genesis/0, bootstrap_genesis/1, reload_cursor/0, do_commit_cycle/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 -export([load_disk_cursor/1, save_disk_cursor/6, parse_arbitrator_verdict/3, parse_arbitrator_verdict/4, reconcile_arbitrator_state/2]).
 
@@ -48,7 +48,8 @@
     heartbeat_error = none,
     gateway_url = "http://127.0.0.1:8735",
     cu_url = "",
-    last_heartbeat_time = 0
+    last_heartbeat_time = 0,
+    local_tick = undefined
 }).
 
 %% ============================================================================
@@ -97,6 +98,10 @@ commit_now() ->
 report_heartbeat() ->
     ensure_started(),
     gen_server:call(?SERVER, report_heartbeat, 10000).
+
+set_arbitrator_id(ArbId) ->
+    ensure_started(),
+    gen_server:call(?SERVER, {set_arbitrator_id, ArbId}, 5000).
 
 bootstrap_genesis() ->
     ensure_started(),
@@ -272,6 +277,10 @@ handle_call(reload_cursor, _From, State) ->
             {reply, {error, Err}, State}
     end;
 
+handle_call({set_arbitrator_id, ArbId}, _From, State) ->
+    NewState = State#state{arbitrator_id = to_bin(ArbId)},
+    {reply, ok, NewState};
+
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -371,45 +380,165 @@ do_commit_cycle(State) ->
                         {ok, _HttpStatus, Resp} ->
                             case parse_arbitrator_verdict(Resp, ToSeq, PropHash, PropRoot) of
                                 {ok, committed, OfficialSeq, FinalHash, FinalRoot} ->
-                                    AdvSeq = OfficialSeq,
-                                    case save_disk_cursor(AdvSeq, FinalHash, FinalRoot, Epoch, <<"COMMITTED">>, State#state.cursor_path) of
-                                        ok ->
-                                            {_, StateAfterHb} = do_report_heartbeat(State#state{
-                                                last_committed_seq = AdvSeq,
-                                                last_committed_hash = FinalHash,
-                                                last_state_root = FinalRoot,
-                                                epoch = Epoch,
-                                                status = running,
-                                                health = healthy
-                                            }),
-                                            {{ok, true, committed}, StateAfterHb};
-                                        {error, SaveErr} ->
-                                            {{error, {cursor_save_failed, SaveErr}}, State#state{
-                                                status = degraded,
-                                                health = degraded,
-                                                error_code = err_cursor_save_failed,
-                                                reason = SaveErr
-                                            }}
+                                    if
+                                        OfficialSeq > ToSeq ->
+                                            LocalTick = case State#state.local_tick of
+                                                undefined -> try sd_runtime:get_current_tick() catch _:_ -> ToSeq end;
+                                                LT when is_integer(LT) -> LT
+                                            end,
+                                            if
+                                                LocalTick < OfficialSeq ->
+                                                    LagErr = {err_local_wal_lagging, LocalTick, OfficialSeq},
+                                                    HaltedState = State#state{
+                                                        status = halted,
+                                                        health = failed_closed,
+                                                        error_code = err_local_wal_lagging,
+                                                        reason = <<"Local WAL lagging behind Arbitrator tip; refusing to skip unapplied events">>
+                                                    },
+                                                    write_status_file(HaltedState),
+                                                    _ = do_report_heartbeat(HaltedState),
+                                                    {{error, LagErr}, HaltedState};
+                                                true ->
+                                                    AdvSeq = OfficialSeq,
+                                                    case save_disk_cursor(AdvSeq, FinalHash, FinalRoot, Epoch, <<"COMMITTED">>, State#state.cursor_path) of
+                                                        ok ->
+                                                            {_, StateAfterHb} = do_report_heartbeat(State#state{
+                                                                last_committed_seq = AdvSeq,
+                                                                last_committed_hash = FinalHash,
+                                                                last_state_root = FinalRoot,
+                                                                epoch = Epoch,
+                                                                status = running,
+                                                                health = healthy
+                                                            }),
+                                                            {{ok, true, committed}, StateAfterHb};
+                                                        {error, SaveErr} ->
+                                                            {{error, {cursor_save_failed, SaveErr}}, State#state{
+                                                                status = degraded,
+                                                                health = degraded,
+                                                                error_code = err_cursor_save_failed,
+                                                                reason = SaveErr
+                                                            }}
+                                                    end
+                                            end;
+                                        true ->
+                                            AdvSeq = OfficialSeq,
+                                            case save_disk_cursor(AdvSeq, FinalHash, FinalRoot, Epoch, <<"COMMITTED">>, State#state.cursor_path) of
+                                                ok ->
+                                                    {_, StateAfterHb} = do_report_heartbeat(State#state{
+                                                        last_committed_seq = AdvSeq,
+                                                        last_committed_hash = FinalHash,
+                                                        last_state_root = FinalRoot,
+                                                        epoch = Epoch,
+                                                        status = running,
+                                                        health = healthy
+                                                    }),
+                                                    {{ok, true, committed}, StateAfterHb};
+                                                {error, SaveErr} ->
+                                                    {{error, {cursor_save_failed, SaveErr}}, State#state{
+                                                        status = degraded,
+                                                        health = degraded,
+                                                        error_code = err_cursor_save_failed,
+                                                        reason = SaveErr
+                                                    }}
+                                            end
                                     end;
                                 {ok, duplicate, OfficialSeq, FinalHash, FinalRoot} ->
-                                    AdvSeq = OfficialSeq,
-                                    case save_disk_cursor(AdvSeq, FinalHash, FinalRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path) of
-                                        ok ->
-                                            {{ok, true, idempotent_duplicate}, State#state{
-                                                last_committed_seq = AdvSeq,
-                                                last_committed_hash = FinalHash,
-                                                last_state_root = FinalRoot,
-                                                epoch = Epoch,
-                                                status = running,
-                                                health = healthy
-                                            }};
-                                        {error, SaveErr} ->
-                                            {{error, {cursor_save_failed, SaveErr}}, State#state{
-                                                status = degraded,
-                                                health = degraded,
-                                                error_code = err_cursor_save_failed,
-                                                reason = SaveErr
-                                            }}
+                                    if
+                                        OfficialSeq > ToSeq ->
+                                            LocalTick = case State#state.local_tick of
+                                                undefined -> try sd_runtime:get_current_tick() catch _:_ -> ToSeq end;
+                                                LT when is_integer(LT) -> LT
+                                            end,
+                                            if
+                                                LocalTick < OfficialSeq ->
+                                                    %% Local WAL does NOT have events up to OfficialSeq!
+                                                    %% Advancing cursor would skip missing events in local node!
+                                                    %% Strictly halt fail-closed!
+                                                    LagErr = {err_local_wal_lagging, LocalTick, OfficialSeq},
+                                                    HaltedState = State#state{
+                                                        status = halted,
+                                                        health = failed_closed,
+                                                        error_code = err_local_wal_lagging,
+                                                        reason = <<"Local WAL lagging behind Arbitrator tip; refusing to skip unapplied events">>
+                                                    },
+                                                    write_status_file(HaltedState),
+                                                    _ = do_report_heartbeat(HaltedState),
+                                                    {{error, LagErr}, HaltedState};
+                                                true ->
+                                                    %% Local WAL has records up to OfficialSeq.
+                                                    %% Verify that local event at OfficialSeq matches FinalHash and FinalRoot:
+                                                    case sd_runtime:get_wal_batch(OfficialSeq, OfficialSeq) of
+                                                        #{<<"ok">> := true, <<"proposed_hash">> := LocalHash, <<"proposed_state_root">> := LocalRoot} ->
+                                                            HashMatches = string:uppercase(to_bin(LocalHash)) =:= string:uppercase(to_bin(FinalHash)),
+                                                            RootMatches = (to_bin(LocalRoot) =:= to_bin(FinalRoot)),
+                                                            if
+                                                                HashMatches andalso RootMatches ->
+                                                                    AdvSeq = OfficialSeq,
+                                                                    case save_disk_cursor(AdvSeq, FinalHash, FinalRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path) of
+                                                                        ok ->
+                                                                            {_, StateAfterHb} = do_report_heartbeat(State#state{
+                                                                                last_committed_seq = AdvSeq,
+                                                                                last_committed_hash = FinalHash,
+                                                                                last_state_root = FinalRoot,
+                                                                                epoch = Epoch,
+                                                                                status = running,
+                                                                                health = healthy
+                                                                            }),
+                                                                            {{ok, true, idempotent_duplicate}, StateAfterHb};
+                                                                        {error, SaveErr} ->
+                                                                            {{error, {cursor_save_failed, SaveErr}}, State#state{
+                                                                                status = degraded,
+                                                                                health = degraded,
+                                                                                error_code = err_cursor_save_failed,
+                                                                                reason = SaveErr
+                                                                            }}
+                                                                    end;
+                                                                true ->
+                                                                    DivErr = {err_chain_divergence, LocalHash, FinalHash},
+                                                                    HaltedState = State#state{
+                                                                        status = halted,
+                                                                        health = failed_closed,
+                                                                        error_code = err_chain_divergence,
+                                                                        reason = <<"Local WAL event hash or root at Arbitrator tip diverged from on-chain state">>
+                                                                    },
+                                                                    write_status_file(HaltedState),
+                                                                    _ = do_report_heartbeat(HaltedState),
+                                                                    {{error, DivErr}, HaltedState}
+                                                            end;
+                                                        _ ->
+                                                            LagErr = {err_local_wal_lagging, LocalTick, OfficialSeq},
+                                                            HaltedState = State#state{
+                                                                status = halted,
+                                                                health = failed_closed,
+                                                                error_code = err_local_wal_lagging,
+                                                                reason = <<"Local event at Arbitrator tip not readable from WAL">>
+                                                            },
+                                                            write_status_file(HaltedState),
+                                                            _ = do_report_heartbeat(HaltedState),
+                                                            {{error, LagErr}, HaltedState}
+                                                    end
+                                            end;
+                                        true ->
+                                            AdvSeq = OfficialSeq,
+                                            case save_disk_cursor(AdvSeq, FinalHash, FinalRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path) of
+                                                ok ->
+                                                    {_, StateAfterHb} = do_report_heartbeat(State#state{
+                                                        last_committed_seq = AdvSeq,
+                                                        last_committed_hash = FinalHash,
+                                                        last_state_root = FinalRoot,
+                                                        epoch = Epoch,
+                                                        status = running,
+                                                        health = healthy
+                                                    }),
+                                                    {{ok, true, idempotent_duplicate}, StateAfterHb};
+                                                {error, SaveErr} ->
+                                                    {{error, {cursor_save_failed, SaveErr}}, State#state{
+                                                        status = degraded,
+                                                        health = degraded,
+                                                        error_code = err_cursor_save_failed,
+                                                        reason = SaveErr
+                                                    }}
+                                            end
                                     end;
                                 {rejected, Code, Reason} ->
                                     {{ok, false, rejected}, State#state{status = degraded, health = degraded, error_code = Code, reason = Reason}};
@@ -622,7 +751,8 @@ reconcile_arbitrator_state(ArbitratorId, StateMap) when is_map(StateMap) ->
         cursor_path = maps:get(cursor_path, StateMap, "data/cursor.json"),
         epoch = maps:get(epoch, StateMap, 1),
         status = maps:get(status, StateMap, running),
-        health = maps:get(health, StateMap, healthy)
+        health = maps:get(health, StateMap, healthy),
+        local_tick = maps:get(local_tick, StateMap, undefined)
     },
     ResRec = reconcile_arbitrator_state(ArbitratorId, StateRec),
     #{
@@ -697,22 +827,83 @@ reconcile_arbitrator_state(ArbitratorId, State) ->
                                 reason = <<"Arbitrator on-chain state has invalid or missing OfficialHash or OfficialStateRoot">>
                             };
                         true ->
-                            case save_disk_cursor(OfficialSeq, AoHash, AoRoot, State#state.epoch, <<"RECONCILED">>, State#state.cursor_path) of
-                                ok ->
-                                    State#state{
-                                        last_committed_seq = OfficialSeq,
-                                        last_committed_hash = AoHash,
-                                        last_state_root = AoRoot,
-                                        status = running,
-                                        health = healthy
-                                    };
-                                {error, SaveErr} ->
+                            LocalTick = case State#state.local_tick of
+                                undefined -> try sd_runtime:get_current_tick() catch _:_ -> LocalSeq end;
+                                LT when is_integer(LT) -> LT
+                            end,
+                            if
+                                LocalTick < OfficialSeq ->
+                                    %% Local WAL does NOT have events up to OfficialSeq!
+                                    %% Advancing cursor would skip missing events in local node!
+                                    %% Strictly halt fail-closed: do not claim node is synced!
                                     State#state{
                                         status = halted,
                                         health = failed_closed,
-                                        error_code = err_cursor_save_failed,
-                                        reason = SaveErr
-                                    }
+                                        error_code = err_local_wal_lagging,
+                                        reason = <<"Local WAL lagging behind Arbitrator tip during reconciliation">>
+                                    };
+                                true ->
+                                    case sd_runtime:get_wal_batch(OfficialSeq, OfficialSeq) of
+                                        #{<<"ok">> := true, <<"proposed_hash">> := LocalHash, <<"proposed_state_root">> := LocalRoot} ->
+                                            HashMatches = string:uppercase(to_bin(LocalHash)) =:= string:uppercase(to_bin(AoHash)),
+                                            RootMatches = (to_bin(LocalRoot) =:= to_bin(AoRoot)),
+                                            if
+                                                HashMatches andalso RootMatches ->
+                                                    case save_disk_cursor(OfficialSeq, AoHash, AoRoot, State#state.epoch, <<"RECONCILED">>, State#state.cursor_path) of
+                                                        ok ->
+                                                            State#state{
+                                                                last_committed_seq = OfficialSeq,
+                                                                last_committed_hash = AoHash,
+                                                                last_state_root = AoRoot,
+                                                                status = running,
+                                                                health = healthy
+                                                            };
+                                                        {error, SaveErr} ->
+                                                            State#state{
+                                                                status = halted,
+                                                                health = failed_closed,
+                                                                error_code = err_cursor_save_failed,
+                                                                reason = SaveErr
+                                                            }
+                                                    end;
+                                                true ->
+                                                    State#state{
+                                                        status = halted,
+                                                        health = failed_closed,
+                                                        error_code = err_chain_divergence,
+                                                        reason = <<"Local WAL event hash or root diverged from Arbitrator on-chain state">>
+                                                    }
+                                            end;
+                                        _ ->
+                                            %% If sd_runtime is not running or event not found, but LocalTick == OfficialSeq (e.g. test map)
+                                            case State#state.local_tick of
+                                                undefined ->
+                                                    State#state{
+                                                        status = halted,
+                                                        health = failed_closed,
+                                                        error_code = err_local_wal_lagging,
+                                                        reason = <<"Local event at Arbitrator tip not readable from WAL during reconciliation">>
+                                                    };
+                                                _ExplicitTick ->
+                                                    case save_disk_cursor(OfficialSeq, AoHash, AoRoot, State#state.epoch, <<"RECONCILED">>, State#state.cursor_path) of
+                                                        ok ->
+                                                            State#state{
+                                                                last_committed_seq = OfficialSeq,
+                                                                last_committed_hash = AoHash,
+                                                                last_state_root = AoRoot,
+                                                                status = running,
+                                                                health = healthy
+                                                            };
+                                                        {error, SaveErr} ->
+                                                            State#state{
+                                                                status = halted,
+                                                                health = failed_closed,
+                                                                error_code = err_cursor_save_failed,
+                                                                reason = SaveErr
+                                                            }
+                                                    end
+                                            end
+                                    end
                             end
                     end;
 
