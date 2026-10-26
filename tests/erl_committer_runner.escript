@@ -412,19 +412,84 @@ main(_) ->
     %% ========================================================================
     %% [Test 4D] Strict DUPLICATE_BATCH_IDEMPOTENT Verdict Verification
     %% ========================================================================
+    %% Case 1: Exact tip duplicate (OfficialSeq == ToSeq)
     ValidDupVerdict = #{
         <<"Status">> => <<"DUPLICATE_BATCH_IDEMPOTENT">>,
         <<"OfficialSeq">> => 3,
         <<"OfficialHash">> => <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>,
         <<"OfficialStateRoot">> => <<"1234567890">>
     },
-    case sd_committer:parse_arbitrator_verdict(ValidDupVerdict, <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>, <<"1234567890">>) of
-        {ok, duplicate, 3} ->
+    PropHash3 = <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>,
+    PropRoot3 = <<"1234567890">>,
+    case sd_committer:parse_arbitrator_verdict(ValidDupVerdict, 3, PropHash3, PropRoot3) of
+        {ok, duplicate, 3, PropHash3, PropRoot3} ->
             io:format("PASS: DUPLICATE_BATCH_IDEMPOTENT verdict requires matching official hash and root~n");
         BadDupRes ->
             io:format("FAIL: expected valid duplicate verdict, got: ~p~n", [BadDupRes]),
             halt(1)
     end,
+
+    %% Case 2: Advanced tip duplicate (OfficialSeq == 10 > ToSeq == 3)
+    %% Arbitrator returns authoritative tip hash/root at sequence 10
+    TipHash10 = <<"1111222233334444555566667777888811112222333344445555666677778888">>,
+    TipRoot10 = <<"999888777">>,
+    AdvTipVerdict = #{
+        <<"Status">> => <<"DUPLICATE_BATCH_IDEMPOTENT">>,
+        <<"OfficialSeq">> => 10,
+        <<"OfficialHash">> => TipHash10,
+        <<"OfficialStateRoot">> => TipRoot10
+    },
+    case sd_committer:parse_arbitrator_verdict(AdvTipVerdict, 3, PropHash3, PropRoot3) of
+        {ok, duplicate, 10, TipHash10, TipRoot10} ->
+            io:format("PASS: Retrying older batch with advanced Arbitrator tip returns authoritative tip hash and root~n");
+        BadAdvRes ->
+            io:format("FAIL: expected advanced tip duplicate verdict, got: ~p~n", [BadAdvRes]),
+            halt(1)
+    end,
+
+    %% Case 3: Advanced tip duplicate with invalid/empty tip hash strictly rejected
+    BadAdvTipVerdict = #{
+        <<"Status">> => <<"DUPLICATE_BATCH_IDEMPOTENT">>,
+        <<"OfficialSeq">> => 10,
+        <<"OfficialHash">> => <<"INVALID_SHORT_HASH">>,
+        <<"OfficialStateRoot">> => TipRoot10
+    },
+    case sd_committer:parse_arbitrator_verdict(BadAdvTipVerdict, 3, PropHash3, PropRoot3) of
+        {rejected, err_missing_proof, _} ->
+            io:format("PASS: Advanced tip duplicate with invalid tip hash strictly rejected~n");
+        BadAdvInv ->
+            io:format("FAIL: expected rejection of invalid tip hash, got: ~p~n", [BadAdvInv]),
+            halt(1)
+    end,
+
+    %% Case 4: Duplicate with sequence lag (OfficialSeq < ToSeq) strictly rejected
+    LagDupVerdict = #{
+        <<"Status">> => <<"DUPLICATE_BATCH_IDEMPOTENT">>,
+        <<"OfficialSeq">> => 2,
+        <<"OfficialHash">> => PropHash3,
+        <<"OfficialStateRoot">> => PropRoot3
+    },
+    case sd_committer:parse_arbitrator_verdict(LagDupVerdict, 3, PropHash3, PropRoot3) of
+        {rejected, err_sequence_lag, _} ->
+            io:format("PASS: Duplicate verdict with sequence lag strictly rejected~n");
+        BadLagRes ->
+            io:format("FAIL: expected lag rejection on duplicate, got: ~p~n", [BadLagRes]),
+            halt(1)
+    end,
+
+    %% Case 5: Cursor saved with resolved tip hash/root at seq 10 reconciles cleanly without divergence
+    TipCursorPath = filename:join([DbDir, "data/test_tip_cursor.json"]),
+    ok = sd_committer:save_disk_cursor(10, TipHash10, TipRoot10, 1, <<"DUPLICATE_BATCH_IDEMPOTENT">>, TipCursorPath),
+    {ok, LoadedTipCursor} = sd_committer:load_disk_cursor(TipCursorPath),
+    case maps:get(last_committed_hash, LoadedTipCursor, maps:get(<<"last_committed_hash">>, LoadedTipCursor, undefined)) =:= TipHash10 andalso
+         maps:get(last_state_root, LoadedTipCursor, maps:get(<<"last_state_root">>, LoadedTipCursor, undefined)) =:= TipRoot10 of
+        true ->
+            io:format("PASS: Advanced duplicate cursor correctly stores authoritative tip hash and root for cold-start restart~n");
+        false ->
+            io:format("FAIL: loaded tip cursor mismatch: ~p~n", [LoadedTipCursor]),
+            halt(1)
+    end,
+    _ = file:delete(TipCursorPath),
 
     %% Missing hash on duplicate rejected
     MissingHashDup = #{

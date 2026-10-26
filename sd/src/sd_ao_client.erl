@@ -579,8 +579,17 @@ extract_message_verdict([]) ->
 extract_message_verdict([Msg | Rest]) when is_map(Msg) ->
     Tags = maps:get(<<"Tags">>, Msg, maps:get(tags, Msg, [])),
     TagsMap = tags_to_map(Tags),
-    Merged = maps:merge(TagsMap, Msg),
-    case maps:is_key(<<"Status">>, Merged) of
+    DataMap = case maps:get(<<"Data">>, Msg, maps:get(data, Msg, undefined)) of
+        DataBin when is_binary(DataBin) ->
+            case catch json:decode(DataBin) of
+                ParsedData when is_map(ParsedData) -> ParsedData;
+                _ -> #{}
+            end;
+        DataMapRaw when is_map(DataMapRaw) -> DataMapRaw;
+        _ -> #{}
+    end,
+    Merged = maps:merge(maps:merge(TagsMap, DataMap), Msg),
+    case maps:is_key(<<"Status">>, Merged) orelse maps:is_key(<<"status">>, Merged) orelse maps:is_key(<<"ok">>, Merged) of
         true ->
             {ok, Merged};
         false ->

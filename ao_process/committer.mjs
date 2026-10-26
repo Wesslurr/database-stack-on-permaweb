@@ -1799,11 +1799,20 @@ export async function processCommitterCycle(options = {}) {
   // Only advance `lastCommittedSeq` and persist cursor if evaluation proof is VERIFIED!
   if (commitRes && commitRes.ok && commitRes.verified === true) {
     const newSeq = Number(commitRes.official_seq ?? toSeq);
+    const finalHash =
+      commitRes.verdict === 'DUPLICATE_BATCH_IDEMPOTENT' && newSeq > toSeq
+        ? String(commitRes.official_hash || proposedHash).toUpperCase()
+        : proposedHash;
+    const finalRoot =
+      commitRes.verdict === 'DUPLICATE_BATCH_IDEMPOTENT' && newSeq > toSeq
+        ? String(commitRes.official_state_root ?? proposedStateRoot)
+        : proposedStateRoot;
+
     const updatedCursor = saveDurableCursor(
       {
         last_committed_seq: Math.max(toSeq, newSeq),
-        last_committed_hash: proposedHash,
-        last_state_root: proposedStateRoot,
+        last_committed_hash: finalHash,
+        last_state_root: finalRoot,
         epoch,
         last_batch_id: batchData.batch_id,
         verdict: commitRes.verdict

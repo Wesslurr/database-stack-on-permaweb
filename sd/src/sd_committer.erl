@@ -18,7 +18,7 @@
 -export([get_status/0, get_status_map/0, commit_now/0, report_heartbeat/0]).
 -export([bootstrap_genesis/0, bootstrap_genesis/1, reload_cursor/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
--export([load_disk_cursor/1, save_disk_cursor/6, parse_arbitrator_verdict/3]).
+-export([load_disk_cursor/1, save_disk_cursor/6, parse_arbitrator_verdict/3, parse_arbitrator_verdict/4, reconcile_arbitrator_state/2]).
 
 -define(SERVER, ?MODULE).
 -define(DEFAULT_POLL_INTERVAL_MS, 1000).
@@ -369,69 +369,47 @@ do_commit_cycle(State) ->
 
                     case DispatchRes of
                         {ok, _HttpStatus, Resp} ->
-                            case parse_arbitrator_verdict(Resp, PropHash, PropRoot) of
-                                {ok, committed, OfficialSeq} ->
-                                    if
-                                        OfficialSeq < ToSeq ->
-                                            LagErr = {err_sequence_lag, OfficialSeq, ToSeq},
-                                            {{error, LagErr}, State#state{
+                            case parse_arbitrator_verdict(Resp, ToSeq, PropHash, PropRoot) of
+                                {ok, committed, OfficialSeq, FinalHash, FinalRoot} ->
+                                    AdvSeq = OfficialSeq,
+                                    case save_disk_cursor(AdvSeq, FinalHash, FinalRoot, Epoch, <<"COMMITTED">>, State#state.cursor_path) of
+                                        ok ->
+                                            {_, StateAfterHb} = do_report_heartbeat(State#state{
+                                                last_committed_seq = AdvSeq,
+                                                last_committed_hash = FinalHash,
+                                                last_state_root = FinalRoot,
+                                                epoch = Epoch,
+                                                status = running,
+                                                health = healthy
+                                            }),
+                                            {{ok, true, committed}, StateAfterHb};
+                                        {error, SaveErr} ->
+                                            {{error, {cursor_save_failed, SaveErr}}, State#state{
                                                 status = degraded,
                                                 health = degraded,
-                                                error_code = err_sequence_lag,
-                                                reason = <<"Arbitrator official sequence lagged behind proposed batch">>
-                                            }};
-                                        true ->
-                                            AdvSeq = OfficialSeq,
-                                            case save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"COMMITTED">>, State#state.cursor_path) of
-                                                ok ->
-                                                    {_, StateAfterHb} = do_report_heartbeat(State#state{
-                                                        last_committed_seq = AdvSeq,
-                                                        last_committed_hash = PropHash,
-                                                        last_state_root = PropRoot,
-                                                        epoch = Epoch,
-                                                        status = running,
-                                                        health = healthy
-                                                    }),
-                                                    {{ok, true, committed}, StateAfterHb};
-                                                {error, SaveErr} ->
-                                                    {{error, {cursor_save_failed, SaveErr}}, State#state{
-                                                        status = degraded,
-                                                        health = degraded,
-                                                        error_code = err_cursor_save_failed,
-                                                        reason = SaveErr
-                                                    }}
-                                            end
+                                                error_code = err_cursor_save_failed,
+                                                reason = SaveErr
+                                            }}
                                     end;
-                                {ok, duplicate, OfficialSeq} ->
-                                    if
-                                        OfficialSeq < ToSeq ->
-                                            LagErr = {err_sequence_lag, OfficialSeq, ToSeq},
-                                            {{error, LagErr}, State#state{
+                                {ok, duplicate, OfficialSeq, FinalHash, FinalRoot} ->
+                                    AdvSeq = OfficialSeq,
+                                    case save_disk_cursor(AdvSeq, FinalHash, FinalRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path) of
+                                        ok ->
+                                            {{ok, true, idempotent_duplicate}, State#state{
+                                                last_committed_seq = AdvSeq,
+                                                last_committed_hash = FinalHash,
+                                                last_state_root = FinalRoot,
+                                                epoch = Epoch,
+                                                status = running,
+                                                health = healthy
+                                            }};
+                                        {error, SaveErr} ->
+                                            {{error, {cursor_save_failed, SaveErr}}, State#state{
                                                 status = degraded,
                                                 health = degraded,
-                                                error_code = err_sequence_lag,
-                                                reason = <<"Arbitrator duplicate sequence lagged behind proposed ToSeq">>
-                                            }};
-                                        true ->
-                                            AdvSeq = OfficialSeq,
-                                            case save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path) of
-                                                ok ->
-                                                    {{ok, true, idempotent_duplicate}, State#state{
-                                                        last_committed_seq = AdvSeq,
-                                                        last_committed_hash = PropHash,
-                                                        last_state_root = PropRoot,
-                                                        epoch = Epoch,
-                                                        status = running,
-                                                        health = healthy
-                                                    }};
-                                                {error, SaveErr} ->
-                                                    {{error, {cursor_save_failed, SaveErr}}, State#state{
-                                                        status = degraded,
-                                                        health = degraded,
-                                                        error_code = err_cursor_save_failed,
-                                                        reason = SaveErr
-                                                    }}
-                                            end
+                                                error_code = err_cursor_save_failed,
+                                                reason = SaveErr
+                                            }}
                                     end;
                                 {rejected, Code, Reason} ->
                                     {{ok, false, rejected}, State#state{status = degraded, health = degraded, error_code = Code, reason = Reason}};
@@ -457,33 +435,63 @@ do_commit_cycle(State) ->
 
 parse_arbitrator_verdict(Resp, PropHash, PropRoot) ->
     case Resp of
+        #{<<"ToSeq">> := TSeq} ->
+            parse_arbitrator_verdict(Resp, to_int(TSeq, 0), PropHash, PropRoot);
+        _ ->
+            OSeq = to_int(maps:get(<<"OfficialSeq">>, Resp, 0), 0),
+            parse_arbitrator_verdict(Resp, OSeq, PropHash, PropRoot)
+    end.
+
+parse_arbitrator_verdict(Resp, ToSeq, PropHash, PropRoot) ->
+    case Resp of
         #{<<"Status">> := <<"COMMITTED">>, <<"OfficialSeq">> := OSeq} ->
             OfficialSeq = to_int(OSeq, 0),
-            HashCheck = check_verdict_hash(Resp, PropHash),
-            RootCheck = check_verdict_root(Resp, PropRoot),
-            case {HashCheck, RootCheck} of
-                {ok, ok} ->
-                    {ok, committed, OfficialSeq};
-                {{error, missing}, _} ->
-                    {rejected, err_missing_proof, <<"COMMITTED verdict missing OfficialHash">>};
-                {_, {error, missing}} ->
-                    {rejected, err_missing_proof, <<"COMMITTED verdict missing OfficialStateRoot">>};
-                _ ->
-                    {rejected, err_state_divergence, <<"Official hash or state root diverged from proposed batch">>}
+            if
+                ToSeq > 0 andalso OfficialSeq < ToSeq ->
+                    {rejected, err_sequence_lag, <<"Arbitrator official sequence lagged behind proposed ToSeq">>};
+                true ->
+                    HashCheck = check_verdict_hash(Resp, PropHash),
+                    RootCheck = check_verdict_root(Resp, PropRoot),
+                    case {HashCheck, RootCheck} of
+                        {ok, ok} ->
+                            {ok, committed, OfficialSeq, PropHash, PropRoot};
+                        {{error, missing}, _} ->
+                            {rejected, err_missing_proof, <<"COMMITTED verdict missing OfficialHash">>};
+                        {_, {error, missing}} ->
+                            {rejected, err_missing_proof, <<"COMMITTED verdict missing OfficialStateRoot">>};
+                        _ ->
+                            {rejected, err_state_divergence, <<"Official hash or state root diverged from proposed batch">>}
+                    end
             end;
         #{<<"Status">> := <<"DUPLICATE_BATCH_IDEMPOTENT">>, <<"OfficialSeq">> := OSeq} ->
             OfficialSeq = to_int(OSeq, 0),
-            HashCheck = check_verdict_hash(Resp, PropHash),
-            RootCheck = check_verdict_root(Resp, PropRoot),
-            case {HashCheck, RootCheck} of
-                {ok, ok} ->
-                    {ok, duplicate, OfficialSeq};
-                {{error, missing}, _} ->
-                    {rejected, err_missing_proof, <<"DUPLICATE_BATCH_IDEMPOTENT verdict missing OfficialHash">>};
-                {_, {error, missing}} ->
-                    {rejected, err_missing_proof, <<"DUPLICATE_BATCH_IDEMPOTENT verdict missing OfficialStateRoot">>};
-                _ ->
-                    {rejected, err_state_divergence, <<"Official hash or state root diverged in DUPLICATE_BATCH_IDEMPOTENT verdict">>}
+            if
+                ToSeq > 0 andalso OfficialSeq < ToSeq ->
+                    {rejected, err_sequence_lag, <<"Arbitrator duplicate sequence lagged behind proposed ToSeq">>};
+                ToSeq > 0 andalso OfficialSeq > ToSeq ->
+                    AoHash = to_bin(maps:get(<<"OfficialHash">>, Resp, maps:get(official_hash, Resp, <<>>))),
+                    AoRoot = to_bin(maps:get(<<"OfficialStateRoot">>, Resp, maps:get(official_state_root, Resp, <<>>))),
+                    if
+                        byte_size(AoHash) =/= 64 ->
+                            {rejected, err_missing_proof, <<"DUPLICATE_BATCH_IDEMPOTENT tip verdict missing or invalid OfficialHash">>};
+                        byte_size(AoRoot) =:= 0 ->
+                            {rejected, err_missing_proof, <<"DUPLICATE_BATCH_IDEMPOTENT tip verdict missing OfficialStateRoot">>};
+                        true ->
+                            {ok, duplicate, OfficialSeq, AoHash, AoRoot}
+                    end;
+                true ->
+                    HashCheck = check_verdict_hash(Resp, PropHash),
+                    RootCheck = check_verdict_root(Resp, PropRoot),
+                    case {HashCheck, RootCheck} of
+                        {ok, ok} ->
+                            {ok, duplicate, OfficialSeq, PropHash, PropRoot};
+                        {{error, missing}, _} ->
+                            {rejected, err_missing_proof, <<"DUPLICATE_BATCH_IDEMPOTENT verdict missing OfficialHash">>};
+                        {_, {error, missing}} ->
+                            {rejected, err_missing_proof, <<"DUPLICATE_BATCH_IDEMPOTENT verdict missing OfficialStateRoot">>};
+                        _ ->
+                            {rejected, err_state_divergence, <<"Official hash or state root diverged in DUPLICATE_BATCH_IDEMPOTENT verdict">>}
+                    end
             end;
         #{<<"Status">> := <<"AUDIT_REJECTED">>, <<"SubStatus">> := Sub, <<"Reason">> := R} ->
             {rejected, Sub, R};
@@ -603,6 +611,29 @@ parse_reg_response(#{<<"ok">> := false, <<"reason">> := Reason}) ->
 parse_reg_response(Other) ->
     {error, {err_registration_unverified, Other}}.
 
+reconcile_arbitrator_state(ArbitratorId, StateMap) when is_map(StateMap) ->
+    StateRec = #state{
+        gateway_url = maps:get(gateway_url, StateMap, "http://127.0.0.1:8996"),
+        cu_url = maps:get(cu_url, StateMap, "http://127.0.0.1:8996"),
+        wallet_info = maps:get(wallet_info, StateMap, #{}),
+        last_committed_seq = maps:get(last_committed_seq, StateMap, 0),
+        last_committed_hash = maps:get(last_committed_hash, StateMap, <<>>),
+        last_state_root = maps:get(last_state_root, StateMap, <<"0">>),
+        cursor_path = maps:get(cursor_path, StateMap, "data/cursor.json"),
+        epoch = maps:get(epoch, StateMap, 1),
+        status = maps:get(status, StateMap, running),
+        health = maps:get(health, StateMap, healthy)
+    },
+    ResRec = reconcile_arbitrator_state(ArbitratorId, StateRec),
+    #{
+        status => ResRec#state.status,
+        health => ResRec#state.health,
+        error_code => ResRec#state.error_code,
+        reason => ResRec#state.reason,
+        last_committed_seq => ResRec#state.last_committed_seq,
+        last_committed_hash => ResRec#state.last_committed_hash,
+        last_state_root => ResRec#state.last_state_root
+    };
 reconcile_arbitrator_state(<<>>, State) ->
     State;
 reconcile_arbitrator_state(ArbitratorId, State) ->
