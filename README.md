@@ -72,11 +72,11 @@ flowchart TD
 - **Immediate In-Memory Idempotency**: Deduplication cache is populated in RAM before network replication. Retries reusing a `request_id` are served immediately without re-mutating state or appending duplicate frames. Parameter discrepancies trigger HTTP 409 (`ERR_IDEMPOTENCY_KEY_CONFLICT`).
 
 ### 2.3 AO Commitment & Settlement Lifecycle (`ao_process/committer.mjs` & `sd/src/sd_committer.erl`)
-- **`submitted`**: Checkpoint batch dispatched to the AO network (`msg_id` recorded), pending Arbitrator consensus evaluation.
+- **`submitted`**: Checkpoint batch dispatched to the AO network via authentic binary ANS-104 DataItem (`application/octet-stream`) or gateway message (`msg_id` recorded), pending Arbitrator consensus evaluation.
 - **`evaluated` / `rejected`**: Arbitrator evaluated the batch and rejected it due to a broken hash chain, sequence gap, or cryptographic fraud (`EQUIVOCATION_PROVEN`).
-- **`verified`**: Arbitrator returned an authoritative verdict (`COMMITTED` or `DUPLICATE_BATCH_IDEMPOTENT`) confirming `OfficialSeq`, `OfficialHash`, and `OfficialStateRoot`.
+- **`verified`**: Arbitrator returned an authoritative verdict (`COMMITTED` or `DUPLICATE_BATCH_IDEMPOTENT`) with strictly validated cryptographic proof: requiring both `OfficialHash` and `OfficialStateRoot` to match proposed tip hashes, and `OfficialSeq >= ToSeq`.
 - **`finalized`**: All verification conditions met on production `ao_network` accompanied by mined Arweave L1 block confirmation proofs bound to the message ID, target process, and commitment tags.
-- **Fail-Closed Cursor Reconciliation**: The committer persists progress atomically (`committer_cursor.json`) with `fsyncSync` / `file:datasync`. If local cursor state deviates from or runs ahead of the official AO sequence, the committer terminates fail-closed (`ERR_CURSOR_AO_STATE_MISMATCH` / `ERR_CURSOR_AHEAD_OF_AO_OFFICIAL_SEQ`).
+- **Fail-Closed Cursor Reconciliation & Durability**: The committer persists progress atomically (`committer_cursor.json`) with synchronous `file:datasync` and `file:close`. If local cursor state deviates from or runs ahead of the official AO sequence (`AoSeq < LocalSeq`), or state divergence is detected, the committer halts fail-closed (`err_chain_sequence_lag` / `err_chain_divergence`). If Genesis ID is unconfigured, heartbeat reporting strictly defaults to unacknowledged (`heartbeat_acknowledged: false`). Node identity advertisements dynamically advertise configured worker endpoints instead of local loopback.
 
 ---
 

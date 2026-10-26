@@ -6,7 +6,7 @@
 %% ============================================================================
 %% Responsibilities:
 %% 1. Direct memory/WAL polling from `sd_runtime` without external HTTP proxy.
-%% 2. Cryptographic RSA-PSS SHA-256 message signing with Arweave JWK wallet.
+%% 2. Authentic ANS-104 DataItem message signing with Arweave JWK wallet.
 %% 3. Autonomous dispatch of `CommitCheckpoint` to AO Arbitrator on Permaweb.
 %% 4. Strict fail-closed durable disk cursor management & cold-start sequence reconciliation.
 %% 5. Autonomous heartbeat emission and quorum health tracking on Genesis Stack.
@@ -161,7 +161,10 @@ init(Opts) ->
             %% Cold-start bootstrap & on-chain reconciliation via Genesis/Arbitrator stack
             State1 = case InitialState#state.genesis_id of
                 <<>> ->
-                    InitialState#state{status = running};
+                    case InitialState#state.arbitrator_id of
+                        <<>> -> InitialState#state{status = running};
+                        ArbId -> reconcile_arbitrator_state(ArbId, InitialState)
+                    end;
                 _GenId ->
                     case do_bootstrap_genesis(InitialState) of
                         {ok, BootstrappedState} ->
@@ -171,9 +174,15 @@ init(Opts) ->
                     end
             end,
 
-            TRef = erlang:send_after(100, self(), commit_tick),
-            write_status_file(State1),
-            {ok, State1#state{timer_ref = TRef}};
+            case State1#state.health of
+                failed_closed ->
+                    write_status_file(State1),
+                    {stop, {chain_divergence, State1#state.reason}};
+                _ ->
+                    TRef = erlang:send_after(100, self(), commit_tick),
+                    write_status_file(State1),
+                    {ok, State1#state{timer_ref = TRef}}
+            end;
 
         {error, CursorErr} ->
             HaltedState = #state{
@@ -357,25 +366,55 @@ do_commit_cycle(State) ->
                         {ok, _HttpStatus, Resp} ->
                             case parse_arbitrator_verdict(Resp, PropHash, PropRoot) of
                                 {ok, committed, OfficialSeq} ->
-                                    AdvSeq = max(ToSeq, OfficialSeq),
-                                    case save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"COMMITTED">>, State#state.cursor_path) of
-                                        ok ->
-                                            {_, StateAfterHb} = do_report_heartbeat(State#state{
-                                                last_committed_seq = AdvSeq,
-                                                last_committed_hash = PropHash,
-                                                last_state_root = PropRoot,
-                                                epoch = Epoch,
-                                                status = running,
-                                                health = healthy
-                                            }),
-                                            {{ok, true, committed}, StateAfterHb};
-                                        {error, SaveErr} ->
-                                            {{error, {cursor_save_failed, SaveErr}}, State#state{status = degraded, health = degraded, reason = SaveErr}}
+                                    if
+                                        OfficialSeq < ToSeq ->
+                                            %% Arbitrator sequence lagged behind proposed batch
+                                            LagErr = {err_sequence_lag, OfficialSeq, ToSeq},
+                                            {{error, LagErr}, State#state{
+                                                status = degraded,
+                                                health = degraded,
+                                                error_code = err_sequence_lag,
+                                                reason = <<"Arbitrator official sequence lagged behind proposed batch">>
+                                            }};
+                                        true ->
+                                            AdvSeq = OfficialSeq,
+                                            case save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"COMMITTED">>, State#state.cursor_path) of
+                                                ok ->
+                                                    {_, StateAfterHb} = do_report_heartbeat(State#state{
+                                                        last_committed_seq = AdvSeq,
+                                                        last_committed_hash = PropHash,
+                                                        last_state_root = PropRoot,
+                                                        epoch = Epoch,
+                                                        status = running,
+                                                        health = healthy
+                                                    }),
+                                                    {{ok, true, committed}, StateAfterHb};
+                                                {error, SaveErr} ->
+                                                    {{error, {cursor_save_failed, SaveErr}}, State#state{
+                                                        status = degraded,
+                                                        health = degraded,
+                                                        error_code = err_cursor_save_failed,
+                                                        reason = SaveErr
+                                                    }}
+                                            end
                                     end;
                                 {ok, duplicate, OfficialSeq} ->
                                     AdvSeq = max(LastSeq, OfficialSeq),
-                                    _ = save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path),
-                                    {{ok, true, idempotent_duplicate}, State#state{status = running, health = healthy}};
+                                    case save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path) of
+                                        ok ->
+                                            {{ok, true, idempotent_duplicate}, State#state{
+                                                last_committed_seq = AdvSeq,
+                                                status = running,
+                                                health = healthy
+                                            }};
+                                        {error, SaveErr} ->
+                                            {{error, {cursor_save_failed, SaveErr}}, State#state{
+                                                status = degraded,
+                                                health = degraded,
+                                                error_code = err_cursor_save_failed,
+                                                reason = SaveErr
+                                            }}
+                                    end;
                                 {rejected, Code, Reason} ->
                                     {{ok, false, rejected}, State#state{status = degraded, health = degraded, error_code = Code, reason = Reason}};
                                 {error, ErrReason} ->
@@ -403,17 +442,33 @@ parse_arbitrator_verdict(Resp, PropHash, PropRoot) ->
     case Resp of
         #{<<"Status">> := <<"COMMITTED">>, <<"OfficialSeq">> := OSeq} ->
             OfficialSeq = to_int(OSeq, 0),
-            HashMatch = case maps:get(<<"OfficialHash">>, Resp, undefined) of
-                undefined -> true;
-                OHash -> string:uppercase(to_bin(OHash)) =:= string:uppercase(to_bin(PropHash))
+            HashCheck = case maps:get(<<"OfficialHash">>, Resp, undefined) of
+                undefined -> {error, missing_official_hash};
+                <<>> -> {error, empty_official_hash};
+                OHash ->
+                    case string:uppercase(to_bin(OHash)) =:= string:uppercase(to_bin(PropHash)) of
+                        true -> ok;
+                        false -> {error, hash_mismatch}
+                    end
             end,
-            RootMatch = case maps:get(<<"OfficialStateRoot">>, Resp, undefined) of
-                undefined -> true;
-                ORoot -> to_bin(ORoot) =:= to_bin(PropRoot)
+            RootCheck = case maps:get(<<"OfficialStateRoot">>, Resp, undefined) of
+                undefined -> {error, missing_official_root};
+                <<>> -> {error, empty_official_root};
+                ORoot ->
+                    case to_bin(ORoot) =:= to_bin(PropRoot) of
+                        true -> ok;
+                        false -> {error, root_mismatch}
+                    end
             end,
-            case HashMatch andalso RootMatch of
-                true -> {ok, committed, OfficialSeq};
-                false -> {rejected, err_state_divergence, <<"Official hash or state root diverged from proposed batch">>}
+            case {HashCheck, RootCheck} of
+                {ok, ok} ->
+                    {ok, committed, OfficialSeq};
+                {{error, missing_official_hash}, _} ->
+                    {rejected, err_missing_proof, <<"COMMITTED verdict missing OfficialHash">>};
+                {_, {error, missing_official_root}} ->
+                    {rejected, err_missing_proof, <<"COMMITTED verdict missing OfficialStateRoot">>};
+                _ ->
+                    {rejected, err_state_divergence, <<"Official hash or state root diverged from proposed batch">>}
             end;
         #{<<"Status">> := <<"DUPLICATE_BATCH_IDEMPOTENT">>, <<"OfficialSeq">> := OSeq} ->
             {ok, duplicate, to_int(OSeq, 0)};
@@ -465,11 +520,12 @@ finish_bootstrap_with_config(Config, State) ->
         ArbitratorId =/= <<>> -> State#state{arbitrator_id = ArbitratorId};
         true -> State
     end,
-    %% Register node identity with Genesis using signed envelope
+    %% Register node identity with Genesis using advertised worker endpoint
+    AdvertisedEndpoint = resolve_worker_endpoint(#{}),
     RegPayload = #{
         <<"node_id">> => State#state.wallet_address,
         <<"role">> => <<"SU_WORKER">>,
-        <<"endpoint">> => <<"http://127.0.0.1:8735">>
+        <<"endpoint">> => AdvertisedEndpoint
     },
     case sd_ao_client:send_message(
         State#state.gateway_url,
@@ -507,25 +563,80 @@ reconcile_arbitrator_state(ArbitratorId, State) ->
     case sd_ao_client:query_state(State#state.gateway_url, ArbitratorId, <<"GetOfficialState">>, #{}) of
         {ok, _Status, #{<<"OfficialSeq">> := AoSeq} = AoState} ->
             OfficialSeq = to_int(AoSeq, 0),
+            AoHash = to_bin(maps:get(<<"OfficialHash">>, AoState, <<>>)),
+            AoRoot = to_bin(maps:get(<<"OfficialStateRoot">>, AoState, <<"0">>)),
+            LocalSeq = State#state.last_committed_seq,
+
             if
-                OfficialSeq > State#state.last_committed_seq ->
-                    AoHash = to_bin(maps:get(<<"OfficialHash">>, AoState, <<>>)),
-                    AoRoot = to_bin(maps:get(<<"OfficialStateRoot">>, AoState, <<"0">>)),
-                    _ = save_disk_cursor(OfficialSeq, AoHash, AoRoot, State#state.epoch, <<"RECONCILED">>, State#state.cursor_path),
+                OfficialSeq < LocalSeq ->
+                    %% Chain is BEHIND local state -> divergence / split-brain! Fail closed!
                     State#state{
-                        last_committed_seq = OfficialSeq,
-                        last_committed_hash = AoHash,
-                        last_state_root = AoRoot
+                        status = halted,
+                        health = failed_closed,
+                        error_code = err_chain_sequence_lag,
+                        reason = <<"Arbitrator on-chain sequence lagged behind local committed state">>
                     };
+
+                OfficialSeq =:= LocalSeq andalso LocalSeq > 0 ->
+                    %% Sequences match: verify hash and state root integrity
+                    LocalHash = State#state.last_committed_hash,
+                    LocalRoot = State#state.last_state_root,
+                    HashDiverged = string:uppercase(AoHash) =/= string:uppercase(LocalHash),
+                    RootDiverged = AoRoot =/= LocalRoot,
+                    if
+                        HashDiverged orelse RootDiverged ->
+                            State#state{
+                                status = halted,
+                                health = failed_closed,
+                                error_code = err_chain_divergence,
+                                reason = <<"Arbitrator official hash or root diverged from local cursor">>
+                            };
+                        true ->
+                            State#state{status = running, health = healthy}
+                    end;
+
+                OfficialSeq > LocalSeq ->
+                    %% Chain is ahead: reconcile durable disk cursor
+                    case save_disk_cursor(OfficialSeq, AoHash, AoRoot, State#state.epoch, <<"RECONCILED">>, State#state.cursor_path) of
+                        ok ->
+                            State#state{
+                                last_committed_seq = OfficialSeq,
+                                last_committed_hash = AoHash,
+                                last_state_root = AoRoot,
+                                status = running,
+                                health = healthy
+                            };
+                        {error, SaveErr} ->
+                            State#state{
+                                status = halted,
+                                health = failed_closed,
+                                error_code = err_cursor_save_failed,
+                                reason = SaveErr
+                            }
+                    end;
+
                 true ->
-                    State
+                    State#state{status = running, health = healthy}
             end;
-        _ ->
-            State
+
+        {error, QueryErr} ->
+            State#state{
+                status = degraded,
+                health = degraded,
+                error_code = err_reconciliation_failed,
+                reason = {arbitrator_query_failed, QueryErr}
+            };
+        _Unrecognized ->
+            State#state{
+                status = degraded,
+                health = degraded,
+                error_code = err_reconciliation_failed,
+                reason = err_unrecognized_arbitrator_state
+            }
     end.
 
 do_report_heartbeat(#state{genesis_id = <<>>} = State) ->
-    {{ok, skipped_no_genesis}, State#state{heartbeat_acknowledged = true, last_heartbeat_time = erlang:system_time(second)}};
+    {{ok, skipped_no_genesis}, State#state{heartbeat_acknowledged = false, last_heartbeat_time = erlang:system_time(second)}};
 do_report_heartbeat(State) ->
     Payload = #{
         <<"node_id">> => State#state.wallet_address,
@@ -570,12 +681,26 @@ load_disk_cursor(CursorPath) ->
                 Map when is_map(Map) ->
                     Seq = to_int(maps:get(<<"last_committed_seq">>, Map, -1), -1),
                     Epoch = to_int(maps:get(<<"epoch">>, Map, 0), 0),
+                    Hash = to_bin(maps:get(<<"last_committed_hash">>, Map, <<>>)),
+                    Root = to_bin(maps:get(<<"last_state_root">>, Map, <<"0">>)),
                     if
-                        Seq >= 0 andalso Epoch >= 1 ->
+                        Seq > 0 andalso Epoch >= 1 ->
+                            if
+                                byte_size(Hash) =:= 64 andalso byte_size(Root) > 0 ->
+                                    {ok, #{
+                                        last_committed_seq => Seq,
+                                        last_committed_hash => Hash,
+                                        last_state_root => Root,
+                                        epoch => Epoch
+                                    }};
+                                true ->
+                                    {error, {invalid_cursor_hash_or_root, Map}}
+                            end;
+                        Seq =:= 0 andalso Epoch >= 1 ->
                             {ok, #{
-                                last_committed_seq => Seq,
-                                last_committed_hash => to_bin(maps:get(<<"last_committed_hash">>, Map, <<>>)),
-                                last_state_root => to_bin(maps:get(<<"last_state_root">>, Map, <<"0">>)),
+                                last_committed_seq => 0,
+                                last_committed_hash => <<>>,
+                                last_state_root => <<"0">>,
                                 epoch => Epoch
                             }};
                         true ->
@@ -628,10 +753,27 @@ atomic_write_file(Path, Data) ->
     TmpPath = Path ++ ".tmp",
     case file:open(TmpPath, [write, raw, binary]) of
         {ok, Fd} ->
-            _ = file:write(Fd, Data),
-            _ = file:datasync(Fd),
-            _ = file:close(Fd),
-            file:rename(TmpPath, Path);
+            case file:write(Fd, Data) of
+                ok ->
+                    case file:datasync(Fd) of
+                        ok ->
+                            _ = file:close(Fd),
+                            case file:rename(TmpPath, Path) of
+                                ok -> ok;
+                                {error, RenameErr} ->
+                                    _ = file:delete(TmpPath),
+                                    {error, {rename_failed, RenameErr}}
+                            end;
+                        {error, SyncErr} ->
+                            _ = file:close(Fd),
+                            _ = file:delete(TmpPath),
+                            {error, {datasync_failed, SyncErr}}
+                    end;
+                {error, WriteErr} ->
+                    _ = file:close(Fd),
+                    _ = file:delete(TmpPath),
+                    {error, {write_failed, WriteErr}}
+            end;
         Err -> Err
     end.
 
@@ -723,6 +865,37 @@ resolve_arbitrator_id(Opts, DbDir) ->
                     read_file_trimmed(ProcFile);
                 "" -> <<>>;
                 Id -> list_to_binary(string:trim(Id))
+            end;
+        Explicit -> to_bin(Explicit)
+    end.
+
+resolve_worker_endpoint(Opts) ->
+    case maps:get(worker_endpoint, Opts, undefined) of
+        undefined ->
+            case os:getenv("HYDB_WORKER_ENDPOINT") of
+                false ->
+                    case os:getenv("SU_URL") of
+                        false ->
+                            NodeId = case os:getenv("HYDB_NODE_ID") of
+                                false -> "sd-node-1";
+                                "" -> "sd-node-1";
+                                NId -> NId
+                            end,
+                            Port = case os:getenv("SU_PORT") of
+                                false -> "8735";
+                                "" -> "8735";
+                                P -> P
+                            end,
+                            list_to_binary("http://" ++ NodeId ++ ":" ++ Port);
+                        "" ->
+                            list_to_binary("http://sd-node-1:8735");
+                        SuUrl ->
+                            list_to_binary(SuUrl)
+                    end;
+                "" ->
+                    list_to_binary("http://sd-node-1:8735");
+                Ep ->
+                    list_to_binary(Ep)
             end;
         Explicit -> to_bin(Explicit)
     end.

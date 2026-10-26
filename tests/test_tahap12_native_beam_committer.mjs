@@ -19,10 +19,11 @@
  *    - Health state machine (`healthy` -> `degraded`).
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import * as arbundles from 'arbundles';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = resolve(__dirname, '..');
@@ -41,7 +42,7 @@ function assert(cond, msg) {
   }
 }
 
-function runTests() {
+async function runTests() {
   console.log('========================================================================');
   console.log(' HyDB Tahap 12: Native In-BEAM AO Committer & Gateway Verification');
   console.log('========================================================================\n');
@@ -114,6 +115,37 @@ function runTests() {
     erlOut.includes('ALL TAHAP 12 IN-BEAM COMMITTER TESTS PASSED'),
     'All In-BEAM Committer lifecycle guarantees verified successfully'
   );
+
+  console.log('\n[Suite 2] Cross-Verification with Official Arweave arbundles:');
+  const tempBinPath = join(ROOT_DIR, 'data/temp_test_ans104.bin');
+  try {
+    const erlItemRes = execFileSync('erl', [
+      '-pa', 'sd/out/ebin',
+      '-noshell',
+      '-eval',
+      `{ok, WI} = sd_ao_client:load_wallet("secrets/wallet_su.json"),
+       Target = <<"0123456789012345678901234567890123456789010">>,
+       Tags = [{<<"Data-Protocol">>, <<"ao">>}, {<<"Action">>, <<"CommitCheckpoint">>}, {<<"Epoch">>, <<"1">>}],
+       {ok, ItemId, Bin} = sd_ao_client:build_ans104_data_item(Target, <<"CommitCheckpoint">>, Tags, <<"{\\"test\\":\\"ans104\\"}">>, WI),
+       file:write_file("${tempBinPath.replace(/\\/g, '/')}", Bin),
+       io:format("~s", [ItemId]),
+       halt(0).`
+    ], { cwd: ROOT_DIR, encoding: 'utf8' });
+
+    assert(existsSync(tempBinPath), 'Native Erlang generated ANS-104 binary DataItem');
+    const buf = readFileSync(tempBinPath);
+    const DataItemCtor = arbundles.DataItem || arbundles.default?.DataItem;
+    const item = new DataItemCtor(buf);
+    const valid = await item.isValid();
+    assert(valid === true, 'arbundles.DataItem cryptographically verifies native RSA-PSS signature');
+    assert(item.id.length === 43, 'arbundles resolves valid 43-character DataItem ID');
+    assert(item.id === erlItemRes.trim(), 'arbundles ID matches Erlang native item ID exactly');
+    assert(item.tags.some(t => t.name === 'Data-Protocol' && t.value === 'ao'), 'DataItem contains valid AO Data-Protocol tag');
+    assert(item.tags.some(t => t.name === 'Action' && t.value === 'CommitCheckpoint'), 'DataItem contains valid CommitCheckpoint Action tag');
+    assert(item.rawData.toString('utf8') === '{"test":"ans104"}', 'DataItem raw data matches original payload exactly');
+  } finally {
+    if (existsSync(tempBinPath)) unlinkSync(tempBinPath);
+  }
 
   console.log('\n========================================================================');
   console.log(` Tahap 12 Native In-BEAM Committer Results: ${passed} PASSED, ${failed} FAILED`);

@@ -32,9 +32,19 @@ HyDB partitions on-chain responsibilities between two independent AO processes b
 
 - **`genesis.lua`**: The AO Genesis Process smart contract. Manages stack topology, authorized nodes, heartbeats, and binds internal stack processes (`ArbitratorProcessId`).
 - **`arbitrator.lua`**: The production AO Arbitrator smart contract. Handles batch checkpoint commits (`CommitCheckpoint`), policy configurations (`SetPolicy`), epoch promotions (`PromoteEpoch`), and fraud proofs.
-- **`committer.mjs`**: Core Arweave & AO transaction builder and autonomous committer supporting `@permaweb/aoconnect` (public AO network), local ArLocal, durable cursor persistence, and dynamic stack discovery via `AO_GENESIS_ID`. Note: In production HyperBEAM deployments, committing is handled natively inside BEAM via `sd_committer.erl`.
+- **`committer.mjs`**: Core Arweave & AO transaction builder and autonomous committer supporting `@permaweb/aoconnect` (public AO network), local ArLocal, durable cursor persistence, and dynamic stack discovery via `AO_GENESIS_ID`. Note: In production HyperBEAM deployments, committing is handled natively inside BEAM via `sd_committer.erl` using pure Erlang ANS-104 DataItem deepHash signing and Avro tag encoding.
 - **`real_ao_evaluator.mjs`**: Deterministic offline AO execution sandbox utilizing `@permaweb/ao-loader` and `process.wasm`.
 - **`deploy_ao_process.mjs`**: CLI utility for deploying individual processes to the AO network.
+
+## Native In-BEAM AO Settlement (`sd_committer.erl` & `sd_ao_client.erl`)
+
+In HyperBEAM deployments, checkpoint commits are signed and dispatched directly from the BEAM VM without Node.js sidecars:
+- **ANS-104 DataItem Format**: Pure Erlang implementation of Arweave deepHash (recursive SHA-384), Avro zigzag tag encoding, and RSA-PSS SHA-256 signing with 512-byte signatures.
+- **Strict Protocol Validation**: Cross-verified byte-for-byte against `@permaweb/aoconnect` and `arbundles.DataItem`.
+- **Fail-Closed Arbitrator Proofs**: `COMMITTED` verdicts strictly require non-empty `OfficialHash`, `OfficialStateRoot`, and `OfficialSeq >= ToSeq`.
+- **Startup Reconciliation**: Detects chain forks and rollback divergence (`AoSeq < LocalSeq`), halting immediately with code 78 (`failed_closed`).
+- **Atomic Cursor Durability**: Physical fsync (`file:datasync`) verified on both state updates and idempotent duplicate commits.
+- **Dynamic Worker Advertisement**: Nodes advertise valid reachable worker endpoints (`HYDB_WORKER_ENDPOINT` or `SU_URL`) rather than `127.0.0.1`.
 
 ## Spawning a Genesis Stack
 

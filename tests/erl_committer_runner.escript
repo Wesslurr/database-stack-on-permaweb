@@ -84,7 +84,7 @@ main(_) ->
     end,
 
     %% ========================================================================
-    %% [Test 2B] Native Cryptographic RSA-PSS Signing & Verification (ANS-104)
+    %% [Test 2B] Authentic ANS-104 DataItem deepHash Signing & Verification
     %% ========================================================================
     PrivKey = maps:get(privkey, WalletInfo),
     OwnerB64 = maps:get(owner, WalletInfo),
@@ -97,6 +97,23 @@ main(_) ->
                     io:format("PASS: In-BEAM RSA-PSS message signature verified against wallet public key~n");
                 false ->
                     io:format("FAIL: RSA-PSS signature verification failed!~n"),
+                    halt(1)
+            end,
+
+            %% Authentic ANS-104 DataItem binary creation & native decode
+            TargetProcess = CalculatedAddr,
+            {ok, ItemId, DataItemBin} = sd_ao_client:build_ans104_data_item(
+                TargetProcess,
+                <<"CommitCheckpoint">>,
+                [{<<"Batch-Id">>, BatchId}],
+                <<"{\"test\":\"data\"}">>,
+                WalletInfo
+            ),
+            case sd_ao_client:verify_ans104_data_item(DataItemBin) of
+                {ok, #{id := ItemId, target := TargetProcess}} ->
+                    io:format("PASS: Authentic ANS-104 DataItem deepHash serialized and verified natively~n");
+                OtherVerify ->
+                    io:format("FAIL: ANS-104 verification failed: ~p~n", [OtherVerify]),
                     halt(1)
             end;
         false ->
@@ -121,10 +138,10 @@ main(_) ->
         BadInitSeq -> io:format("FAIL: unexpected init seq: ~p~n", [BadInitSeq]), halt(1)
     end,
 
-    %% Simulate advancing cursor directly via reload
+    %% Simulate advancing cursor directly via reload (using valid 64-char hex hash)
     FakeCursor = #{
         <<"last_committed_seq">> => 5,
-        <<"last_committed_hash">> => <<"HEX_HASH_SEQ_5">>,
+        <<"last_committed_hash">> => <<"0000000000000000000000000000000000000000000000000000000000000005">>,
         <<"last_state_root">> => <<"55555">>,
         <<"epoch">> => 1,
         <<"verdict">> => <<"COMMITTED">>
@@ -152,6 +169,23 @@ main(_) ->
     end,
     _ = file:delete(CorruptedCursorPath),
 
+    %% Test 3C: Invalid hash/root when seq > 0 strictly rejected
+    InvalidHashCursorPath = filename:join([DbDir, "data/test_invalid_hash_cursor.json"]),
+    ok = file:write_file(InvalidHashCursorPath, json:encode(#{
+        <<"last_committed_seq">> => 5,
+        <<"last_committed_hash">> => <<"SHORT_HASH">>,
+        <<"last_state_root">> => <<"123">>,
+        <<"epoch">> => 1
+    })),
+    case sd_committer:load_disk_cursor(InvalidHashCursorPath) of
+        {error, {invalid_cursor_hash_or_root, _}} ->
+            io:format("PASS: Truncated or invalid hash strictly rejected on cursor load~n");
+        OtherInv ->
+            io:format("FAIL: expected rejection of short hash on cursor, got: ~p~n", [OtherInv]),
+            halt(1)
+    end,
+    _ = file:delete(InvalidHashCursorPath),
+
     %% ========================================================================
     %% [Test 4] Native HTTP AO Client Dispatch & Mock Response Parsing
     %% ========================================================================
@@ -166,8 +200,9 @@ main(_) ->
                 ParentPid ! {received_http_request, ReqData},
                 MockBody = iolist_to_binary(json:encode(#{
                     <<"Status">> => <<"COMMITTED">>,
-                    <<"OfficialSeq">> => 6,
-                    <<"OfficialHash">> => <<"HASH6">>,
+                    <<"OfficialSeq">> => 3,
+                    <<"OfficialHash">> => <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>,
+                    <<"OfficialStateRoot">> => <<"1234567890">>,
                     <<"Verified">> => true
                 })),
                 HttpResp = [
@@ -187,7 +222,7 @@ main(_) ->
     MockGw = "http://127.0.0.1:8999",
     SendRes = sd_ao_client:send_message(
         MockGw,
-        <<"MOCK_ARBITRATOR_ID">>,
+        <<"0123456789012345678901234567890123456789012">>,
         <<"CommitCheckpoint">>,
         [],
         TestBatch,
@@ -197,7 +232,7 @@ main(_) ->
         }
     ),
     case SendRes of
-        {ok, 200, #{<<"Status">> := <<"COMMITTED">>, <<"OfficialSeq">> := 6}} ->
+        {ok, 200, #{<<"Status">> := <<"COMMITTED">>, <<"OfficialSeq">> := 3}} ->
             io:format("PASS: Native Erlang HTTP client dispatches CommitCheckpoint and parses COMMITTED verdict~n");
         BadSend ->
             io:format("FAIL: expected COMMITTED from mock HTTP server, got: ~p~n", [BadSend]),
@@ -206,14 +241,20 @@ main(_) ->
 
     receive
         {received_http_request, ReqRaw} ->
-            ReqStr = binary_to_list(ReqRaw),
-            case string:find(ReqStr, "\"Signature\"") =/= nomatch andalso
-                 string:find(ReqStr, "\"Owner\"") =/= nomatch andalso
-                 string:find(ReqStr, "\"Signature-Type\":1") =/= nomatch of
+            [HeadersBin, BodyBin] = binary:split(ReqRaw, <<"\r\n\r\n">>),
+            HeadersStr = string:lowercase(binary_to_list(HeadersBin)),
+            case string:find(HeadersStr, "application/octet-stream") =/= nomatch andalso
+                 string:find(HeadersStr, "x-dataitem-id:") =/= nomatch of
                 true ->
-                    io:format("PASS: Dispatched message envelope cryptographically signed with RSA-PSS and owner public key~n");
+                    case sd_ao_client:verify_ans104_data_item(BodyBin) of
+                        {ok, #{id := DispatchedId}} when byte_size(DispatchedId) > 0 ->
+                            io:format("PASS: Dispatched message envelope cryptographically signed with RSA-PSS and owner public key~n");
+                        VerifyErr ->
+                            io:format("FAIL: dispatched ANS-104 data item failed verification: ~p~n", [VerifyErr]),
+                            halt(1)
+                    end;
                 false ->
-                    io:format("FAIL: envelope missing cryptographic signature or owner: ~s~n", [ReqStr]),
+                    io:format("FAIL: dispatched request missing octet-stream or dataitem id header: ~s~n", [HeadersStr]),
                     halt(1)
             end
     after 2000 ->
@@ -236,6 +277,20 @@ main(_) ->
             halt(1)
     end,
 
+    %% Test 4C: Missing official hash or state root strictly rejected
+    MissingHashVerdict = #{
+        <<"Status">> => <<"COMMITTED">>,
+        <<"OfficialSeq">> => 7,
+        <<"OfficialStateRoot">> => <<"1234567890">>
+    },
+    case sd_committer:parse_arbitrator_verdict(MissingHashVerdict, <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>, <<"1234567890">>) of
+        {rejected, err_missing_proof, _} ->
+            io:format("PASS: Incomplete verdict missing official hash strictly rejected~n");
+        OtherMissing ->
+            io:format("FAIL: expected rejection on missing hash, got: ~p~n", [OtherMissing]),
+            halt(1)
+    end,
+
     %% ========================================================================
     %% [Test 5] Fail-Closed Security Invariants (Genesis Hash & Impersonation)
     %% ========================================================================
@@ -244,7 +299,6 @@ main(_) ->
         genesis_id => <<"MOCK_GENESIS_ID">>,
         expected_genesis_hash => <<"EXPECTED_PINNED_HASH_1234">>
     }),
-    %% Since mock isn't answering with matching hash, it must fail-closed
     case DivergentRes of
         {error, _} ->
             io:format("PASS: Genesis hash divergence triggers fail-closed error in Erlang committer~n");
@@ -263,6 +317,17 @@ main(_) ->
             io:format("PASS: Missing genesis hash or connection failure triggers strict fail-closed rejection~n");
         BadGenRes ->
             io:format("FAIL: expected fail-closed on unreachable genesis, got: ~p~n", [BadGenRes]),
+            halt(1)
+    end,
+
+    %% C. Heartbeat without Genesis reports heartbeat_acknowledged = false
+    _ = sd_committer:report_heartbeat(),
+    HbStatusNow = sd_committer:get_status(),
+    case maps:get(<<"heartbeat_acknowledged">>, HbStatusNow) of
+        false ->
+            io:format("PASS: Committer heartbeat without Genesis strictly reports unacknowledged~n");
+        BadHbAck ->
+            io:format("FAIL: heartbeat without Genesis falsely marked acknowledged: ~p~n", [BadHbAck]),
             halt(1)
     end,
 

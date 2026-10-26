@@ -61,7 +61,7 @@ services:
       - HYDB_CLUSTER_SECRET=${HYDB_CLUSTER_SECRET:?HYDB_CLUSTER_SECRET_must_be_set_min_16_chars}
       - HYDB_ADMIN_TOKEN=${HYDB_ADMIN_TOKEN:?HYDB_ADMIN_TOKEN_must_be_set_min_16_chars}
       - SU_PORT=8735
-      - SU_URL=http://127.0.0.1:8735/~sd@1.0
+      - SU_URL=http://sd-node-1:8735/~sd@1.0
       - HOT_URL=http://hot-node:8734/~hymessage@1.0
       - HOT_NODE_HOST=hot-node
       - HOT_NODE_PORT=8736
