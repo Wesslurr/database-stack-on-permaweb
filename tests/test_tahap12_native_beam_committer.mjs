@@ -387,16 +387,106 @@ async function runTests() {
     genesisProcessId: mockGenesisId
   });
 
+  const mockQueueProcId = 'queue_order_' + crypto.randomUUID().replace(/-/g, '').slice(0, 32);
+  const queueLua = `
+local ok_json, json = pcall(require, "json")
+if not ok_json or not json then json = require(".json") end
+
+Counter = 0
+History = {}
+
+Handlers.add(
+  "IncrementAndRecord",
+  Handlers.utils.hasMatchingTag("Action", "IncrementAndRecord"),
+  function(msg)
+    Counter = Counter + 1
+    local clientId = (msg.Tags and msg.Tags.ClientId) or msg.From or "unknown"
+    table.insert(History, { order = Counter, client = tostring(clientId) })
+    ao.send({
+      Target = msg.From,
+      Action = "IncrementResponse",
+      Order = tostring(Counter),
+      ClientId = tostring(clientId),
+      Data = json.encode({ order = Counter, client = tostring(clientId) })
+    })
+  end
+)
+
+Handlers.add(
+  "GetQueueState",
+  Handlers.utils.hasMatchingTag("Action", "GetQueueState"),
+  function(msg)
+    ao.send({
+      Target = msg.From,
+      Action = "QueueStateResponse",
+      Order = tostring(Counter),
+      Data = json.encode({ counter = Counter, history = History })
+    })
+  end
+)
+`;
+
   const LOCAL_AO_PORT = 8996;
   const aoNode = await startAoNode({
     port: LOCAL_AO_PORT,
     processes: {
       [mockGenesisId]: genesisLua,
-      [mockArbitratorId]: arbitratorLua
+      [mockArbitratorId]: arbitratorLua,
+      [mockQueueProcId]: queueLua
     }
   });
 
   try {
+    // Step 4A-2: Concurrent HTTP Request FIFO Serialization & Deterministic State Proof
+    const CONCURRENT_MSG_COUNT = 15;
+    const concurrentPromises = [];
+    for (let i = 1; i <= CONCURRENT_MSG_COUNT; i++) {
+      const p = (async () => {
+        const postRes = await fetch(`http://127.0.0.1:${LOCAL_AO_PORT}/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            Target: mockQueueProcId,
+            Action: 'IncrementAndRecord',
+            From: `client_${i}`,
+            Tags: [
+              { name: 'Action', value: 'IncrementAndRecord' },
+              { name: 'ClientId', value: `client_${i}` }
+            ]
+          })
+        });
+        assert(postRes.status === 200, `Concurrent message ${i} accepted by HTTP MU with 200`);
+        const { id: msgId } = await postRes.json();
+
+        // Fetch evaluated result from CU
+        const resultRes = await fetch(`http://127.0.0.1:${LOCAL_AO_PORT}/result/${msgId}?process-id=${mockQueueProcId}`);
+        assert(resultRes.status === 200, `CU result query for ${msgId} returned HTTP 200`);
+        const resultJson = await resultRes.json();
+        const orderNum = parseInt(resultJson.Messages?.[0]?.Order, 10);
+        return { client: `client_${i}`, order: orderNum, msgId };
+      })();
+      concurrentPromises.push(p);
+    }
+
+    const concurrentResults = await Promise.all(concurrentPromises);
+    assert(concurrentResults.length === CONCURRENT_MSG_COUNT, 'All 15 concurrent requests resolved');
+    const assignedOrders = concurrentResults.map((r) => r.order).sort((a, b) => a - b);
+    const expectedOrders = Array.from({ length: CONCURRENT_MSG_COUNT }, (_, idx) => idx + 1);
+    assert(JSON.stringify(assignedOrders) === JSON.stringify(expectedOrders), 'All concurrent messages assigned continuous 1..15 sequence order without duplicates or drops');
+
+    // Query final state via dry-run to prove deterministic WASM linear memory state
+    const queueStateRes = await fetch(`http://127.0.0.1:${LOCAL_AO_PORT}/dry-run?process-id=${mockQueueProcId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ Action: 'GetQueueState' })
+    });
+    const queueStateJson = await queueStateRes.json();
+    const stateData = JSON.parse(queueStateJson.Messages?.[0]?.Data || '{}');
+    assert(stateData.counter === CONCURRENT_MSG_COUNT, 'Final WASM memory state counter strictly matches total concurrent count (15)');
+    assert(stateData.history?.length === CONCURRENT_MSG_COUNT, 'Final WASM memory history contains exact number of recorded items (15)');
+    const historyOrders = (stateData.history || []).map((h) => h.order);
+    assert(JSON.stringify(historyOrders) === JSON.stringify(expectedOrders), 'WASM memory state history records strict continuous FIFO ordering 1..15');
+
     // Generate valid events for Batch 1 (seq 1..3)
     const b1Events = buildValidEvents(1, 3, '0000000000000000000000000000000000000000000000000000000000000000', '0');
     const b1PropHash = b1Events[b1Events.length - 1].hash;
@@ -459,29 +549,39 @@ async function runTests() {
     assert(outStep1.includes('REG_OK:'), 'In-BEAM client successfully registers node with live Genesis Lua contract via MU -> CU flow');
     assert(outStep1.includes('COMMIT1_STATUS:COMMITTED') && outStep1.includes('3'), 'Live Arbitrator Lua contract evaluates ANS-104 DataItem and returns COMMITTED at seq 3 via MU -> CU polling');
 
-    // Step 4C-2: Prove true snapshot isolation on Compute Unit (Dry-run must not mutate state)
+    // Step 4C-2: Prove true snapshot isolation on Compute Unit with a 100% VALID mutating Batch
+    // Construct a completely valid Batch 2 (seq 4..6 chained from seq 3 tip) that WOULD advance state if committed
+    const b2Events = buildValidEvents(4, 3, b1PropHash, b1PropRoot);
+    const b2PropHash = b2Events[b2Events.length - 1].hash;
+    const b2PropRoot = b2Events[b2Events.length - 1].state_root;
+    const validB2Batch = {
+      contract_version: 'hydb.core@1.0',
+      epoch: 1,
+      from_seq: 4,
+      to_seq: 6,
+      prev_hash: b1PropHash,
+      proposed_hash: b2PropHash,
+      proposed_state_root: b2PropRoot,
+      events: b2Events
+    };
+
+    // Execute valid mutating Batch 2 via POST /dry-run
     const dryrunMutRes = await fetch(`http://127.0.0.1:${LOCAL_AO_PORT}/dry-run?process-id=${mockArbitratorId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         Action: 'CommitCheckpoint',
         From: suAddress,
-        Data: JSON.stringify({
-          contract_version: 'hydb.core@1.0',
-          epoch: 1,
-          from_seq: 100,
-          to_seq: 200,
-          prev_hash: 'FORGED_DRYRUN_HASH',
-          proposed_hash: 'FORGED_DRYRUN_HASH',
-          proposed_state_root: '999999999',
-          events: []
-        })
+        Data: JSON.stringify(validB2Batch)
       })
     });
     const dryrunMutJson = await dryrunMutRes.json();
-    assert(dryrunMutJson, 'Dry-run query executed inside isolated WASM memory snapshot');
+    const dryrunVerdict = dryrunMutJson.Messages?.[0];
+    assert(dryrunVerdict?.Status === 'COMMITTED', 'Valid checkpoint dry-run returns COMMITTED verdict inside ephemeral execution sandbox');
+    assert(String(dryrunVerdict?.OfficialSeq) === '6', 'Valid checkpoint dry-run returns advanced sequence 6 inside ephemeral execution sandbox');
+    assert(dryrunVerdict?.OfficialHash === b2PropHash, 'Valid checkpoint dry-run returns proposed tip hash inside ephemeral execution sandbox');
 
-    // Query official state via dry-run to prove Arbitrator sequence did NOT advance from dry-run mutation
+    // Query official state via dry-run to prove Arbitrator sequence did NOT advance in persistent WASM memory
     const dryrunCheckRes = await fetch(`http://127.0.0.1:${LOCAL_AO_PORT}/dry-run?process-id=${mockArbitratorId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -489,12 +589,10 @@ async function runTests() {
     });
     const dryrunCheckJson = await dryrunCheckRes.json();
     const stateMsgBeforeB2 = dryrunCheckJson.Messages?.[0];
-    assert(stateMsgBeforeB2 && String(stateMsgBeforeB2.OfficialSeq) === '3', 'True Snapshot Isolation proven: mutating dry-run left zero footprint on committed state (OfficialSeq remains 3)');
+    assert(stateMsgBeforeB2 && String(stateMsgBeforeB2.OfficialSeq) === '3', 'True Snapshot Isolation proven: persistent OfficialSeq strictly remains 3 despite valid mutating dry-run returning COMMITTED at seq 6');
+    assert(stateMsgBeforeB2.OfficialHash === b1PropHash, 'True Snapshot Isolation proven: persistent official hash strictly remains at seq 3 tip hash');
 
     // Step 4D: Advance Arbitrator tip to seq 6 using Batch 2 dispatched through HTTP MU -> CU flow
-    const b2Events = buildValidEvents(4, 3, b1PropHash, b1PropRoot);
-    const b2PropHash = b2Events[b2Events.length - 1].hash;
-    const b2PropRoot = b2Events[b2Events.length - 1].state_root;
 
     const erlSuite4Step2Script = `
       _ = application:ensure_all_started(inets),
@@ -536,6 +634,17 @@ async function runTests() {
     ], { cwd: ROOT_DIR, encoding: 'utf8', env: { ...process.env, HYDB_PROFILE: 'test' } });
 
     assert(outStep1B.includes('COMMIT2_STATUS:COMMITTED') && outStep1B.includes('6'), 'Batch 2 evaluated over authentic HTTP MU -> CU pipeline, advancing Arbitrator tip to seq 6');
+
+    // Query official state to prove persistent WASM memory has now legitimately advanced to seq 6
+    const postCommitRes = await fetch(`http://127.0.0.1:${LOCAL_AO_PORT}/dry-run?process-id=${mockArbitratorId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ Action: 'GetOfficialState' })
+    });
+    const postCommitJson = await postCommitRes.json();
+    const stateMsgAfterB2 = postCommitJson.Messages?.[0];
+    assert(String(stateMsgAfterB2?.OfficialSeq) === '6', 'Persistent state now officially advanced to seq 6 only upon real commit');
+    assert(stateMsgAfterB2?.OfficialHash === b2PropHash, 'Persistent official hash strictly matches Batch 2 hash');
 
     // Step 4E: Full in-BEAM committer cycle with lagging local WAL (local seq 3 vs Arbitrator tip 6)
     const walFile = join(ROOT_DIR, 'data/test_suite4_wal.log');

@@ -147,14 +147,16 @@ export class WasmAoProcess {
 
     // Strictly serialize all message evaluations per process in FIFO order
     return new Promise((resolve, reject) => {
-      this.executionQueue = this.executionQueue.then(async () => {
-        try {
-          const res = await this._executeMessage(msg, isDryRun);
-          resolve(res);
-        } catch (err) {
-          reject(err);
-        }
-      });
+      this.executionQueue = this.executionQueue
+        .catch(() => {})
+        .then(async () => {
+          try {
+            const res = await this._executeMessage(msg, isDryRun);
+            resolve(res);
+          } catch (err) {
+            reject(err);
+          }
+        });
     });
   }
 
