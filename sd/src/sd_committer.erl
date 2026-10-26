@@ -7,10 +7,11 @@
 %% Responsibilities:
 %% 1. Direct memory/WAL polling from `sd_runtime` without external HTTP proxy.
 %% 2. Authentic ANS-104 DataItem message signing with Arweave JWK wallet.
-%% 3. Autonomous dispatch of `CommitCheckpoint` to AO Arbitrator on Permaweb.
-%% 4. Strict fail-closed durable disk cursor management & cold-start sequence reconciliation.
-%% 5. Autonomous heartbeat emission and quorum health tracking on Genesis Stack.
-%% 6. Strict fail-closed circuit breaker on split-brain, sequence tampering, or state divergence.
+%% 3. Full AO MU message submission and CU evaluation result polling pipeline.
+%% 4. Autonomous dispatch of `CommitCheckpoint` to AO Arbitrator on Permaweb.
+%% 5. Strict fail-closed durable disk cursor management & cold-start sequence reconciliation.
+%% 6. Autonomous heartbeat emission and quorum health tracking on Genesis Stack.
+%% 7. Strict fail-closed circuit breaker on split-brain, sequence tampering, or state divergence.
 %% ============================================================================
 
 -export([start_link/0, start_link/1, ensure_started/0, ensure_started/1, stop/0]).
@@ -46,6 +47,7 @@
     heartbeat_acknowledged = false,
     heartbeat_error = none,
     gateway_url = "http://127.0.0.1:8735",
+    cu_url = "",
     last_heartbeat_time = 0
 }).
 
@@ -120,6 +122,7 @@ init(Opts) ->
     CursorPath = resolve_cursor_path(Opts, DbDir),
     WalletPath = resolve_wallet_path(Opts, DbDir),
     GatewayUrl = resolve_gateway_url(Opts),
+    CuUrl = resolve_cu_url(Opts),
     BatchMax = maps:get(batch_max, Opts, ?DEFAULT_BATCH_MAX),
     PollMs = maps:get(poll_interval_ms, Opts, ?DEFAULT_POLL_INTERVAL_MS),
 
@@ -147,6 +150,7 @@ init(Opts) ->
                 wallet_info = WalletInfo,
                 cluster_secret = ClusterSec,
                 gateway_url = GatewayUrl,
+                cu_url = CuUrl,
                 batch_max = BatchMax,
                 poll_interval_ms = PollMs,
                 last_committed_seq = LastSeq,
@@ -357,7 +361,8 @@ do_commit_cycle(State) ->
                                 FinalBatch,
                                 #{
                                     sender => State#state.wallet_address,
-                                    wallet => State#state.wallet_info
+                                    wallet => State#state.wallet_info,
+                                    cu_url => State#state.cu_url
                                 }
                             )
                     end,
@@ -368,7 +373,6 @@ do_commit_cycle(State) ->
                                 {ok, committed, OfficialSeq} ->
                                     if
                                         OfficialSeq < ToSeq ->
-                                            %% Arbitrator sequence lagged behind proposed batch
                                             LagErr = {err_sequence_lag, OfficialSeq, ToSeq},
                                             {{error, LagErr}, State#state{
                                                 status = degraded,
@@ -399,21 +403,35 @@ do_commit_cycle(State) ->
                                             end
                                     end;
                                 {ok, duplicate, OfficialSeq} ->
-                                    AdvSeq = max(LastSeq, OfficialSeq),
-                                    case save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path) of
-                                        ok ->
-                                            {{ok, true, idempotent_duplicate}, State#state{
-                                                last_committed_seq = AdvSeq,
-                                                status = running,
-                                                health = healthy
-                                            }};
-                                        {error, SaveErr} ->
-                                            {{error, {cursor_save_failed, SaveErr}}, State#state{
+                                    if
+                                        OfficialSeq < ToSeq ->
+                                            LagErr = {err_sequence_lag, OfficialSeq, ToSeq},
+                                            {{error, LagErr}, State#state{
                                                 status = degraded,
                                                 health = degraded,
-                                                error_code = err_cursor_save_failed,
-                                                reason = SaveErr
-                                            }}
+                                                error_code = err_sequence_lag,
+                                                reason = <<"Arbitrator duplicate sequence lagged behind proposed ToSeq">>
+                                            }};
+                                        true ->
+                                            AdvSeq = OfficialSeq,
+                                            case save_disk_cursor(AdvSeq, PropHash, PropRoot, Epoch, <<"DUPLICATE_BATCH_IDEMPOTENT">>, State#state.cursor_path) of
+                                                ok ->
+                                                    {{ok, true, idempotent_duplicate}, State#state{
+                                                        last_committed_seq = AdvSeq,
+                                                        last_committed_hash = PropHash,
+                                                        last_state_root = PropRoot,
+                                                        epoch = Epoch,
+                                                        status = running,
+                                                        health = healthy
+                                                    }};
+                                                {error, SaveErr} ->
+                                                    {{error, {cursor_save_failed, SaveErr}}, State#state{
+                                                        status = degraded,
+                                                        health = degraded,
+                                                        error_code = err_cursor_save_failed,
+                                                        reason = SaveErr
+                                                    }}
+                                            end
                                     end;
                                 {rejected, Code, Reason} ->
                                     {{ok, false, rejected}, State#state{status = degraded, health = degraded, error_code = Code, reason = Reason}};
@@ -427,7 +445,6 @@ do_commit_cycle(State) ->
                     {{ok, false, empty_batch}, State}
             end;
         true ->
-            %% Idle state: maintain Genesis heartbeat periodically (every 10 seconds)
             Now = erlang:system_time(second),
             if
                 (Now - State#state.last_heartbeat_time) >= 10 ->
@@ -442,42 +459,60 @@ parse_arbitrator_verdict(Resp, PropHash, PropRoot) ->
     case Resp of
         #{<<"Status">> := <<"COMMITTED">>, <<"OfficialSeq">> := OSeq} ->
             OfficialSeq = to_int(OSeq, 0),
-            HashCheck = case maps:get(<<"OfficialHash">>, Resp, undefined) of
-                undefined -> {error, missing_official_hash};
-                <<>> -> {error, empty_official_hash};
-                OHash ->
-                    case string:uppercase(to_bin(OHash)) =:= string:uppercase(to_bin(PropHash)) of
-                        true -> ok;
-                        false -> {error, hash_mismatch}
-                    end
-            end,
-            RootCheck = case maps:get(<<"OfficialStateRoot">>, Resp, undefined) of
-                undefined -> {error, missing_official_root};
-                <<>> -> {error, empty_official_root};
-                ORoot ->
-                    case to_bin(ORoot) =:= to_bin(PropRoot) of
-                        true -> ok;
-                        false -> {error, root_mismatch}
-                    end
-            end,
+            HashCheck = check_verdict_hash(Resp, PropHash),
+            RootCheck = check_verdict_root(Resp, PropRoot),
             case {HashCheck, RootCheck} of
                 {ok, ok} ->
                     {ok, committed, OfficialSeq};
-                {{error, missing_official_hash}, _} ->
+                {{error, missing}, _} ->
                     {rejected, err_missing_proof, <<"COMMITTED verdict missing OfficialHash">>};
-                {_, {error, missing_official_root}} ->
+                {_, {error, missing}} ->
                     {rejected, err_missing_proof, <<"COMMITTED verdict missing OfficialStateRoot">>};
                 _ ->
                     {rejected, err_state_divergence, <<"Official hash or state root diverged from proposed batch">>}
             end;
         #{<<"Status">> := <<"DUPLICATE_BATCH_IDEMPOTENT">>, <<"OfficialSeq">> := OSeq} ->
-            {ok, duplicate, to_int(OSeq, 0)};
+            OfficialSeq = to_int(OSeq, 0),
+            HashCheck = check_verdict_hash(Resp, PropHash),
+            RootCheck = check_verdict_root(Resp, PropRoot),
+            case {HashCheck, RootCheck} of
+                {ok, ok} ->
+                    {ok, duplicate, OfficialSeq};
+                {{error, missing}, _} ->
+                    {rejected, err_missing_proof, <<"DUPLICATE_BATCH_IDEMPOTENT verdict missing OfficialHash">>};
+                {_, {error, missing}} ->
+                    {rejected, err_missing_proof, <<"DUPLICATE_BATCH_IDEMPOTENT verdict missing OfficialStateRoot">>};
+                _ ->
+                    {rejected, err_state_divergence, <<"Official hash or state root diverged in DUPLICATE_BATCH_IDEMPOTENT verdict">>}
+            end;
         #{<<"Status">> := <<"AUDIT_REJECTED">>, <<"SubStatus">> := Sub, <<"Reason">> := R} ->
             {rejected, Sub, R};
         #{<<"SubStatus">> := Sub, <<"Reason">> := R} ->
             {rejected, Sub, R};
         Other ->
             {rejected, err_unrecognized_verdict, Other}
+    end.
+
+check_verdict_hash(Resp, PropHash) ->
+    case maps:get(<<"OfficialHash">>, Resp, maps:get(official_hash, Resp, undefined)) of
+        undefined -> {error, missing};
+        <<>> -> {error, missing};
+        OHash ->
+            case string:uppercase(to_bin(OHash)) =:= string:uppercase(to_bin(PropHash)) of
+                true -> ok;
+                false -> {error, mismatch}
+            end
+    end.
+
+check_verdict_root(Resp, PropRoot) ->
+    case maps:get(<<"OfficialStateRoot">>, Resp, maps:get(official_state_root, Resp, undefined)) of
+        undefined -> {error, missing};
+        <<>> -> {error, missing};
+        ORoot ->
+            case to_bin(ORoot) =:= to_bin(PropRoot) of
+                true -> ok;
+                false -> {error, mismatch}
+            end
     end.
 
 %% ============================================================================
@@ -487,31 +522,42 @@ parse_arbitrator_verdict(Resp, PropHash, PropRoot) ->
 do_bootstrap_genesis(#state{genesis_id = <<>>} = State) ->
     {ok, State#state{status = running}};
 do_bootstrap_genesis(State) ->
-    GenesisId = State#state.genesis_id,
-    QueryRes = sd_ao_client:query_state(State#state.gateway_url, GenesisId, <<"GetGenesisConfig">>, #{}),
-    case QueryRes of
-        {ok, _Status, Resp} ->
-            %% 1. Strict verification of Genesis Hash if configured
-            ExpectedHash = State#state.expected_genesis_hash,
-            ActualHash = extract_genesis_hash(Resp),
-            if
-                ExpectedHash =/= <<>> ->
+    ExpectedHash = State#state.expected_genesis_hash,
+    Profile = get_hydb_profile(),
+    if
+        ExpectedHash =:= <<>> andalso Profile =:= production ->
+            {error, {err_genesis_hash_required, <<"Genesis Hash must be pinned in production profile">>}};
+        true ->
+            GenesisId = State#state.genesis_id,
+            QueryRes = sd_ao_client:query_state(
+                State#state.gateway_url,
+                GenesisId,
+                <<"GetGenesisConfig">>,
+                #{},
+                #{cu_url => State#state.cu_url, wallet => State#state.wallet_info}
+            ),
+            case QueryRes of
+                {ok, _Status, Resp} ->
+                    ActualHash = extract_genesis_hash(Resp),
                     if
-                        ActualHash =:= <<>> ->
-                            {error, {err_genesis_hash_missing, <<"Genesis response did not contain genesis_hash">>}};
-                        true ->
-                            case string:uppercase(ExpectedHash) =:= string:uppercase(ActualHash) of
-                                false ->
-                                    {error, {err_genesis_hash_mismatch, ExpectedHash, ActualHash}};
+                        ExpectedHash =/= <<>> ->
+                            if
+                                ActualHash =:= <<>> ->
+                                    {error, {err_genesis_hash_missing, <<"Genesis response did not contain genesis_hash">>}};
                                 true ->
-                                    finish_bootstrap_with_config(Resp, State)
-                            end
+                                    case string:uppercase(ExpectedHash) =:= string:uppercase(ActualHash) of
+                                        false ->
+                                            {error, {err_genesis_hash_mismatch, ExpectedHash, ActualHash}};
+                                        true ->
+                                            finish_bootstrap_with_config(Resp, State)
+                                    end
+                            end;
+                        true ->
+                            finish_bootstrap_with_config(Resp, State)
                     end;
-                true ->
-                    finish_bootstrap_with_config(Resp, State)
-            end;
-        {error, Reason} ->
-            {error, {genesis_query_failed, Reason}}
+                {error, Reason} ->
+                    {error, {genesis_query_failed, Reason}}
+            end
     end.
 
 finish_bootstrap_with_config(Config, State) ->
@@ -520,7 +566,6 @@ finish_bootstrap_with_config(Config, State) ->
         ArbitratorId =/= <<>> -> State#state{arbitrator_id = ArbitratorId};
         true -> State
     end,
-    %% Register node identity with Genesis using advertised worker endpoint
     AdvertisedEndpoint = resolve_worker_endpoint(#{}),
     RegPayload = #{
         <<"node_id">> => State#state.wallet_address,
@@ -535,7 +580,8 @@ finish_bootstrap_with_config(Config, State) ->
         RegPayload,
         #{
             sender => State#state.wallet_address,
-            wallet => State#state.wallet_info
+            wallet => State#state.wallet_info,
+            cu_url => State#state.cu_url
         }
     ) of
         {ok, _Status, RegResp} ->
@@ -560,14 +606,29 @@ parse_reg_response(Other) ->
 reconcile_arbitrator_state(<<>>, State) ->
     State;
 reconcile_arbitrator_state(ArbitratorId, State) ->
-    case sd_ao_client:query_state(State#state.gateway_url, ArbitratorId, <<"GetOfficialState">>, #{}) of
-        {ok, _Status, #{<<"OfficialSeq">> := AoSeq} = AoState} ->
-            OfficialSeq = to_int(AoSeq, 0),
-            AoHash = to_bin(maps:get(<<"OfficialHash">>, AoState, <<>>)),
-            AoRoot = to_bin(maps:get(<<"OfficialStateRoot">>, AoState, <<"0">>)),
+    case sd_ao_client:query_state(
+        State#state.gateway_url,
+        ArbitratorId,
+        <<"GetOfficialState">>,
+        #{},
+        #{cu_url => State#state.cu_url, wallet => State#state.wallet_info}
+    ) of
+        {ok, _Status, AoState} when is_map(AoState) ->
+            AoSeq = maps:get(<<"OfficialSeq">>, AoState, maps:get(official_seq, AoState, -1)),
+            OfficialSeq = to_int(AoSeq, -1),
+            AoHash = to_bin(maps:get(<<"OfficialHash">>, AoState, maps:get(official_hash, AoState, <<>>))),
+            AoRoot = to_bin(maps:get(<<"OfficialStateRoot">>, AoState, maps:get(official_state_root, AoState, <<"0">>))),
             LocalSeq = State#state.last_committed_seq,
 
             if
+                OfficialSeq < 0 ->
+                    State#state{
+                        status = degraded,
+                        health = degraded,
+                        error_code = err_reconciliation_failed,
+                        reason = <<"Invalid or missing OfficialSeq in Arbitrator state">>
+                    };
+
                 OfficialSeq < LocalSeq ->
                     %% Chain is BEHIND local state -> divergence / split-brain! Fail closed!
                     State#state{
@@ -578,7 +639,6 @@ reconcile_arbitrator_state(ArbitratorId, State) ->
                     };
 
                 OfficialSeq =:= LocalSeq andalso LocalSeq > 0 ->
-                    %% Sequences match: verify hash and state root integrity
                     LocalHash = State#state.last_committed_hash,
                     LocalRoot = State#state.last_state_root,
                     HashDiverged = string:uppercase(AoHash) =/= string:uppercase(LocalHash),
@@ -596,23 +656,33 @@ reconcile_arbitrator_state(ArbitratorId, State) ->
                     end;
 
                 OfficialSeq > LocalSeq ->
-                    %% Chain is ahead: reconcile durable disk cursor
-                    case save_disk_cursor(OfficialSeq, AoHash, AoRoot, State#state.epoch, <<"RECONCILED">>, State#state.cursor_path) of
-                        ok ->
-                            State#state{
-                                last_committed_seq = OfficialSeq,
-                                last_committed_hash = AoHash,
-                                last_state_root = AoRoot,
-                                status = running,
-                                health = healthy
-                            };
-                        {error, SaveErr} ->
+                    %% Chain is ahead: strictly validate official proof fields before updating disk
+                    if
+                        byte_size(AoHash) =/= 64 orelse byte_size(AoRoot) =:= 0 ->
                             State#state{
                                 status = halted,
                                 health = failed_closed,
-                                error_code = err_cursor_save_failed,
-                                reason = SaveErr
-                            }
+                                error_code = err_reconciliation_invalid_proof,
+                                reason = <<"Arbitrator on-chain state has invalid or missing OfficialHash or OfficialStateRoot">>
+                            };
+                        true ->
+                            case save_disk_cursor(OfficialSeq, AoHash, AoRoot, State#state.epoch, <<"RECONCILED">>, State#state.cursor_path) of
+                                ok ->
+                                    State#state{
+                                        last_committed_seq = OfficialSeq,
+                                        last_committed_hash = AoHash,
+                                        last_state_root = AoRoot,
+                                        status = running,
+                                        health = healthy
+                                    };
+                                {error, SaveErr} ->
+                                    State#state{
+                                        status = halted,
+                                        health = failed_closed,
+                                        error_code = err_cursor_save_failed,
+                                        reason = SaveErr
+                                    }
+                            end
                     end;
 
                 true ->
@@ -651,7 +721,8 @@ do_report_heartbeat(State) ->
         Payload,
         #{
             sender => State#state.wallet_address,
-            wallet => State#state.wallet_info
+            wallet => State#state.wallet_info,
+            cu_url => State#state.cu_url
         }
     ),
     Now = erlang:system_time(second),
@@ -792,6 +863,13 @@ get_db_dir() ->
         Dir -> Dir
     end.
 
+get_hydb_profile() ->
+    case os:getenv("HYDB_PROFILE") of
+        "test" -> test;
+        "local-dev" -> local_dev;
+        _ -> production
+    end.
+
 resolve_cursor_path(Opts, DbDir) ->
     case maps:get(cursor_path, Opts, undefined) of
         undefined ->
@@ -828,6 +906,17 @@ resolve_gateway_url(Opts) ->
                 Gw -> Gw
             end;
         Explicit -> Explicit
+    end.
+
+resolve_cu_url(Opts) ->
+    case maps:get(cu_url, Opts, undefined) of
+        undefined ->
+            case os:getenv("AO_CU_URL") of
+                false -> "";
+                "" -> "";
+                CuUrl -> CuUrl
+            end;
+        Explicit -> to_list(Explicit)
     end.
 
 resolve_genesis_id(Opts, DbDir) ->
@@ -918,6 +1007,12 @@ to_bin(V) when is_list(V) -> list_to_binary(V);
 to_bin(V) when is_atom(V) -> atom_to_binary(V, utf8);
 to_bin(V) when is_integer(V) -> integer_to_binary(V);
 to_bin(_) -> <<>>.
+
+to_list(V) when is_list(V) -> V;
+to_list(V) when is_binary(V) -> binary_to_list(V);
+to_list(V) when is_atom(V) -> atom_to_list(V);
+to_list(V) when is_integer(V) -> integer_to_list(V);
+to_list(_) -> "".
 
 to_int(V, _Def) when is_integer(V) -> V;
 to_int(V, Def) when is_binary(V) ->

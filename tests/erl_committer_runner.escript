@@ -126,7 +126,7 @@ main(_) ->
     %% ========================================================================
     CursorTestPath = filename:join([DbDir, "data/test_beam_committer_cursor.json"]),
     _ = file:delete(CursorTestPath),
-    {ok, _CommPid} = sd_committer:start_link(#{
+    {ok, _CommPid} = sd_committer:ensure_started(#{
         cursor_path => CursorTestPath,
         wallet_path => WalletFile,
         batch_max => 5,
@@ -222,7 +222,7 @@ main(_) ->
     MockGw = "http://127.0.0.1:8999",
     SendRes = sd_ao_client:send_message(
         MockGw,
-        <<"0123456789012345678901234567890123456789012">>,
+        CalculatedAddr,
         <<"CommitCheckpoint">>,
         [],
         TestBatch,
@@ -262,7 +262,231 @@ main(_) ->
         halt(1)
     end,
 
-    %% Test 4B: Strict verdict hash matching and fail-closed divergence
+    %% ========================================================================
+    %% [Test 4B] AO Public Architecture: MU Message -> CU Result Polling Flow
+    %% ========================================================================
+    CuMockPort = 8991,
+    MuMockPort = 8992,
+    {ok, CuListen} = gen_tcp:listen(CuMockPort, [binary, {packet, 0}, {active, false}, {reuseaddr, true}]),
+    {ok, MuListen} = gen_tcp:listen(MuMockPort, [binary, {packet, 0}, {active, false}, {reuseaddr, true}]),
+
+    %% Spawn mock CU server responding to /result/:id and /dry-run
+    spawn_link(fun() ->
+        case gen_tcp:accept(CuListen, 5000) of
+            {ok, CuSock} ->
+                _CuReq = recv_full_http(CuSock, <<>>),
+                CuRespBody = iolist_to_binary(json:encode(#{
+                    <<"Messages">> => [
+                        #{
+                            <<"Target">> => <<"SU_CLIENT">>,
+                            <<"Action">> => <<"Checkpoint-Committed">>,
+                            <<"Tags">> => [
+                                #{<<"name">> => <<"Action">>, <<"value">> => <<"Checkpoint-Committed">>},
+                                #{<<"name">> => <<"Status">>, <<"value">> => <<"COMMITTED">>},
+                                #{<<"name">> => <<"OfficialSeq">>, <<"value">> => <<"3">>},
+                                #{<<"name">> => <<"OfficialHash">>, <<"value">> => <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>},
+                                #{<<"name">> => <<"OfficialStateRoot">>, <<"value">> => <<"1234567890">>}
+                            ]
+                        }
+                    ],
+                    <<"Output">> => #{<<"ok">> => true}
+                })),
+                CuHttpResp = [
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: ", integer_to_list(byte_size(CuRespBody)), "\r\n",
+                    "\r\n",
+                    binary_to_list(CuRespBody)
+                ],
+                ok = gen_tcp:send(CuSock, CuHttpResp),
+                gen_tcp:close(CuSock);
+            _ -> ok
+        end,
+        gen_tcp:close(CuListen)
+    end),
+
+    %% Spawn mock MU server returning standard { "id": "MSG_AO_MOCK_99" }
+    spawn_link(fun() ->
+        case gen_tcp:accept(MuListen, 5000) of
+            {ok, MuSock} ->
+                _MuReq = recv_full_http(MuSock, <<>>),
+                MuRespBody = iolist_to_binary(json:encode(#{<<"id">> => <<"MSG_AO_MOCK_99">>})),
+                MuHttpResp = [
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: ", integer_to_list(byte_size(MuRespBody)), "\r\n",
+                    "\r\n",
+                    binary_to_list(MuRespBody)
+                ],
+                ok = gen_tcp:send(MuSock, MuHttpResp),
+                gen_tcp:close(MuSock);
+            _ -> ok
+        end,
+        gen_tcp:close(MuListen)
+    end),
+
+    %% Send message targeting MU with CU URL configured
+    MuUrl = "http://127.0.0.1:8992",
+    CuUrl = "http://127.0.0.1:8991",
+    MuSendRes = sd_ao_client:send_message(
+        MuUrl,
+        CalculatedAddr,
+        <<"CommitCheckpoint">>,
+        [],
+        TestBatch,
+        #{
+            sender => CalculatedAddr,
+            wallet => WalletInfo,
+            cu_url => CuUrl
+        }
+    ),
+    case MuSendRes of
+        {ok, 200, #{<<"Status">> := <<"COMMITTED">>, <<"OfficialSeq">> := <<"3">>}} ->
+            io:format("PASS: In-BEAM committer fetches and evaluates verdict via CU result endpoint~n");
+        OtherMuRes ->
+            io:format("FAIL: expected CU result evaluation from MU->CU flow, got: ~p~n", [OtherMuRes]),
+            halt(1)
+    end,
+
+    %% ========================================================================
+    %% [Test 4C] Official AO Compute Unit dry-run Evaluation for query_state
+    %% ========================================================================
+    DryrunCuPort = 8993,
+    {ok, DryrunListen} = gen_tcp:listen(DryrunCuPort, [binary, {packet, 0}, {active, false}, {reuseaddr, true}]),
+    spawn_link(fun() ->
+        case gen_tcp:accept(DryrunListen, 5000) of
+            {ok, DrSock} ->
+                DrReq = recv_full_http(DrSock, <<>>),
+                [_, DrBody] = binary:split(DrReq, <<"\r\n\r\n">>),
+                ParentPid ! {dryrun_body, DrBody},
+                DrRespBody = iolist_to_binary(json:encode(#{
+                    <<"Messages">> => [
+                        #{
+                            <<"Action">> => <<"OfficialStateResponse">>,
+                            <<"Data">> => iolist_to_binary(json:encode(#{
+                                <<"OfficialSeq">> => 3,
+                                <<"OfficialHash">> => <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>,
+                                <<"OfficialStateRoot">> => <<"1234567890">>
+                            }))
+                        }
+                    ]
+                })),
+                DrHttpResp = [
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: ", integer_to_list(byte_size(DrRespBody)), "\r\n",
+                    "\r\n",
+                    binary_to_list(DrRespBody)
+                ],
+                ok = gen_tcp:send(DrSock, DrHttpResp),
+                gen_tcp:close(DrSock);
+            _ -> ok
+        end,
+        gen_tcp:close(DryrunListen)
+    end),
+
+    DryrunRes = sd_ao_client:query_state(
+        "http://127.0.0.1:8993",
+        CalculatedAddr,
+        <<"GetOfficialState">>,
+        #{},
+        #{cu_url => "http://127.0.0.1:8993", wallet => WalletInfo}
+    ),
+    case DryrunRes of
+        {ok, 200, #{<<"OfficialSeq">> := 3}} ->
+            io:format("PASS: Official AO Compute Unit dry-run evaluation query verified~n");
+        BadDryrun ->
+            io:format("FAIL: expected dryrun query result, got: ~p~n", [BadDryrun]),
+            halt(1)
+    end,
+    receive
+        {dryrun_body, BodyJson} ->
+            case string:find(binary_to_list(BodyJson), "GetOfficialState") =/= nomatch of
+                true -> ok;
+                false -> io:format("FAIL: dryrun body missing Action GetOfficialState~n"), halt(1)
+            end
+    after 1000 ->
+        io:format("FAIL: timeout waiting for dryrun body~n"), halt(1)
+    end,
+
+    %% ========================================================================
+    %% [Test 4D] Strict DUPLICATE_BATCH_IDEMPOTENT Verdict Verification
+    %% ========================================================================
+    ValidDupVerdict = #{
+        <<"Status">> => <<"DUPLICATE_BATCH_IDEMPOTENT">>,
+        <<"OfficialSeq">> => 3,
+        <<"OfficialHash">> => <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>,
+        <<"OfficialStateRoot">> => <<"1234567890">>
+    },
+    case sd_committer:parse_arbitrator_verdict(ValidDupVerdict, <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>, <<"1234567890">>) of
+        {ok, duplicate, 3} ->
+            io:format("PASS: DUPLICATE_BATCH_IDEMPOTENT verdict requires matching official hash and root~n");
+        BadDupRes ->
+            io:format("FAIL: expected valid duplicate verdict, got: ~p~n", [BadDupRes]),
+            halt(1)
+    end,
+
+    %% Missing hash on duplicate rejected
+    MissingHashDup = #{
+        <<"Status">> => <<"DUPLICATE_BATCH_IDEMPOTENT">>,
+        <<"OfficialSeq">> => 3,
+        <<"OfficialStateRoot">> => <<"1234567890">>
+    },
+    case sd_committer:parse_arbitrator_verdict(MissingHashDup, <<"AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899">>, <<"1234567890">>) of
+        {rejected, err_missing_proof, _} -> ok;
+        OtherMissingDup ->
+            io:format("FAIL: expected rejection of missing hash on duplicate, got: ~p~n", [OtherMissingDup]),
+            halt(1)
+    end,
+
+    %% ========================================================================
+    %% [Test 4E] Cold-Start Reconciliation Proof Requirement & Divergence
+    sd_committer:stop(),
+    %% ========================================================================
+    %% Arbitrator sequence ahead with invalid/empty hash strictly halts fail-closed
+    HaltMockPort = 8994,
+    {ok, HaltListen} = gen_tcp:listen(HaltMockPort, [binary, {packet, 0}, {active, false}, {reuseaddr, true}]),
+    spawn_link(fun() ->
+        case gen_tcp:accept(HaltListen, 5000) of
+            {ok, HSock} ->
+                _HReq = recv_full_http(HSock, <<>>),
+                HRespBody = iolist_to_binary(json:encode(#{
+                    <<"OfficialSeq">> => 10,
+                    <<"OfficialHash">> => <<"">>, %% EMPTY HASH -> INVALID PROOF!
+                    <<"OfficialStateRoot">> => <<"">>
+                })),
+                HHttpResp = [
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: application/json\r\n",
+                    "Content-Length: ", integer_to_list(byte_size(HRespBody)), "\r\n",
+                    "\r\n",
+                    binary_to_list(HRespBody)
+                ],
+                ok = gen_tcp:send(HSock, HHttpResp),
+                gen_tcp:close(HSock);
+            _ -> ok
+        end,
+        gen_tcp:close(HaltListen)
+    end),
+
+    FailClosedCursorPath = filename:join([DbDir, "data/test_fc_cursor.json"]),
+    _ = file:delete(FailClosedCursorPath),
+    InitHaltRes = sd_committer:ensure_started(#{
+        cursor_path => FailClosedCursorPath,
+        wallet_path => WalletFile,
+        arbitrator_id => <<"MOCK_ARB">>,
+        gateway_url => "http://127.0.0.1:8994"
+    }),
+    case InitHaltRes of
+        {error, {chain_divergence, _}} ->
+            io:format("PASS: Arbitrator sequence advance with missing hash/root strictly halts fail-closed~n");
+        OtherInitHalt ->
+            io:format("FAIL: expected fail-closed chain divergence halt, got: ~p~n", [OtherInitHalt]),
+            halt(1)
+    end,
+    _ = file:delete(FailClosedCursorPath),
+
+    %% Test 4F: Strict verdict hash matching and fail-closed divergence
     MismatchedVerdict = #{
         <<"Status">> => <<"COMMITTED">>,
         <<"OfficialSeq">> => 7,
@@ -277,7 +501,7 @@ main(_) ->
             halt(1)
     end,
 
-    %% Test 4C: Missing official hash or state root strictly rejected
+    %% Test 4G: Missing official hash or state root strictly rejected
     MissingHashVerdict = #{
         <<"Status">> => <<"COMMITTED">>,
         <<"OfficialSeq">> => 7,
@@ -320,7 +544,22 @@ main(_) ->
             halt(1)
     end,
 
-    %% C. Heartbeat without Genesis reports heartbeat_acknowledged = false
+    %% C. Production profile strictly requires pinned Genesis Hash
+    os:putenv("HYDB_PROFILE", "production"),
+    ProdUnpinnedRes = sd_committer:bootstrap_genesis(#{
+        genesis_id => <<"MOCK_GENESIS_ID">>,
+        expected_genesis_hash => <<>>
+    }),
+    case ProdUnpinnedRes of
+        {error, {err_genesis_hash_required, _}} ->
+            io:format("PASS: Unpinned Genesis hash rejected in production profile~n");
+        BadProdRes ->
+            io:format("FAIL: expected rejection of unpinned genesis in production, got: ~p~n", [BadProdRes]),
+            halt(1)
+    end,
+    os:putenv("HYDB_PROFILE", "test"),
+
+    %% D. Heartbeat without Genesis reports heartbeat_acknowledged = false
     _ = sd_committer:report_heartbeat(),
     HbStatusNow = sd_committer:get_status(),
     case maps:get(<<"heartbeat_acknowledged">>, HbStatusNow) of

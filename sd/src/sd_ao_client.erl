@@ -4,12 +4,13 @@
 %% Native In-BEAM AO Computer & Arweave Gateway Client
 %% ============================================================================
 %% Responsibilities:
-%% 1. Pure Erlang HTTP communication with AO Scheduler Unit (SU) & Gateways.
+%% 1. Pure Erlang HTTP communication with AO Message Unit (MU) & Compute Unit (CU).
 %% 2. Native Arweave JWK parsing & cryptographic address calculation.
 %% 3. Authentic ANS-104 DataItem deepHash signing & verification (RSA-PSS SHA-256).
 %% 4. Avro binary tag encoding & decoding conforming to Arweave standard.
-%% 5. Formatting of AO URLs and process routes.
-%% 6. Dryrun / query evaluation against AO Genesis & Arbitrator processes.
+%% 5. Complete AO Message-to-Result lifecycle: MU message dispatch -> CU evaluation polling.
+%% 6. Official AO Compute Unit dry-run evaluation for state queries (Genesis & Arbitrator).
+%% 7. Formatting of AO URLs and process routes.
 %% ============================================================================
 
 -export([load_wallet/1, b64url_encode/1, b64url_decode/1, get_arweave_address/1]).
@@ -17,8 +18,9 @@
 -export([deep_hash/1, encode_avro_tags/1, decode_avro_tags/1]).
 -export([build_ans104_data_item/5, verify_ans104_data_item/1]).
 -export([send_message/5, send_message/6, query_state/4, query_state/5]).
+-export([fetch_cu_result/3, fetch_cu_result/4, dryrun_cu_query/4, dryrun_cu_query/5]).
 -export([compute_batch_id/1, compute_batch_sig/2, derive_cluster_secret/1]).
--export([format_ao_url/3]).
+-export([format_ao_url/3, resolve_cu_url/1, resolve_mu_url/1]).
 
 %% ----------------------------------------------------------------------------
 %% Wallet & Cryptographic Utilities
@@ -260,7 +262,6 @@ build_ans104_data_item(ProcessId, Action, ExtraTags, DataBin, WalletInfo) ->
                         byte_size(TargetStr) =:= 32 -> TargetStr;
                         byte_size(TargetStr) =:= 43 -> b64url_decode(TargetStr);
                         true ->
-                            %% Fallback pad or hash to 32 bytes
                             crypto:hash(sha256, TargetStr)
                     end,
                     {TB, <<1:8, TB:32/binary>>}
@@ -382,7 +383,7 @@ parse_ans104_tags(_Sig, _Owner, _Target, _Anchor, _) ->
     {error, invalid_tags_header}.
 
 %% ----------------------------------------------------------------------------
-%% HTTP Dispatch to AO Gateways & Processes
+%% HTTP Dispatch to AO Message Units & Gateways
 %% ----------------------------------------------------------------------------
 
 send_message(GatewayUrl, ProcessId, Action, Tags, PayloadMap) ->
@@ -434,10 +435,29 @@ send_message(GatewayUrl, ProcessId, Action, Tags, PayloadMap, Opts) ->
                 {"accept", "application/json, application/octet-stream"},
                 {"x-dataitem-id", binary_to_list(ItemId)}
             ],
-            execute_http_post(Url, Headers, ContentType, Body, HttpTimeout);
+            case execute_http_post(Url, Headers, ContentType, Body, HttpTimeout) of
+                {ok, HttpStatus, RespMap} when is_map(RespMap) ->
+                    %% Check if response contains immediate verdict (HyperBEAM route or mock)
+                    case has_verdict(RespMap) of
+                        true ->
+                            {ok, HttpStatus, RespMap};
+                        false ->
+                            %% AO Message Unit asynchronous response: fetch evaluation from Compute Unit (CU)
+                            MsgId = maps:get(<<"messageId">>, RespMap, maps:get(<<"id">>, RespMap, ItemId)),
+                            CuUrl = resolve_cu_url(Opts),
+                            if
+                                CuUrl =/= "" ->
+                                    fetch_cu_result(CuUrl, ProcessId, MsgId, Opts);
+                                true ->
+                                    {ok, HttpStatus, RespMap}
+                            end
+                    end;
+                OtherResp ->
+                    OtherResp
+            end;
 
         {error, _BuildErr} ->
-            %% Unsigned fallback when wallet is missing (dryrun/query)
+            %% Unsigned fallback when wallet is missing (dryrun/query fallback)
             BaseTags = [
                 #{<<"name">> => <<"Data-Protocol">>, <<"value">> => <<"ao">>},
                 #{<<"name">> => <<"Variant">>, <<"value">> => <<"ao.TN.1">>},
@@ -474,14 +494,212 @@ execute_http_post(Url, Headers, ContentType, Body, HttpTimeout) ->
             {error, {network_failed, Reason}}
     end.
 
+has_verdict(Map) when is_map(Map) ->
+    maps:is_key(<<"Status">>, Map) orelse maps:is_key(<<"status">>, Map).
+
+%% ----------------------------------------------------------------------------
+%% Compute Unit (CU) Evaluation Result Polling & Extraction
+%% ----------------------------------------------------------------------------
+
+fetch_cu_result(CuUrl, ProcessId, MessageId) ->
+    fetch_cu_result(CuUrl, ProcessId, MessageId, #{}).
+
+fetch_cu_result(CuUrl, ProcessId, MessageId, Opts) ->
+    ensure_http_client(),
+    CleanCu = string:trim(to_list(CuUrl), trailing, "/"),
+    CleanProc = to_list(ProcessId),
+    CleanMsgId = to_list(MessageId),
+    Url = CleanCu ++ "/result/" ++ CleanMsgId ++ "?process-id=" ++ CleanProc,
+    Headers = [{"accept", "application/json"}],
+    HttpTimeout = maps:get(timeout, Opts, 5000),
+    MaxRetries = maps:get(cu_retries, Opts, 6),
+    RetryDelayMs = maps:get(cu_retry_delay_ms, Opts, 400),
+    poll_cu_result(Url, Headers, HttpTimeout, MaxRetries, RetryDelayMs).
+
+poll_cu_result(Url, Headers, HttpTimeout, RetriesLeft, DelayMs) ->
+    case httpc:request(get, {Url, Headers}, [{timeout, HttpTimeout}], [{body_format, binary}]) of
+        {ok, {{_Ver, 200, _Phrase}, _RespHeaders, RespBody}} ->
+            case catch json:decode(RespBody) of
+                Parsed when is_map(Parsed) ->
+                    case extract_cu_verdict(Parsed) of
+                        {ok, Verdict} ->
+                            {ok, 200, Verdict};
+                        {pending, _} when RetriesLeft > 0 ->
+                            timer:sleep(DelayMs),
+                            poll_cu_result(Url, Headers, HttpTimeout, RetriesLeft - 1, DelayMs);
+                        {pending, Reason} ->
+                            {error, {cu_evaluation_pending, Reason}};
+                        {error, Err} ->
+                            {error, {cu_execution_error, Err}}
+                    end;
+                _ ->
+                    if
+                        RetriesLeft > 0 ->
+                            timer:sleep(DelayMs),
+                            poll_cu_result(Url, Headers, HttpTimeout, RetriesLeft - 1, DelayMs);
+                        true ->
+                            {error, invalid_cu_json_response}
+                    end
+            end;
+        {ok, {{_Ver, Status, _Phrase}, _RespHeaders, _RespBody}} when Status =:= 404 orelse Status =:= 202 ->
+            if
+                RetriesLeft > 0 ->
+                    timer:sleep(DelayMs),
+                    poll_cu_result(Url, Headers, HttpTimeout, RetriesLeft - 1, DelayMs);
+                true ->
+                    {error, {cu_not_ready, Status}}
+            end;
+        {ok, {{_Ver, Status, _Phrase}, _RespHeaders, RespBody}} ->
+            {error, {cu_http_error, Status, RespBody}};
+        {error, _NetErr} when RetriesLeft > 0 ->
+            timer:sleep(DelayMs),
+            poll_cu_result(Url, Headers, HttpTimeout, RetriesLeft - 1, DelayMs);
+        {error, Reason} ->
+            {error, {cu_network_failed, Reason}}
+    end.
+
+extract_cu_verdict(Parsed) ->
+    case maps:get(<<"Error">>, Parsed, undefined) of
+        Err when Err =/= undefined andalso Err =/= null andalso Err =/= <<>> ->
+            {error, Err};
+        _ ->
+            case maps:get(<<"Messages">>, Parsed, undefined) of
+                Messages when is_list(Messages), length(Messages) > 0 ->
+                    extract_message_verdict(Messages);
+                _ ->
+                    case maps:is_key(<<"Status">>, Parsed) of
+                        true -> {ok, Parsed};
+                        false -> {pending, empty_messages}
+                    end
+            end
+    end.
+
+extract_message_verdict([]) ->
+    {pending, no_matching_verdict_message};
+extract_message_verdict([Msg | Rest]) when is_map(Msg) ->
+    Tags = maps:get(<<"Tags">>, Msg, maps:get(tags, Msg, [])),
+    TagsMap = tags_to_map(Tags),
+    Merged = maps:merge(TagsMap, Msg),
+    case maps:is_key(<<"Status">>, Merged) of
+        true ->
+            {ok, Merged};
+        false ->
+            extract_message_verdict(Rest)
+    end;
+extract_message_verdict([_ | Rest]) ->
+    extract_message_verdict(Rest).
+
+tags_to_map(Tags) when is_list(Tags) ->
+    lists:foldl(fun
+        (#{<<"name">> := K, <<"value">> := V}, Acc) -> Acc#{K => V};
+        (#{name := K, value := V}, Acc) -> Acc#{to_bin(K) => to_bin(V)};
+        ({K, V}, Acc) -> Acc#{to_bin(K) => to_bin(V)};
+        (_, Acc) -> Acc
+    end, #{}, Tags);
+tags_to_map(_) -> #{}.
+
+%% ----------------------------------------------------------------------------
+%% Query State via Official AO Compute Unit (CU) dry-run Endpoint
+%% ----------------------------------------------------------------------------
+
 query_state(GatewayUrl, ProcessId, Action, PayloadMap) ->
     query_state(GatewayUrl, ProcessId, Action, PayloadMap, #{}).
 
 query_state(GatewayUrl, ProcessId, Action, PayloadMap, Opts) ->
-    send_message(GatewayUrl, ProcessId, Action, [], PayloadMap, Opts#{format => json}).
+    CuUrl = resolve_cu_url(Opts),
+    CleanGw = to_list(GatewayUrl),
+    IsHyperbeamDirect = string:find(CleanGw, "/ao") =/= nomatch,
+    if
+        CuUrl =/= "" andalso not IsHyperbeamDirect ->
+            dryrun_cu_query(CuUrl, ProcessId, Action, PayloadMap, Opts);
+        true ->
+            send_message(GatewayUrl, ProcessId, Action, [], PayloadMap, Opts#{format => json})
+    end.
+
+dryrun_cu_query(CuUrl, ProcessId, Action, PayloadMap) ->
+    dryrun_cu_query(CuUrl, ProcessId, Action, PayloadMap, #{}).
+
+dryrun_cu_query(CuUrl, ProcessId, Action, PayloadMap, Opts) ->
+    ensure_http_client(),
+    CleanCu = string:trim(to_list(CuUrl), trailing, "/"),
+    CleanProc = to_list(ProcessId),
+    Url = CleanCu ++ "/dry-run?process-id=" ++ CleanProc,
+
+    DataBin = if
+        is_binary(PayloadMap) -> PayloadMap;
+        is_map(PayloadMap) -> iolist_to_binary(json:encode(PayloadMap));
+        true -> <<>>
+    end,
+    WalletInfo = maps:get(wallet, Opts, #{}),
+    Owner = maps:get(owner, WalletInfo, <<>>),
+    RandomId = b64url_encode(crypto:strong_rand_bytes(16)),
+
+    BaseTags = [
+        #{<<"name">> => <<"Data-Protocol">>, <<"value">> => <<"ao">>},
+        #{<<"name">> => <<"Variant">>, <<"value">> => <<"ao.TN.1">>},
+        #{<<"name">> => <<"Type">>, <<"value">> => <<"Message">>},
+        #{<<"name">> => <<"Action">>, <<"value">> => to_bin(Action)}
+    ],
+    ExtraTags = maps:get(tags, Opts, []),
+    AllTags = BaseTags ++ ExtraTags,
+
+    DryrunPayload = #{
+        <<"Id">> => <<"DRYRUN_", RandomId/binary>>,
+        <<"Target">> => to_bin(ProcessId),
+        <<"Owner">> => to_bin(Owner),
+        <<"Tags">> => AllTags,
+        <<"Data">> => DataBin
+    },
+    DryrunJson = iolist_to_binary(json:encode(DryrunPayload)),
+    Headers = [
+        {"content-type", "application/json"},
+        {"accept", "application/json"}
+    ],
+    HttpTimeout = maps:get(timeout, Opts, 8000),
+
+    case httpc:request(post, {Url, Headers, "application/json", DryrunJson}, [{timeout, HttpTimeout}], [{body_format, binary}]) of
+        {ok, {{_Ver, Status, _Phrase}, _RespHeaders, RespBody}} when Status >= 200, Status < 300 ->
+            case catch json:decode(RespBody) of
+                Parsed when is_map(Parsed) ->
+                    extract_dryrun_result(Parsed);
+                _ ->
+                    {ok, Status, RespBody}
+            end;
+        {ok, {{_Ver, Status, _Phrase}, _RespHeaders, RespBody}} ->
+            {error, {cu_dryrun_error, Status, RespBody}};
+        {error, Reason} ->
+            {error, {cu_network_failed, Reason}}
+    end.
+
+extract_dryrun_result(Parsed) ->
+    case maps:get(<<"Error">>, Parsed, undefined) of
+        Err when Err =/= undefined andalso Err =/= null andalso Err =/= <<>> ->
+            {error, {dryrun_error, Err}};
+        _ ->
+            case maps:get(<<"Messages">>, Parsed, undefined) of
+                [FirstMsg | _] when is_map(FirstMsg) ->
+                    DataDecoded = case maps:get(<<"Data">>, FirstMsg, undefined) of
+                        DataStr when is_binary(DataStr) ->
+                            case catch json:decode(DataStr) of
+                                DMap when is_map(DMap) -> DMap;
+                                _ -> #{<<"data">> => DataStr}
+                            end;
+                        _ -> #{}
+                    end,
+                    Tags = maps:get(<<"Tags">>, FirstMsg, []),
+                    TagsMap = tags_to_map(Tags),
+                    Merged = maps:merge(maps:merge(FirstMsg, TagsMap), DataDecoded),
+                    {ok, 200, Merged};
+                _ ->
+                    case maps:get(<<"Output">>, Parsed, undefined) of
+                        OutMap when is_map(OutMap) -> {ok, 200, OutMap};
+                        _ -> {ok, 200, Parsed}
+                    end
+            end
+    end.
 
 %% ----------------------------------------------------------------------------
-%% Internal Helpers
+%% Internal Resolution & Environment Helpers
 %% ----------------------------------------------------------------------------
 
 ensure_http_client() ->
@@ -513,6 +731,28 @@ format_ao_url(GatewayUrl, ProcessId, Action) ->
                             end
                     end
             end
+    end.
+
+resolve_cu_url(Opts) ->
+    case maps:get(cu_url, Opts, undefined) of
+        undefined ->
+            case os:getenv("AO_CU_URL") of
+                false -> "";
+                "" -> "";
+                Url -> Url
+            end;
+        Explicit -> to_list(Explicit)
+    end.
+
+resolve_mu_url(Opts) ->
+    case maps:get(mu_url, Opts, undefined) of
+        undefined ->
+            case os:getenv("AO_MU_URL") of
+                false -> "";
+                "" -> "";
+                Url -> Url
+            end;
+        Explicit -> to_list(Explicit)
     end.
 
 to_bin(V) when is_binary(V) -> V;

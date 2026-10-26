@@ -41,8 +41,9 @@ while true; do
     # 1. Check for fatal fail-closed condition (exit code 78 / halted)
     IS_FAIL_CLOSED=false
     if [ -f "$HEARTBEAT_JSON" ]; then
-      if grep -q '"health": "failed_closed"' "$HEARTBEAT_JSON" 2>/dev/null || \
-         grep -q '"status": "halted"' "$HEARTBEAT_JSON" 2>/dev/null; then
+      if grep -Eq '"health"[[:space:]]*:[[:space:]]*"failed_closed"' "$HEARTBEAT_JSON" 2>/dev/null || \
+         grep -Eq '"status"[[:space:]]*:[[:space:]]*"(halted|failed_closed|crashed)"' "$HEARTBEAT_JSON" 2>/dev/null || \
+         grep -Eq '"committer_health"[[:space:]]*:[[:space:]]*"failed_closed"' "$HEARTBEAT_JSON" 2>/dev/null; then
         IS_FAIL_CLOSED=true
       fi
     fi
@@ -62,10 +63,14 @@ while true; do
 
     # 2. Check if in-BEAM committer GenServer is still alive and responsive via status query
     SD_STATUS="$(curl -sf --max-time 2 -H 'Accept: application/json' "http://127.0.0.1:$SU_PORT/~sd@1.0/status" 2>/dev/null || echo "{}")"
-    if echo "$SD_STATUS" | grep -q '"committer"' && echo "$SD_STATUS" | grep -q '"status":"disabled"'; then
-      echo "[sd-foreground] FATAL: In-BEAM committer GenServer died or is disabled while HYDB_COMMITTER_ENABLED=true!" >&2
-      "$SCRIPT_DIR/stop-sd-node.sh" || true
-      exit 1
+    if echo "$SD_STATUS" | grep -q '"committer"'; then
+      if echo "$SD_STATUS" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(disabled|stopped|halted|crashed)"' || \
+         echo "$SD_STATUS" | grep -Eq '"health"[[:space:]]*:[[:space:]]*"(failed_closed|crashed)"'; then
+        echo "[sd-foreground] FATAL: In-BEAM committer GenServer died or is in fail-closed state while HYDB_COMMITTER_ENABLED=true!" >&2
+        "$SCRIPT_DIR/stop-sd-node.sh" || true
+        echo "committer_crashed_or_halted" > "$NODE_SD_RUN_DIR/CONTAINER_HALTED"
+        exit 1
+      fi
     fi
   fi
 

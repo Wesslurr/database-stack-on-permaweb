@@ -96,6 +96,34 @@ async function runTests() {
     'Dispatched message envelope cryptographically signed with RSA-PSS and owner public key'
   );
   assert(
+    erlOut.includes('PASS: In-BEAM committer fetches and evaluates verdict via CU result endpoint'),
+    'In-BEAM committer fetches and evaluates verdict via CU result endpoint'
+  );
+  assert(
+    erlOut.includes('PASS: Official AO Compute Unit dry-run evaluation query verified'),
+    'Official AO Compute Unit dry-run evaluation query verified'
+  );
+  assert(
+    erlOut.includes('PASS: DUPLICATE_BATCH_IDEMPOTENT verdict requires matching official hash and root'),
+    'DUPLICATE_BATCH_IDEMPOTENT verdict requires matching official hash and root'
+  );
+  assert(
+    erlOut.includes('PASS: Arbitrator sequence advance with missing hash/root strictly halts fail-closed'),
+    'Arbitrator sequence advance with missing hash/root strictly halts fail-closed'
+  );
+  assert(
+    erlOut.includes('PASS: Incomplete verdict missing official hash strictly rejected'),
+    'Incomplete verdict missing official hash strictly rejected'
+  );
+  assert(
+    erlOut.includes('PASS: Unpinned Genesis hash rejected in production profile'),
+    'Unpinned Genesis hash rejected in production profile'
+  );
+  assert(
+    erlOut.includes('PASS: Committer heartbeat without Genesis strictly reports unacknowledged'),
+    'Committer heartbeat without Genesis strictly reports unacknowledged'
+  );
+  assert(
     erlOut.includes('PASS: Divergent official hash strictly rejected by arbitrator verdict parser'),
     'Divergent official hash strictly rejected by arbitrator verdict parser'
   );
@@ -146,6 +174,56 @@ async function runTests() {
   } finally {
     if (existsSync(tempBinPath)) unlinkSync(tempBinPath);
   }
+
+  console.log('\n[Suite 3] Container Supervisor Fail-Closed State Machine Verification:');
+
+  // Test 3A: Compact JSON heartbeat match (Erlang json:encode output)
+  const compactHeartbeatJson = '{"health":"failed_closed","status":"halted","error_code":"err_reconciliation_invalid_proof"}';
+  const matchCompactCmd = `
+    HEARTBEAT_JSON='${compactHeartbeatJson}'
+    if echo "$HEARTBEAT_JSON" | grep -Eq '"health"[[:space:]]*:[[:space:]]*"failed_closed"' || \\
+       echo "$HEARTBEAT_JSON" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(halted|failed_closed|crashed)"' || \\
+       echo "$HEARTBEAT_JSON" | grep -Eq '"committer_health"[[:space:]]*:[[:space:]]*"failed_closed"'; then
+      echo "MATCH_FAIL_CLOSED"
+    else
+      echo "NO_MATCH"
+    fi
+  `;
+  const matchCompactOut = execFileSync('bash', ['-c', matchCompactCmd], { encoding: 'utf8' }).trim();
+  assert(matchCompactOut === 'MATCH_FAIL_CLOSED', 'Supervisor regex detects compact Erlang failed_closed/halted JSON');
+
+  // Test 3B: Normal running state does not trigger fail-closed
+  const runningHeartbeatJson = '{"health":"healthy","status":"running","last_committed_seq":5}';
+  const matchRunningCmd = `
+    HEARTBEAT_JSON='${runningHeartbeatJson}'
+    if echo "$HEARTBEAT_JSON" | grep -Eq '"health"[[:space:]]*:[[:space:]]*"failed_closed"' || \\
+       echo "$HEARTBEAT_JSON" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(halted|failed_closed|crashed)"' || \\
+       echo "$HEARTBEAT_JSON" | grep -Eq '"committer_health"[[:space:]]*:[[:space:]]*"failed_closed"'; then
+      echo "MATCH_FAIL_CLOSED"
+    else
+      echo "HEALTHY_OK"
+    fi
+  `;
+  const matchRunningOut = execFileSync('bash', ['-c', matchRunningCmd], { encoding: 'utf8' }).trim();
+  assert(matchRunningOut === 'HEALTHY_OK', 'Supervisor loop allows healthy running committer state');
+
+  // Test 3C: Detection of crashed/dead committer GenServer via ~sd@1.0/status payload
+  const crashedSdStatus = '{"ok":true,"health":"failed_closed","committer":{"status":"crashed","health":"failed_closed"}}';
+  const matchCrashedCmd = `
+    SD_STATUS='${crashedSdStatus}'
+    if echo "$SD_STATUS" | grep -q '"committer"'; then
+      if echo "$SD_STATUS" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"(disabled|stopped|halted|crashed)"' || \\
+         echo "$SD_STATUS" | grep -Eq '"health"[[:space:]]*:[[:space:]]*"(failed_closed|crashed)"'; then
+        echo "DEAD_COMMITTER_DETECTED"
+      else
+        echo "COMMITTER_ALIVE"
+      fi
+    else
+      echo "NO_COMMITTER"
+    fi
+  `;
+  const matchCrashedOut = execFileSync('bash', ['-c', matchCrashedCmd], { encoding: 'utf8' }).trim();
+  assert(matchCrashedOut === 'DEAD_COMMITTER_DETECTED', 'Supervisor detects dead/crashed in-BEAM committer GenServer and halts');
 
   console.log('\n========================================================================');
   console.log(` Tahap 12 Native In-BEAM Committer Results: ${passed} PASSED, ${failed} FAILED`);
