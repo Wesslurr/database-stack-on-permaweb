@@ -215,6 +215,18 @@ async function main() {
   console.log('TAHAP 17: FULL END-TO-END GAME FLOW LIFECYCLE AUDIT');
   console.log('========================================================================\n');
 
+  // Pre-check Cluster Health & L1 Gateway before loading cluster wallets
+  const isArLocalAlive = await fetch(`${ARLOCAL_URL}/info`).then(r => r.ok).catch(() => false);
+  const isClusterAlive = await fetch(`${HB_GENESIS_URL}/~meta@1.0/info`, { headers: { Accept: 'application/json' } }).then(r => r.ok).catch(() => false);
+  if (!isArLocalAlive || !isClusterAlive) {
+    console.log('  ⚠️ [Live Cluster Inactive] ArLocal (:1984) or HyperBEAM (:8733) is not running.');
+    console.log('  ⚠️ Skipping live cluster full game flow tests (run npm run cluster:start for live testing).\n');
+    console.log('========================================================================');
+    console.log(' TAHAP 17 VERIFICATION SUMMARY: SKIPPED (Cluster Offline)');
+    console.log('========================================================================');
+    return;
+  }
+
   // Load Wallets
   const ArweaveSigner = arbundles.signers?.ArweaveSigner || arbundles.default?.signers?.ArweaveSigner;
   const genesisJwk = JSON.parse(readFileSync(join(ROOT_DIR, 'secrets/wallet_genesis.json'), 'utf8'));
@@ -229,16 +241,6 @@ async function main() {
   // STEP 1: Cluster Health & Discovery
   // -------------------------------------------------------------------------
   console.log('[Step 1] Verifying Cluster Health & L1 Gateway...');
-  const isArLocalAlive = await fetch(`${ARLOCAL_URL}/info`).then(r => r.ok).catch(() => false);
-  const isClusterAlive = await fetch(`${HB_GENESIS_URL}/~meta@1.0/info`, { headers: { Accept: 'application/json' } }).then(r => r.ok).catch(() => false);
-  if (!isArLocalAlive || !isClusterAlive) {
-    console.log('\n  ⚠️ [Live Cluster Inactive] ArLocal (:1984) or HyperBEAM (:8733) is not running.');
-    console.log('  ⚠️ Skipping live cluster full game flow tests (run npm run cluster:start for live testing).\n');
-    console.log('========================================================================');
-    console.log(' TAHAP 17 VERIFICATION SUMMARY: SKIPPED (Cluster Offline)');
-    console.log('========================================================================');
-    return;
-  }
   const arlocalInfo = await fetchJson(`${ARLOCAL_URL}/info`);
   assert(arlocalInfo.network && arlocalInfo.network.includes('arlocal'), 'ArLocal L1 gateway is active');
   console.log('  ✅ ArLocal L1 Gateway (:1984) active: network =', arlocalInfo.network);
