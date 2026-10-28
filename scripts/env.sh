@@ -23,3 +23,8 @@ export HB_KEY="${WALLET_PATH:-$DB_DIR/secrets/wallet.json}"
 # path tanpa menyentuh source HyperBEAM (bukan fork, murni dependency deploy).
 export ERL_LIBS="$HB_REL/lib/hymessage_runtime-1.0.0/ebin:$HB_REL/lib/gleam_stdlib-1.0.0/ebin:$HB_REL/lib${ERL_LIBS:+:$ERL_LIBS}"
 export CODE_LOADING_MODE="interactive"
+export HYDB_CLUSTER_SECRET="${HYDB_CLUSTER_SECRET:-cluster_secret_for_local_mesh_test_only_32_bytes_long}"
+export HYDB_ADMIN_TOKEN="${HYDB_ADMIN_TOKEN:-admin_token_for_local_mesh_test_only_32_bytes_long}"
+export HYDB_PROFILE="${HYDB_PROFILE:-test}"
+export HYDB_CLUSTER_MEMBERS="${HYDB_CLUSTER_MEMBERS:-node_sd_1,node_sd_2,node_sd_3}"
+export HYDB_CLUSTER_SIZE="${HYDB_CLUSTER_SIZE:-3}"

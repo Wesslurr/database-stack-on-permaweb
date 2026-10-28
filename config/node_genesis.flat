@@ -1,0 +1,8 @@
+port: 8733
+priv_key_location: secrets/wallet_genesis.json
+mode: debug
+compute_mode: lazy
+scheduling_mode: local_confirmation
+store_all_signed: true
+process_workers: true
+process_snapshot_slots: 5

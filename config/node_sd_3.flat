@@ -1,0 +1,6 @@
+port: 8755
+priv_key_location: secrets/wallet_sd_3.json
+mode: debug
+compute_mode: lazy
+scheduling_mode: local_confirmation
+store_all_signed: false

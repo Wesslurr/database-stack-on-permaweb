@@ -37,6 +37,9 @@ fn erl_restart_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
 @external(erlang, "sd_runtime", "reset_from_req")
 fn erl_reset_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
 
+@external(erlang, "sd_runtime", "ensure_started")
+fn erl_ensure_started() -> Dynamic
+
 /// Device metadata. HyperBEAM calls this during key resolution.
 pub fn info(_base: Dynamic, _opts: Dynamic) -> Dict(String, String) {
   dict.new()
@@ -52,6 +55,7 @@ pub fn ping(
   _req: Dynamic,
   _opts: Dynamic,
 ) -> Dict(String, String) {
+  let _ = erl_ensure_started()
   dict.new()
   |> dict.insert("ok", "pong")
   |> dict.insert("device", "sd@1.0")

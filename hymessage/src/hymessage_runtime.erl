@@ -25,7 +25,7 @@
 ensure_started() ->
     case whereis(?SERVER) of
         undefined ->
-            case start_link() of
+            case gen_server:start({local, ?SERVER}, ?MODULE, [], []) of
                 {ok, Pid} -> {ok, Pid};
                 {error, {already_started, Pid}} -> {ok, Pid};
                 Error -> Error

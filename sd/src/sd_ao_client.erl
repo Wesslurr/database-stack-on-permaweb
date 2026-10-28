@@ -19,8 +19,9 @@
 -export([build_ans104_data_item/5, verify_ans104_data_item/1]).
 -export([send_message/5, send_message/6, query_state/4, query_state/5]).
 -export([fetch_cu_result/3, fetch_cu_result/4, dryrun_cu_query/4, dryrun_cu_query/5]).
+-export([fetch_hyperbeam_process_result/2, fetch_hyperbeam_process_result/3]).
 -export([compute_batch_id/1, compute_batch_sig/2, derive_cluster_secret/1]).
--export([format_ao_url/3, resolve_cu_url/1, resolve_mu_url/1]).
+-export([format_ao_url/3, format_ao_url/4, is_hyperbeam_gateway/2, resolve_cu_url/1, resolve_mu_url/1]).
 
 %% ----------------------------------------------------------------------------
 %% Wallet & Cryptographic Utilities
@@ -398,8 +399,9 @@ send_message(GatewayUrl, ProcessId, Action, Tags, PayloadMap, Opts) ->
     end,
     Sender = maps:get(sender, Opts, maps:get(<<"From">>, Opts, <<"SU_NODE_1">>)),
     WalletInfo = maps:get(wallet, Opts, #{}),
-    Url = format_ao_url(GatewayUrl, ProcessId, Action),
+    Url = format_ao_url(GatewayUrl, ProcessId, Action, Opts),
     HttpTimeout = maps:get(timeout, Opts, 8000),
+    IsHb = is_hyperbeam_gateway(GatewayUrl, Opts),
 
     case build_ans104_data_item(ProcessId, Action, Tags, DataBin, WalletInfo) of
         {ok, ItemId, DataItemBin} ->
@@ -427,12 +429,16 @@ send_message(GatewayUrl, ProcessId, Action, Tags, PayloadMap, Opts) ->
                     },
                     {"application/json", iolist_to_binary(json:encode(Envelope))};
                 _ ->
-                    {"application/octet-stream", DataItemBin}
+                    case IsHb of
+                        true -> {"application/ans104", DataItemBin};
+                        false -> {"application/octet-stream", DataItemBin}
+                    end
             end,
 
             Headers = [
                 {"content-type", ContentType},
-                {"accept", "application/json, application/octet-stream"},
+                {"accept", "application/json"},
+                {"connection", "close"},
                 {"x-dataitem-id", binary_to_list(ItemId)}
             ],
             case execute_http_post(Url, Headers, ContentType, Body, HttpTimeout) of
@@ -442,14 +448,19 @@ send_message(GatewayUrl, ProcessId, Action, Tags, PayloadMap, Opts) ->
                         true ->
                             {ok, HttpStatus, RespMap};
                         false ->
-                            %% AO Message Unit asynchronous response: fetch evaluation from Compute Unit (CU)
-                            MsgId = maps:get(<<"messageId">>, RespMap, maps:get(<<"id">>, RespMap, ItemId)),
-                            CuUrl = resolve_cu_url(Opts),
-                            if
-                                CuUrl =/= "" ->
-                                    fetch_cu_result(CuUrl, ProcessId, MsgId, Opts);
+                            case IsHb of
                                 true ->
-                                    {ok, HttpStatus, RespMap}
+                                    fetch_hyperbeam_process_result(GatewayUrl, ProcessId, Opts);
+                                false ->
+                                    %% AO Message Unit asynchronous response: fetch evaluation from Compute Unit (CU)
+                                    MsgId = maps:get(<<"messageId">>, RespMap, maps:get(<<"id">>, RespMap, ItemId)),
+                                    CuUrl = resolve_cu_url(Opts),
+                                    if
+                                        CuUrl =/= "" ->
+                                            fetch_cu_result(CuUrl, ProcessId, MsgId, Opts);
+                                        true ->
+                                            {ok, HttpStatus, RespMap}
+                                    end
                             end
                     end;
                 OtherResp ->
@@ -495,7 +506,14 @@ execute_http_post(Url, Headers, ContentType, Body, HttpTimeout) ->
     end.
 
 has_verdict(Map) when is_map(Map) ->
-    maps:is_key(<<"Status">>, Map) orelse maps:is_key(<<"status">>, Map).
+    case maps:get(<<"Status">>, Map, undefined) of
+        S when is_binary(S), S =/= <<>> -> true;
+        _ ->
+            case maps:get(<<"status">>, Map, undefined) of
+                S when is_binary(S), S =/= <<>> -> true;
+                _ -> false
+            end
+    end.
 
 %% ----------------------------------------------------------------------------
 %% Compute Unit (CU) Evaluation Result Polling & Extraction
@@ -615,14 +633,20 @@ query_state(GatewayUrl, ProcessId, Action, PayloadMap) ->
     query_state(GatewayUrl, ProcessId, Action, PayloadMap, #{}).
 
 query_state(GatewayUrl, ProcessId, Action, PayloadMap, Opts) ->
-    CuUrl = resolve_cu_url(Opts),
     CleanGw = to_list(GatewayUrl),
-    IsHyperbeamDirect = string:find(CleanGw, "/ao") =/= nomatch,
+    IsHb = is_hyperbeam_gateway(CleanGw, Opts),
     if
-        CuUrl =/= "" andalso not IsHyperbeamDirect ->
-            dryrun_cu_query(CuUrl, ProcessId, Action, PayloadMap, Opts);
+        IsHb ->
+            send_message(GatewayUrl, ProcessId, Action, [], PayloadMap, Opts);
         true ->
-            send_message(GatewayUrl, ProcessId, Action, [], PayloadMap, Opts#{format => json})
+            CuUrl = resolve_cu_url(Opts),
+            IsHyperbeamDirect = string:find(CleanGw, "/ao") =/= nomatch,
+            if
+                CuUrl =/= "" andalso not IsHyperbeamDirect ->
+                    dryrun_cu_query(CuUrl, ProcessId, Action, PayloadMap, Opts);
+                true ->
+                    send_message(GatewayUrl, ProcessId, Action, [], PayloadMap, Opts#{format => json})
+            end
     end.
 
 dryrun_cu_query(CuUrl, ProcessId, Action, PayloadMap) ->
@@ -717,29 +741,224 @@ ensure_http_client() ->
     ok.
 
 format_ao_url(GatewayUrl, ProcessId, Action) ->
+    format_ao_url(GatewayUrl, ProcessId, Action, #{}).
+
+format_ao_url(GatewayUrl, ProcessId, Action, Opts) ->
     CleanGw = string:trim(to_list(GatewayUrl), trailing, "/"),
     CleanProc = to_list(ProcessId),
     CleanAction = to_list(Action),
-    case CleanGw of
-        "" ->
-            "http://127.0.0.1:8735/ao/" ++ CleanProc ++ "/" ++ CleanAction;
-        Gw ->
-            case string:find(Gw, "/ao") of
+    case is_hyperbeam_gateway(CleanGw, Opts) of
+        true ->
+            case string:find(CleanGw, "~process@1.0") of
                 nomatch ->
-                    case string:find(Gw, "/message") of
-                        nomatch -> Gw ++ "/message";
-                        _ -> Gw
-                    end;
+                    CleanGw ++ "/" ++ CleanProc ++ "~process@1.0/schedule";
                 _ ->
-                    case string:find(Gw, CleanProc) of
-                        nomatch -> Gw ++ "/" ++ CleanProc ++ "/" ++ CleanAction;
-                        _ ->
-                            case string:find(Gw, CleanAction) of
-                                nomatch -> Gw ++ "/" ++ CleanAction;
+                    case string:find(CleanGw, "/schedule") of
+                        nomatch -> CleanGw ++ "/schedule";
+                        _ -> CleanGw
+                    end
+            end;
+        false ->
+            case CleanGw of
+                "" ->
+                    "http://127.0.0.1:8735/ao/" ++ CleanProc ++ "/" ++ CleanAction;
+                Gw ->
+                    case string:find(Gw, "/ao") of
+                        nomatch ->
+                            case string:find(Gw, "/message") of
+                                nomatch -> Gw ++ "/message";
                                 _ -> Gw
+                            end;
+                        _ ->
+                            case string:find(Gw, CleanProc) of
+                                nomatch -> Gw ++ "/" ++ CleanProc ++ "/" ++ CleanAction;
+                                _ ->
+                                    case string:find(Gw, CleanAction) of
+                                        nomatch -> Gw ++ "/" ++ CleanAction;
+                                        _ -> Gw
+                                    end
                             end
                     end
             end
+    end.
+
+is_hyperbeam_gateway(GwUrl, Opts) ->
+    case maps:get(backend, Opts, auto) of
+        hyperbeam -> true;
+        ao_mu -> false;
+        auto ->
+            Clean = to_list(GwUrl),
+            case string:find(Clean, "~process@1.0") of
+                nomatch ->
+                    case string:find(Clean, "/message") of
+                        nomatch ->
+                            case string:find(Clean, "mu.ao") of
+                                nomatch ->
+                                    case string:find(Clean, "ao-testnet") of
+                                        nomatch ->
+                                            case string:find(Clean, "/ao/") of
+                                                nomatch -> true;
+                                                _ -> false
+                                            end;
+                                        _ -> false
+                                    end;
+                                _ -> false
+                            end;
+                        _ -> false
+                    end;
+                _ -> true
+            end
+    end.
+
+fetch_hyperbeam_process_result(GatewayUrl, ProcessId) ->
+    fetch_hyperbeam_process_result(GatewayUrl, ProcessId, #{}).
+
+fetch_hyperbeam_process_result(GatewayUrl, ProcessId, Opts) ->
+    ensure_http_client(),
+    CleanGw = string:trim(to_list(GatewayUrl), trailing, "/"),
+    CleanProc = to_list(ProcessId),
+    HttpTimeout = maps:get(timeout, Opts, 90000),
+    MaxRetries = maps:get(retries, Opts, 90),
+    RetryDelayMs = maps:get(retry_delay_ms, Opts, 1000),
+    poll_hyperbeam_result(CleanGw, CleanProc, HttpTimeout, MaxRetries, RetryDelayMs).
+
+poll_hyperbeam_result(BaseUrl, ProcessId, Timeout, RetriesLeft, DelayMs) ->
+    NowUrl = BaseUrl ++ "/" ++ ProcessId ++ "~process@1.0/now",
+    Headers = [{"accept", "application/json"}, {"connection", "close"}],
+    case httpc:request(get, {NowUrl, Headers}, [{timeout, Timeout}], [{body_format, binary}]) of
+        {ok, {{_Ver, 200, _Phrase}, _RespHeaders, RespBody}} ->
+            case catch json:decode(RespBody) of
+                NowMap when is_map(NowMap) ->
+                    case maps:get(<<"results+link">>, NowMap, undefined) of
+                        ResultsLink when is_binary(ResultsLink), byte_size(ResultsLink) > 0 ->
+                            resolve_hyperbeam_results(BaseUrl, binary_to_list(ResultsLink), Timeout);
+                        _ ->
+                            if
+                                RetriesLeft > 0 ->
+                                    timer:sleep(DelayMs),
+                                    poll_hyperbeam_result(BaseUrl, ProcessId, Timeout, RetriesLeft - 1, DelayMs);
+                                true ->
+                                    {error, {hyperbeam_error, missing_results_link, NowMap}}
+                            end
+                    end;
+                _ ->
+                    {error, {hyperbeam_error, invalid_now_json, RespBody}}
+            end;
+        {ok, {{_Ver, Status, _Phrase}, _RespHeaders, RespBody}} ->
+            if
+                RetriesLeft > 0 ->
+                    timer:sleep(DelayMs),
+                    poll_hyperbeam_result(BaseUrl, ProcessId, Timeout, RetriesLeft - 1, DelayMs);
+                true ->
+                    {error, {hyperbeam_http_error, Status, RespBody}}
+            end;
+        {error, _Reason} when RetriesLeft > 0 ->
+            timer:sleep(DelayMs),
+            poll_hyperbeam_result(BaseUrl, ProcessId, Timeout, RetriesLeft - 1, DelayMs);
+        {error, Reason} ->
+            {error, {hyperbeam_network_failed, Reason}}
+    end.
+
+resolve_hyperbeam_results(BaseUrl, ResultsLink, Timeout) ->
+    Url = BaseUrl ++ "/" ++ ResultsLink,
+    Headers = [{"accept", "application/json"}, {"connection", "close"}],
+    case httpc:request(get, {Url, Headers}, [{timeout, Timeout}], [{body_format, binary}]) of
+        {ok, {{_Ver, 200, _Phrase}, _RespHeaders, RespBody}} ->
+            case catch json:decode(RespBody) of
+                ResultsMap when is_map(ResultsMap) ->
+                    case maps:get(<<"outbox+link">>, ResultsMap, undefined) of
+                        OutboxLink when is_binary(OutboxLink), byte_size(OutboxLink) > 0 ->
+                            resolve_hyperbeam_outbox(BaseUrl, binary_to_list(OutboxLink), Timeout);
+                        _ ->
+                            case maps:get(<<"Error">>, ResultsMap, undefined) of
+                                Err when Err =/= undefined andalso Err =/= null andalso Err =/= <<>> ->
+                                    {error, {hyperbeam_compute_error, Err}};
+                                _ ->
+                                    {ok, 200, ResultsMap}
+                            end
+                    end;
+                _ ->
+                    {error, {hyperbeam_error, invalid_results_json, RespBody}}
+            end;
+        {ok, {{_Ver, Status, _Phrase}, _RespHeaders, RespBody}} ->
+            {error, {hyperbeam_http_error, Status, RespBody}};
+        {error, Reason} ->
+            {error, {hyperbeam_network_failed, Reason}}
+    end.
+
+resolve_hyperbeam_outbox(BaseUrl, OutboxLink, Timeout) ->
+    Url = BaseUrl ++ "/" ++ OutboxLink,
+    Headers = [{"accept", "application/json"}, {"connection", "close"}],
+    case httpc:request(get, {Url, Headers}, [{timeout, Timeout}], [{body_format, binary}]) of
+        {ok, {{_Ver, 200, _Phrase}, _RespHeaders, RespBody}} ->
+            case catch json:decode(RespBody) of
+                OutboxMap when is_map(OutboxMap) ->
+                    extract_latest_outbox_verdict(BaseUrl, OutboxMap, Timeout);
+                _ ->
+                    {error, {hyperbeam_error, invalid_outbox_json, RespBody}}
+            end;
+        {ok, {{_Ver, Status, _Phrase}, _RespHeaders, RespBody}} ->
+            {error, {hyperbeam_http_error, Status, RespBody}};
+        {error, Reason} ->
+            {error, {hyperbeam_network_failed, Reason}}
+    end.
+
+extract_latest_outbox_verdict(BaseUrl, OutboxMap, Timeout) ->
+    ParsedEntries = lists:filtermap(fun({K, V}) ->
+        case is_binary(V) andalso (K =/= <<"status">>) of
+            true ->
+                KeyStr = binary_to_list(K),
+                SlotNum = case string:split(KeyStr, "+") of
+                    [NumStr | _] ->
+                        try list_to_integer(NumStr)
+                        catch _:_ -> 0 end;
+                    _ -> 0
+                end,
+                {true, {SlotNum, binary_to_list(V)}};
+            false -> false
+        end
+    end, maps:to_list(OutboxMap)),
+
+    case ParsedEntries of
+        [] ->
+            {ok, 200, OutboxMap};
+        _ ->
+            SortedDesc = lists:reverse(lists:keysort(1, ParsedEntries)),
+            LinksDesc = [Link || {_, Link} <- SortedDesc],
+            find_first_verdict_http(BaseUrl, LinksDesc, Timeout, OutboxMap)
+    end.
+
+find_first_verdict_http(_BaseUrl, [], _Timeout, DefaultMap) ->
+    {ok, 200, DefaultMap};
+find_first_verdict_http(BaseUrl, [Link | Rest], Timeout, DefaultMap) ->
+    MsgUrl = BaseUrl ++ "/" ++ Link,
+    Headers = [{"accept", "application/json"}, {"connection", "close"}],
+    case httpc:request(get, {MsgUrl, Headers}, [{timeout, Timeout}], [{body_format, binary}]) of
+        {ok, {{_, 200, _}, _, Body}} ->
+            case catch json:decode(Body) of
+                M when is_map(M) ->
+                    Merged = case maps:get(<<"Data">>, M, undefined) of
+                        DataBin when is_binary(DataBin) ->
+                            case catch json:decode(DataBin) of
+                                DataMap when is_map(DataMap) ->
+                                    maps:merge(M, DataMap);
+                                _ -> M
+                            end;
+                        _ -> M
+                    end,
+                    case has_verdict(Merged) orelse maps:is_key(<<"Action">>, Merged) of
+                        true -> {ok, 200, Merged};
+                        false ->
+                            case find_first_verdict_http(BaseUrl, Rest, Timeout, Merged) of
+                                {ok, 200, DefaultMap} -> {ok, 200, Merged};
+                                Other -> Other
+                            end
+                    end;
+                _ ->
+                    find_first_verdict_http(BaseUrl, Rest, Timeout, DefaultMap)
+            end;
+        _ ->
+            find_first_verdict_http(BaseUrl, Rest, Timeout, DefaultMap)
     end.
 
 resolve_cu_url(Opts) ->

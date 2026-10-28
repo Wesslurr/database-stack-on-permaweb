@@ -156,7 +156,7 @@ Handlers.add(
     function(msg)
         local registered_count = 0
         local healthy_count = 0
-        local now = tonumber(msg.Timestamp) or 0
+        local now = tonumber(msg.Timestamp) or tonumber(getTagValue(msg, "Timestamp")) or 0
         local is_ms = now > 100000000000
         local HeartbeatTimeout = is_ms and 60000 or 60
 
@@ -251,6 +251,7 @@ Handlers.add(
             return
         end
 
+        local ts = tonumber(msg.Timestamp) or tonumber(getTagValue(msg, "Timestamp")) or 0
         NodesRegistry[nodeId] = {
             node_id = nodeId,
             role = payload.role or "storage_unit",
@@ -258,8 +259,8 @@ Handlers.add(
             wasm_sha256 = payload.wasm_sha256 or "",
             version = payload.version or GenesisVersion,
             status = "REGISTERED",
-            registered_at = msg.Timestamp or 0,
-            last_heartbeat = 0
+            registered_at = ts,
+            last_heartbeat = ts
         }
 
         ao.send({
@@ -326,7 +327,8 @@ Handlers.add(
             registered_at = msg.Timestamp or 0
         }
 
-        existing.last_heartbeat = msg.Timestamp or 0
+        local ts = tonumber(msg.Timestamp) or tonumber(getTagValue(msg, "Timestamp")) or 0
+        existing.last_heartbeat = ts
         existing.status = payload.health or "ACTIVE"
         existing.throughput = payload.throughput or 0
         existing.last_seq = payload.last_seq or existing.last_seq or 0
@@ -462,6 +464,20 @@ Handlers.add(
 
         if payload.add_node then
             AuthorizedNodes[payload.add_node] = true
+        end
+        if payload.add_nodes and type(payload.add_nodes) == "table" then
+            for _, n in ipairs(payload.add_nodes) do
+                AuthorizedNodes[n] = true
+            end
+        end
+        if payload.authorized_nodes and type(payload.authorized_nodes) == "table" then
+            for n, v in pairs(payload.authorized_nodes) do
+                if type(n) == "string" and (v == true or v == "true") then
+                    AuthorizedNodes[n] = true
+                elseif type(v) == "string" then
+                    AuthorizedNodes[v] = true
+                end
+            end
         end
         if payload.remove_node then
             AuthorizedNodes[payload.remove_node] = nil

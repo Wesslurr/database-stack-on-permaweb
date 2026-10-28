@@ -1,0 +1,14 @@
+{
+    "store": [
+        {
+            "store-module": "hb_store_rocksdb",
+            "name": "/home/weslur/database/data/genesis/cache-rocksdb",
+            "ao-types": "store-module=\"atom\""
+        },
+        {
+            "store-module": "hb_store_fs",
+            "name": "/home/weslur/database/data/genesis/cache-mainnet",
+            "ao-types": "store-module=\"atom\""
+        }
+    ]
+}

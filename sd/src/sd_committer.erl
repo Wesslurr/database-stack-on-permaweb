@@ -85,7 +85,7 @@ stop() ->
 get_status() ->
     case whereis(?SERVER) of
         undefined -> #{<<"status">> => <<"stopped">>, <<"health">> => <<"stopped">>};
-        _ -> gen_server:call(?SERVER, get_status, 5000)
+        _ -> gen_server:call(?SERVER, get_status, 15000)
     end.
 
 get_status_map() ->
@@ -93,27 +93,27 @@ get_status_map() ->
 
 commit_now() ->
     ensure_started(),
-    gen_server:call(?SERVER, commit_now, 15000).
+    gen_server:call(?SERVER, commit_now, 120000).
 
 report_heartbeat() ->
     ensure_started(),
-    gen_server:call(?SERVER, report_heartbeat, 10000).
+    gen_server:call(?SERVER, report_heartbeat, 120000).
 
 set_arbitrator_id(ArbId) ->
     ensure_started(),
-    gen_server:call(?SERVER, {set_arbitrator_id, ArbId}, 5000).
+    gen_server:call(?SERVER, {set_arbitrator_id, ArbId}, 60000).
 
 bootstrap_genesis() ->
     ensure_started(),
-    gen_server:call(?SERVER, bootstrap_genesis, 10000).
+    gen_server:call(?SERVER, bootstrap_genesis, 300000).
 
 bootstrap_genesis(Opts) when is_map(Opts) ->
     ensure_started(Opts),
-    gen_server:call(?SERVER, {bootstrap_genesis, Opts}, 10000).
+    gen_server:call(?SERVER, {bootstrap_genesis, Opts}, 300000).
 
 reload_cursor() ->
     ensure_started(),
-    gen_server:call(?SERVER, reload_cursor, 5000).
+    gen_server:call(?SERVER, reload_cursor, 15000).
 
 %% ============================================================================
 %% gen_server Callbacks
@@ -129,7 +129,7 @@ init(Opts) ->
     GatewayUrl = resolve_gateway_url(Opts),
     CuUrl = resolve_cu_url(Opts),
     BatchMax = maps:get(batch_max, Opts, ?DEFAULT_BATCH_MAX),
-    PollMs = maps:get(poll_interval_ms, Opts, ?DEFAULT_POLL_INTERVAL_MS),
+    PollMs = resolve_poll_interval(Opts),
 
     WalletInfo = case sd_ao_client:load_wallet(WalletPath) of
         {ok, WI} -> WI;
@@ -186,9 +186,11 @@ init(Opts) ->
             case State1#state.health of
                 failed_closed ->
                     write_status_file(State1),
-                    {stop, {chain_divergence, State1#state.reason}};
+                    %% Do not schedule commit_tick while failed_closed, but remain alive in halted state
+                    %% so control plane inspection and recovery (reload_cursor, bootstrap_genesis) work!
+                    {ok, State1};
                 _ ->
-                    TRef = erlang:send_after(100, self(), commit_tick),
+                    TRef = erlang:send_after(PollMs, self(), commit_tick),
                     write_status_file(State1),
                     {ok, State1#state{timer_ref = TRef}}
             end;
@@ -202,7 +204,7 @@ init(Opts) ->
                 cursor_path = CursorPath
             },
             write_status_file(HaltedState),
-            {stop, {cursor_corrupted, CursorErr}}
+            {ok, HaltedState}
     end.
 
 handle_call(get_status, _From, State) ->
@@ -255,7 +257,11 @@ handle_call({bootstrap_genesis, Opts}, _From, State) ->
             write_status_file(NewState),
             {reply, {ok, true}, NewState};
         {error, Reason} ->
-            NewState = S0#state{status = degraded, health = degraded, reason = Reason},
+            %% Fail-closed: a rejected or unverifiable bootstrap (e.g. hash mismatch or
+            %% Genesis unreachable) must NOT overwrite the last valid Genesis pin.
+            %% Keep the previously validated genesis_id / expected_genesis_hash /
+            %% arbitrator_id from State, not the unvalidated values in S0.
+            NewState = State#state{status = degraded, health = degraded, reason = Reason},
             write_status_file(NewState),
             {reply, {error, Reason}, NewState}
     end;
@@ -266,19 +272,32 @@ handle_call(reload_cursor, _From, State) ->
             NewSeq = maps:get(last_committed_seq, DiskCursor, State#state.last_committed_seq),
             NewHash = maps:get(last_committed_hash, DiskCursor, State#state.last_committed_hash),
             NewRoot = maps:get(last_state_root, DiskCursor, State#state.last_state_root),
-            NewState = State#state{
+            S1 = State#state{
                 last_committed_seq = NewSeq,
                 last_committed_hash = NewHash,
-                last_state_root = NewRoot
+                last_state_root = NewRoot,
+                status = running,
+                health = healthy,
+                error_code = undefined,
+                reason = undefined
             },
-            write_status_file(NewState),
-            {reply, {ok, NewSeq}, NewState};
+            write_status_file(S1),
+            {reply, {ok, NewSeq}, S1};
         {error, Err} ->
             {reply, {error, Err}, State}
     end;
 
 handle_call({set_arbitrator_id, ArbId}, _From, State) ->
-    NewState = State#state{arbitrator_id = to_bin(ArbId)},
+    BinArbId = to_bin(ArbId),
+    S1 = State#state{
+        arbitrator_id = BinArbId,
+        status = running,
+        health = healthy,
+        error_code = undefined,
+        reason = undefined
+    },
+    NewState = reconcile_arbitrator_state(BinArbId, S1),
+    write_status_file(NewState),
     {reply, ok, NewState};
 
 handle_call(_Req, _From, State) ->
@@ -723,7 +742,9 @@ finish_bootstrap_with_config(Config, State) ->
     ) of
         {ok, _Status, RegResp} ->
             case parse_reg_response(RegResp) of
-                ok -> {ok, S1#state{status = running, health = healthy}};
+                ok ->
+                    {_, StateAfterHb} = do_report_heartbeat(S1#state{status = running, health = healthy}),
+                    {ok, StateAfterHb};
                 {error, RegErr} -> {error, RegErr}
             end;
         {error, RegErr} ->
@@ -735,7 +756,11 @@ parse_reg_response(#{<<"status">> := <<"REGISTERED">>}) -> ok;
 parse_reg_response(#{<<"status">> := <<"ALREADY_REGISTERED">>}) -> ok;
 parse_reg_response(#{<<"status">> := <<"REJECTED_UNAUTHORIZED_NODE">>}) ->
     {error, err_unauthorized_node};
+parse_reg_response(#{<<"status">> := <<"REJECTED_NODE_IMPERSONATION">>}) ->
+    {error, err_node_impersonation};
 parse_reg_response(#{<<"ok">> := false, <<"reason">> := Reason}) ->
+    {error, {err_unauthorized_node, Reason}};
+parse_reg_response(#{<<"ok">> := false, <<"error">> := Reason}) ->
     {error, {err_unauthorized_node, Reason}};
 parse_reg_response(Other) ->
     {error, {err_registration_unverified, Other}}.
@@ -1022,12 +1047,27 @@ save_disk_cursor(Seq, Hash, StateRoot, Epoch, Verdict, CursorPath) ->
         <<"last_state_root">> => to_bin(StateRoot),
         <<"epoch">> => Epoch,
         <<"verdict">> => to_bin(Verdict),
+        <<"status">> => to_bin(Verdict),
         <<"updated_at">> => list_to_binary(iso8601_now())
     },
     Json = iolist_to_binary(json:encode(Payload)),
     atomic_write_file(CursorPath, Json).
 
 write_status_file(#state{cursor_path = CursorPath} = State) ->
+    StatusMap = #{
+        <<"status">> => atom_to_binary(State#state.status, utf8),
+        <<"health">> => atom_to_binary(State#state.health, utf8),
+        <<"last_committed_seq">> => State#state.last_committed_seq,
+        <<"last_committed_hash">> => State#state.last_committed_hash,
+        <<"last_state_root">> => State#state.last_state_root,
+        <<"epoch">> => State#state.epoch,
+        <<"arbitrator_id">> => State#state.arbitrator_id,
+        <<"genesis_id">> => State#state.genesis_id,
+        <<"heartbeat_acknowledged">> => State#state.heartbeat_acknowledged,
+        <<"error_code">> => to_bin(State#state.error_code),
+        <<"reason">> => to_bin(State#state.reason)
+    },
+    catch ets:insert(sd_ram_store, {committer_status_map, StatusMap}),
     Dir = filename:dirname(CursorPath),
     StatusFile = filename:join([Dir, "committer_status.json"]),
     Payload = #{
@@ -1095,9 +1135,19 @@ get_hydb_profile() ->
 resolve_cursor_path(Opts, DbDir) ->
     case maps:get(cursor_path, Opts, undefined) of
         undefined ->
-            case os:getenv("HYDB_COMMITTER_CURSOR_PATH") of
-                false -> filename:join([DbDir, "data/committer/committer_cursor.json"]);
-                "" -> filename:join([DbDir, "data/committer/committer_cursor.json"]);
+            case os:getenv("HYDB_CURSOR_PATH") of
+                false ->
+                    case os:getenv("HYDB_COMMITTER_CURSOR_PATH") of
+                        false -> filename:join([DbDir, "data/committer/committer_cursor.json"]);
+                        "" -> filename:join([DbDir, "data/committer/committer_cursor.json"]);
+                        P -> P
+                    end;
+                "" ->
+                    case os:getenv("HYDB_COMMITTER_CURSOR_PATH") of
+                        false -> filename:join([DbDir, "data/committer/committer_cursor.json"]);
+                        "" -> filename:join([DbDir, "data/committer/committer_cursor.json"]);
+                        P -> P
+                    end;
                 P -> P
             end;
         Explicit -> Explicit
@@ -1223,6 +1273,17 @@ extract_genesis_hash(_) -> <<>>.
 
 extract_arbitrator_id(#{<<"arbitrator_process_id">> := AId}) -> to_bin(AId);
 extract_arbitrator_id(_) -> <<>>.
+
+resolve_poll_interval(Opts) ->
+    case maps:get(poll_interval_ms, Opts, undefined) of
+        undefined ->
+            case os:getenv("HYDB_POLL_INTERVAL_MS") of
+                false -> 3000;
+                "" -> 3000;
+                Val -> to_int(Val, 3000)
+            end;
+        Explicit -> to_int(Explicit, 3000)
+    end.
 
 to_bin(V) when is_binary(V) -> V;
 to_bin(V) when is_list(V) -> list_to_binary(V);

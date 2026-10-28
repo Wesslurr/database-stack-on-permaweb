@@ -1,0 +1,6 @@
+port: 8734
+priv_key_location: secrets/wallet.json
+mode: debug
+compute_mode: lazy
+scheduling_mode: local_confirmation
+store_all_signed: false

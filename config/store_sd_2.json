@@ -1,0 +1,14 @@
+{
+    "store": [
+        {
+            "store-module": "hb_store_rocksdb",
+            "name": "/home/weslur/database/data/node_sd_2/cache-rocksdb",
+            "ao-types": "store-module=\"atom\""
+        },
+        {
+            "store-module": "hb_store_fs",
+            "name": "/home/weslur/database/data/node_sd_2/cache-mainnet",
+            "ao-types": "store-module=\"atom\""
+        }
+    ]
+}

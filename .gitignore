@@ -23,6 +23,8 @@ sd/build/
 # Dynamic test payload outputs
 ao_process/batch_checkpoint.json
 ao_process/fraud_batch.json
+hyperbeam-key.json
+*.key.json
 
 # Internal scratch / benchmark scripts
 scratch/

@@ -57,6 +57,12 @@ fn erl_replay_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
 @external(erlang, "hymessage_runtime", "promote_from_req")
 fn erl_promote_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
 
+@external(erlang, "hymessage_runtime", "cluster_membership_from_req")
+fn erl_cluster_membership_from_req(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic
+
+@external(erlang, "hymessage_runtime", "ensure_started")
+fn erl_ensure_started() -> Dynamic
+
 /// Device metadata. HyperBEAM calls this during key resolution.
 pub fn info(_base: Dynamic, _opts: Dynamic) -> Dict(String, String) {
   dict.new()
@@ -72,6 +78,7 @@ pub fn ping(
   _req: Dynamic,
   _opts: Dynamic,
 ) -> Dict(String, String) {
+  let _ = erl_ensure_started()
   dict.new()
   |> dict.insert("ok", "pong")
   |> dict.insert("device", "hymessage@1.0")
@@ -152,4 +159,9 @@ pub fn replay(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
 /// Promote Epoch (Fencing Token for Failover): POST/GET /~hymessage@1.0/promote?epoch=2
 pub fn promote(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
   erl_promote_from_req(base, req, opts)
+}
+
+/// Cluster Membership Query & Configuration: GET/POST /~hymessage@1.0/cluster_membership
+pub fn cluster_membership(base: Dynamic, req: Dynamic, opts: Dynamic) -> Dynamic {
+  erl_cluster_membership_from_req(base, req, opts)
 }

@@ -622,12 +622,12 @@ get_status_map() ->
     HashRej = lookup_val(hash_rejections, 0),
     DegradedRej = lookup_val(degraded_rejections, 0),
     WalCorrupted = lookup_val(wal_corrupted, false),
-    HaltReason = case ets:lookup(?TABLE, wal_recovery_halt_reason) of
+    HaltReason = case catch ets:lookup(?TABLE, wal_recovery_halt_reason) of
         [{wal_recovery_halt_reason, none}] -> <<"none">>;
         [{wal_recovery_halt_reason, R}] -> list_to_binary(io_lib:format("~p", [R]));
         _ -> <<"none">>
     end,
-    Truncated = case ets:lookup(?TABLE, wal_recovery_truncated_detected) of
+    Truncated = case catch ets:lookup(?TABLE, wal_recovery_truncated_detected) of
         [{wal_recovery_truncated_detected, T}] -> T;
         _ -> false
     end,
@@ -638,10 +638,15 @@ get_status_map() ->
                 undefined ->
                     #{<<"status">> => <<"crashed">>, <<"health">> => <<"failed_closed">>};
                 _ ->
-                    case catch sd_committer:get_status() of
-                        {'EXIT', _} -> #{<<"status">> => <<"unresponsive">>, <<"health">> => <<"failed_closed">>};
-                        StatusMap when is_map(StatusMap) -> StatusMap;
-                        _ -> #{<<"status">> => <<"unknown">>, <<"health">> => <<"degraded">>}
+                    case catch ets:lookup(?TABLE, committer_status_map) of
+                        [{committer_status_map, CachedStatus}] when is_map(CachedStatus) ->
+                            CachedStatus;
+                        _ ->
+                            case catch sd_committer:get_status() of
+                                {'EXIT', _} -> #{<<"status">> => <<"initializing">>, <<"health">> => <<"healthy">>};
+                                StatusMap when is_map(StatusMap) -> StatusMap;
+                                _ -> #{<<"status">> => <<"unknown">>, <<"health">> => <<"degraded">>}
+                            end
                     end
             end;
         _ ->
@@ -679,6 +684,9 @@ get_status_map() ->
         <<"hash_rejections">> => HashRej,
         <<"degraded_rejections">> => DegradedRej,
         <<"wal_file">> => list_to_binary(wal_path()),
+        <<"committer_health">> => CommitterHealth,
+        <<"arbitrator_id">> => maps:get(<<"arbitrator_id">>, CommitterStatus, <<>>),
+        <<"genesis_id">> => maps:get(<<"genesis_id">>, CommitterStatus, <<>>),
         <<"committer">> => CommitterStatus
     }.
 
@@ -722,9 +730,54 @@ get_wal_batch_from_req(_Base, Req, _Opts) ->
     ToSeq = parse_int_field(<<"to_seq">>, Req, CurrTick),
     get_wal_batch(FromSeq, ToSeq).
 
-get_status_from_req(_Base, _Req, _Opts) ->
+get_status_from_req(_Base, Req, _Opts) ->
     ensure_started(),
-    get_status_map().
+    Action = parse_bin_field(<<"action">>, Req, <<>>),
+    case Action of
+        <<"commit_now">> ->
+            case catch sd_committer:commit_now() of
+                {ok, true, committed} -> #{<<"ok">> => true, <<"result">> => <<"committed">>};
+                {ok, true, duplicate} -> #{<<"ok">> => true, <<"result">> => <<"duplicate">>};
+                {ok, true, idempotent_duplicate} -> #{<<"ok">> => true, <<"result">> => <<"duplicate">>};
+                {ok, true, idle} -> #{<<"ok">> => true, <<"result">> => <<"committed">>, <<"detail">> => <<"idle_already_committed">>};
+                {ok, false, Reason} -> #{<<"ok">> => false, <<"reason">> => to_bin_spec(Reason)};
+                {error, Err} -> #{<<"ok">> => false, <<"error">> => to_bin_spec(Err)};
+                Other -> #{<<"ok">> => false, <<"result">> => to_bin_spec(Other)}
+            end;
+        <<"set_arbitrator">> ->
+            ArbId = parse_bin_field(<<"arbitrator_id">>, Req, <<>>),
+            case catch sd_committer:set_arbitrator_id(ArbId) of
+                ok -> #{<<"ok">> => true, <<"arbitrator_id">> => ArbId};
+                Err -> #{<<"ok">> => false, <<"error">> => to_bin_spec(Err)}
+            end;
+        <<"reload_cursor">> ->
+            case catch sd_committer:reload_cursor() of
+                {ok, Seq} -> #{<<"ok">> => true, <<"last_committed_seq">> => Seq};
+                {error, Err} -> #{<<"ok">> => false, <<"error">> => to_bin_spec(Err)};
+                Other -> #{<<"ok">> => false, <<"result">> => to_bin_spec(Other)}
+            end;
+        <<"bootstrap_genesis">> ->
+            GenId = parse_bin_field(<<"genesis_id">>, Req, <<>>),
+            ExpectedHash = parse_bin_field(<<"genesis_hash">>, Req, <<>>),
+            Opts = case GenId of
+                <<>> -> #{};
+                _ -> #{genesis_id => GenId, expected_genesis_hash => ExpectedHash}
+            end,
+            case catch sd_committer:bootstrap_genesis(Opts) of
+                {ok, true} -> #{<<"ok">> => true, <<"result">> => <<"bootstrapped">>};
+                {error, Err} -> #{<<"ok">> => false, <<"error">> => to_bin_spec(Err)};
+                Other -> #{<<"ok">> => false, <<"result">> => to_bin_spec(Other)}
+            end;
+        <<"report_heartbeat">> ->
+            case catch sd_committer:report_heartbeat() of
+                {ok, acknowledged} -> #{<<"ok">> => true, <<"result">> => <<"acknowledged">>};
+                {{ok, acknowledged}, _} -> #{<<"ok">> => true, <<"result">> => <<"acknowledged">>};
+                {error, Err} -> #{<<"ok">> => false, <<"error">> => to_bin_spec(Err)};
+                Other -> #{<<"ok">> => false, <<"result">> => to_bin_spec(Other)}
+            end;
+        _ ->
+            get_status_map()
+    end.
 
 fence_from_req(_Base, Req, _Opts) ->
     ensure_started(),
@@ -848,12 +901,12 @@ handle_call(simulate_restart_from_wal, _From, State) ->
     Epoch = lookup_val(epoch, 1),
     KVCount = ets:foldl(fun({{kv, _}, _}, Acc) -> Acc + 1; (_, Acc) -> Acc end, 0, ?TABLE),
     WalCorrupted = lookup_val(wal_corrupted, false),
-    HaltReason = case ets:lookup(?TABLE, wal_recovery_halt_reason) of
+    HaltReason = case catch ets:lookup(?TABLE, wal_recovery_halt_reason) of
         [{wal_recovery_halt_reason, none}] -> <<"none">>;
         [{wal_recovery_halt_reason, R}] -> list_to_binary(io_lib:format("~p", [R]));
         _ -> <<"none">>
     end,
-    Truncated = case ets:lookup(?TABLE, wal_recovery_truncated_detected) of
+    Truncated = case catch ets:lookup(?TABLE, wal_recovery_truncated_detected) of
         [{wal_recovery_truncated_detected, T}] -> T;
         _ -> false
     end,
@@ -1329,9 +1382,13 @@ to_int_spec(_) -> 0.
 
 to_bin_spec(B) when is_binary(B) -> B;
 to_bin_spec(A) when is_atom(A) -> atom_to_binary(A, utf8);
-to_bin_spec(L) when is_list(L) -> list_to_binary(L);
+to_bin_spec(L) when is_list(L) ->
+    case io_lib:printable_unicode_list(L) of
+        true -> unicode:characters_to_binary(L);
+        false -> iolist_to_binary(io_lib:format("~p", [L]))
+    end;
 to_bin_spec(I) when is_integer(I) -> integer_to_binary(I);
-to_bin_spec(_) -> <<>>.
+to_bin_spec(T) -> iolist_to_binary(io_lib:format("~p", [T])).
 
 normalize_key_spec(absent, _) -> absent;
 normalize_key_spec(undefined, _) -> absent;
@@ -1476,9 +1533,9 @@ compute_legacy_event_hash(Event, LastHash) ->
     binary:encode_hex(crypto:hash(sha256, Payload)).
 
 lookup_val(Key, Default) ->
-    case ets:lookup(?TABLE, Key) of
+    case catch ets:lookup(?TABLE, Key) of
         [{Key, Val}] -> Val;
-        [] -> Default
+        _ -> Default
     end.
 
 read_wal_entries(Path) ->

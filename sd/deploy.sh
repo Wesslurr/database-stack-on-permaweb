@@ -9,7 +9,7 @@ MOD="_hb_device_sd_1_0_sd0"
 OUT="$SDD/out"
 ERL="${ERL:-$(command -v erl || echo "$HOME/erlang/27.0/bin/erl")}"
 ERLC="${ERLC:-$(command -v erlc || echo "$HOME/erlang/27.0/bin/erlc")}"
-HB_SD_REL="$DB_DIR/vendor/HyperBEAM_sd/_build/genesis_wasm+rocksdb/rel/hb_sd"
+HB_SD_REL="$DB_DIR/vendor/HyperBEAM/_build/genesis_wasm+rocksdb/rel/hb"
 
 echo '=== 1. Compiling sd_ao_client.erl, sd_committer.erl & sd_runtime.erl ==='
 mkdir -p "$HB_SD_REL/lib/sd_runtime-1.0.0/ebin"

@@ -9,8 +9,10 @@ if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$ARLOCAL_PORT/info"; the
   exit 0
 fi
 pkill -f "start-arlocal.mjs" 2>/dev/null || true
-nohup node scripts/start-arlocal.mjs < /dev/null > "$DB_DIR/data/arlocal.log" 2>&1 &
-disown || true
+tmux kill-session -t db-arlocal 2>/dev/null || true
+
+tmux new-session -d -s db-arlocal "cd $DB_DIR && node scripts/start-arlocal.mjs >> $DB_DIR/data/arlocal.log 2>&1"
+
 for i in $(seq 1 20); do
   if curl -sf --max-time 2 -o /dev/null "http://127.0.0.1:$ARLOCAL_PORT/info"; then
     echo "[arlocal] UP on :$ARLOCAL_PORT"
