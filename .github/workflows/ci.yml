@@ -135,5 +135,23 @@ jobs:
       - name: Run Phase 12 Native In-BEAM AO Committer Tests
         run: npm run test:beam-committer
 
+      - name: Run Phase 13 Native HyperBEAM AO Process Execution Tests
+        run: npm run test:tahap13
+
+      - name: Run Phase 14 Genesis Configuration Persistence Audit
+        run: npm run test:tahap14
+
+      - name: Run Phase 15 In-BEAM Committer to Native Arbitrator Audit
+        run: npm run test:tahap15
+
+      - name: Run Phase 16 Dynamic Node Registration & Cold-Start Bootstrap
+        run: npm run test:tahap16
+
+      - name: Run Phase 17 Full End-to-End Game Flow Lifecycle
+        run: npm run test:tahap17
+
+      - name: Run Phase 18 Resilience & Fail-Closed Boundary Audit
+        run: npm run test:tahap18
+
       - name: Run End-to-End Integration Tests
         run: npm run test:integration

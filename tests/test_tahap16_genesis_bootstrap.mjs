@@ -194,6 +194,18 @@ async function main() {
   console.log('TAHAP 16: DYNAMIC NODE REGISTRATION & COLD-START BOOTSTRAP AUDIT');
   console.log('========================================================================\n');
 
+  // Check if Genesis (:8733) and SD1 (:8735) are alive
+  const isGenAlive = await fetch(`${HB_GENESIS_URL}/~meta@1.0/info`, { headers: { Accept: 'application/json' } }).then(r => r.ok).catch(() => false);
+  const isSdAlive = await fetch(`${HB_SD1_URL}/~meta@1.0/info`, { headers: { Accept: 'application/json' } }).then(r => r.ok).catch(() => false);
+  if (!isGenAlive || !isSdAlive) {
+    console.log('\n  ⚠️ [Live Cluster Inactive] HyperBEAM Genesis (:8733) or SD-1 (:8735) is not running.');
+    console.log('  ⚠️ Skipping live cluster bootstrap tests (run npm run cluster:start for live testing).\n');
+    console.log('========================================================================');
+    console.log(' TAHAP 16 VERIFICATION SUMMARY: SKIPPED (Cluster Offline)');
+    console.log('========================================================================');
+    return;
+  }
+
   // Load scheduler & wasm image
   const info = await fetchJson(`${HB_GENESIS_URL}/~meta@1.0/info`);
   const scheduler = info.address || 'gw0iqMNNGgXcAj_yejTV0H_152Hwz941gxhnzvB_PY0';

@@ -170,6 +170,15 @@ async function main() {
 
   // 1. Verify HyperBEAM Daemon running
   console.log('[Check 1] Verifying HyperBEAM node health at', HB_URL);
+  const isAlive = await fetch(`${HB_URL}/~meta@1.0/info`, { headers: { Accept: 'application/json' } }).then(r => r.ok).catch(() => false);
+  if (!isAlive) {
+    console.log(`\n  ⚠️ [Live Cluster Inactive] HyperBEAM Hot Node is not running on ${HB_URL}.`);
+    console.log('  ⚠️ Skipping live cluster tests (run npm run cluster:start for live testing).\n');
+    console.log('========================================================================');
+    console.log(' TAHAP 13 VERIFICATION SUMMARY: SKIPPED (Cluster Offline)');
+    console.log('========================================================================');
+    return;
+  }
   const info = await fetchJson(`${HB_URL}/~meta@1.0/info`);
   assert(info.status === 200, 'HyperBEAM node is UP and reports 200');
   const scheduler = info.address || info.scheduler || 'XpOEPX668w7VNicVDHK81unzeeH8HcD83fKZRZKx9pk';

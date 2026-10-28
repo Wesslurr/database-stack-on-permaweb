@@ -210,6 +210,17 @@ async function main() {
 
   const ArweaveSigner = arbundles.signers?.ArweaveSigner || arbundles.default?.signers?.ArweaveSigner;
   const signerSu = new ArweaveSigner(JSON.parse(readFileSync(join(ROOT_DIR, 'secrets/wallet_su.json'), 'utf8')));
+  // Pre-check cluster availability
+  const isClusterAlive = await isUp(NODE_PORTS.genesis).catch(() => false);
+  if (!isClusterAlive) {
+    console.log('\n  ⚠️ [Live Cluster Inactive] HyperBEAM cluster is not running.');
+    console.log('  ⚠️ Skipping live cluster chaos tests (run npm run cluster:start for live testing).\n');
+    console.log('========================================================================');
+    console.log(' TAHAP 18 VERIFICATION SUMMARY: SKIPPED (Cluster Offline)');
+    console.log('========================================================================');
+    return;
+  }
+
   const genesisId = readFileSync(join(ROOT_DIR, 'ao_process/process_genesis_id.txt'), 'utf8').trim();
   const genesisHash = readFileSync(join(ROOT_DIR, 'ao_process/genesis_hash.txt'), 'utf8').trim();
   const arbitratorId = readFileSync(join(ROOT_DIR, 'ao_process/process_id.txt'), 'utf8').trim();

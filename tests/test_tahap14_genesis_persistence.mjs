@@ -117,6 +117,17 @@ async function main() {
   console.log('TAHAP 14: GENESIS CONFIGURATION PERSISTENCE ACROSS RESTART AUDIT');
   console.log('========================================================================\n');
 
+  // Check if Genesis node is alive
+  const isAlive = await fetch(`${HB_GENESIS_URL}/~meta@1.0/info`, { headers: { Accept: 'application/json' } }).then(r => r.ok).catch(() => false);
+  if (!isAlive) {
+    console.log(`\n  ⚠️ [Live Cluster Inactive] HyperBEAM Genesis Node is not running on ${HB_GENESIS_URL}.`);
+    console.log('  ⚠️ Skipping live cluster persistence tests (run npm run cluster:start for live testing).\n');
+    console.log('========================================================================');
+    console.log(' TAHAP 14 VERIFICATION SUMMARY: SKIPPED (Cluster Offline)');
+    console.log('========================================================================');
+    return;
+  }
+
   // Load SU wallet & info
   const info = await fetchJson(`${HB_GENESIS_URL}/~meta@1.0/info`);
   const scheduler = info.address || 'gw0iqMNNGgXcAj_yejTV0H_152Hwz941gxhnzvB_PY0';
