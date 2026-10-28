@@ -23,12 +23,16 @@ sd/build/
 # Dynamic test payload outputs
 ao_process/batch_checkpoint.json
 ao_process/fraud_batch.json
+ao_process/genesis_hash.txt
+ao_process/process_genesis_id.txt
 hyperbeam-key.json
 *.key.json
 
 # Internal scratch / benchmark scripts
 scratch/
 scripts/ci_watch.py
+scripts/git_push.sh
+data/git_push.log
 
 # Local Agent configuration & Graphify artifacts (private / do not publish)
 .agent/

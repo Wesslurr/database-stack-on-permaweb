@@ -1327,7 +1327,7 @@ export async function bootstrapGenesisStackNode(options = {}) {
       const expectedHash = options.expectedGenesisHash ||
         process.env.AO_GENESIS_HASH ||
         process.env.HYDB_GENESIS_HASH ||
-        (existsSync(hashFile) ? readFileSync(hashFile, 'utf8').trim() : null);
+        (options.genesisProcessId && !options.processIdFile ? null : (existsSync(hashFile) ? readFileSync(hashFile, 'utf8').trim() : null));
 
       if (expectedHash && config.genesis?.genesis_hash) {
         if (config.genesis.genesis_hash.toUpperCase() !== expectedHash.toUpperCase()) {

@@ -778,6 +778,7 @@ async function runTests() {
   try {
     await bootstrapGenesisStackNode({
       genesisProcessId: mockGenesisId,
+      expectedGenesisHash: genesisHash,
       address: 'ROGUE_UNAUTHORIZED_NODE_ADDRESS',
       evaluatorFn: (m) => liveRuntime.evaluate(m)
     });
