@@ -783,30 +783,40 @@ format_ao_url(GatewayUrl, ProcessId, Action, Opts) ->
     end.
 
 is_hyperbeam_gateway(GwUrl, Opts) ->
-    case maps:get(backend, Opts, auto) of
+    Backend = case maps:get(backend, Opts, maps:get(<<"backend">>, Opts, auto)) of
+        <<"hyperbeam">> -> hyperbeam;
+        <<"ao_mu">> -> ao_mu;
+        Other -> Other
+    end,
+    case Backend of
         hyperbeam -> true;
         ao_mu -> false;
         auto ->
-            Clean = to_list(GwUrl),
-            case string:find(Clean, "~process@1.0") of
-                nomatch ->
-                    case string:find(Clean, "/message") of
+            HasCuUrl = maps:is_key(cu_url, Opts) orelse maps:is_key(<<"cu_url">>, Opts),
+            case HasCuUrl of
+                true -> false;
+                false ->
+                    Clean = to_list(GwUrl),
+                    case string:find(Clean, "~process@1.0") of
                         nomatch ->
-                            case string:find(Clean, "mu.ao") of
+                            case string:find(Clean, "/message") of
                                 nomatch ->
-                                    case string:find(Clean, "ao-testnet") of
+                                    case string:find(Clean, "mu.ao") of
                                         nomatch ->
-                                            case string:find(Clean, "/ao/") of
-                                                nomatch -> true;
+                                            case string:find(Clean, "ao-testnet") of
+                                                nomatch ->
+                                                    case string:find(Clean, "/ao/") of
+                                                        nomatch -> true;
+                                                        _ -> false
+                                                    end;
                                                 _ -> false
                                             end;
                                         _ -> false
                                     end;
                                 _ -> false
                             end;
-                        _ -> false
-                    end;
-                _ -> true
+                        _ -> true
+                    end
             end
     end.
 

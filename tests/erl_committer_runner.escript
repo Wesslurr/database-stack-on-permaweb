@@ -243,8 +243,9 @@ main(_) ->
         {received_http_request, ReqRaw} ->
             [HeadersBin, BodyBin] = binary:split(ReqRaw, <<"\r\n\r\n">>),
             HeadersStr = string:lowercase(binary_to_list(HeadersBin)),
-            case string:find(HeadersStr, "application/octet-stream") =/= nomatch andalso
-                 string:find(HeadersStr, "x-dataitem-id:") =/= nomatch of
+            HasContentType = string:find(HeadersStr, "application/octet-stream") =/= nomatch orelse
+                             string:find(HeadersStr, "application/ans104") =/= nomatch,
+            case HasContentType andalso string:find(HeadersStr, "x-dataitem-id:") =/= nomatch of
                 true ->
                     case sd_ao_client:verify_ans104_data_item(BodyBin) of
                         {ok, #{id := DispatchedId}} when byte_size(DispatchedId) > 0 ->
@@ -540,6 +541,7 @@ main(_) ->
         cursor_path => FailClosedCursorPath,
         wallet_path => WalletFile,
         arbitrator_id => <<"MOCK_ARB">>,
+        genesis_id => <<>>,
         gateway_url => "http://127.0.0.1:8994"
     }),
     case InitHaltRes of

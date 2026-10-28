@@ -186,9 +186,7 @@ init(Opts) ->
             case State1#state.health of
                 failed_closed ->
                     write_status_file(State1),
-                    %% Do not schedule commit_tick while failed_closed, but remain alive in halted state
-                    %% so control plane inspection and recovery (reload_cursor, bootstrap_genesis) work!
-                    {ok, State1};
+                    {stop, {chain_divergence, State1#state.reason}};
                 _ ->
                     TRef = erlang:send_after(PollMs, self(), commit_tick),
                     write_status_file(State1),
@@ -204,7 +202,7 @@ init(Opts) ->
                 cursor_path = CursorPath
             },
             write_status_file(HaltedState),
-            {ok, HaltedState}
+            {stop, {cursor_corrupted, CursorErr}}
     end.
 
 handle_call(get_status, _From, State) ->
@@ -1194,12 +1192,16 @@ resolve_cu_url(Opts) ->
 resolve_genesis_id(Opts, DbDir) ->
     case maps:get(genesis_id, Opts, undefined) of
         undefined ->
-            case os:getenv("AO_GENESIS_ID") of
+            case maps:is_key(arbitrator_id, Opts) of
+                true -> <<>>;
                 false ->
-                    GenFile = filename:join([DbDir, "ao_process/process_genesis_id.txt"]),
-                    read_file_trimmed(GenFile);
-                "" -> <<>>;
-                Id -> list_to_binary(string:trim(Id))
+                    case os:getenv("AO_GENESIS_ID") of
+                        false ->
+                            GenFile = filename:join([DbDir, "ao_process/process_genesis_id.txt"]),
+                            read_file_trimmed(GenFile);
+                        "" -> <<>>;
+                        Id -> list_to_binary(string:trim(Id))
+                    end
             end;
         Explicit -> to_bin(Explicit)
     end.
