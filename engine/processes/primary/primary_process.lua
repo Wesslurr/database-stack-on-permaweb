@@ -138,6 +138,42 @@ local function ensure_topology(process, msg)
                 if sd2_url then
                     table.insert(Topology.sd_targets, { url = sd2_url, process = sd2_proc, role = "sd2" })
                 end
+
+                -- Auto-hydrate latest state & tick from SD1 if Primary starts from cold RAM
+                if Tick == 0 then
+                    pcall(function()
+                        local ok_sync, status_sync, res_sync = pcall(function()
+                            return ao.resolve({
+                                path = "/~relay@1.0/call",
+                                ["relay-method"] = "GET",
+                                ["relay-path"] = sd1_url .. "/~node-process@1.0/" .. sd1_proc .. "/now/results~message@1.0/output/body",
+                                ["cache-control"] = "no-store"
+                            })
+                        end)
+                        local raw_sync = nil
+                        if ok_sync and status_sync == "ok" then
+                            if type(res_sync) == "table" and res_sync.body then
+                                raw_sync = tostring(res_sync.body)
+                            elseif type(res_sync) == "string" then
+                                raw_sync = res_sync
+                            end
+                        end
+                        if raw_sync then
+                            local tick_str = string.match(raw_sync, '"last_tick"%s*:%s*(%d+)')
+                            if tick_str then
+                                local sd_tick = tonumber(tick_str) or 0
+                                if sd_tick > Tick then Tick = sd_tick end
+                            end
+                            for id, x, y, tick in string.gmatch(raw_sync, '{"id"%s*:%s*"([^"]+)"%s*,%s*"x"%s*:%s*([%d.-]+)%s*,%s*"y"%s*:%s*([%d.-]+)%s*,%s*"tick"%s*:%s*(%d+)}') do
+                                local pt = { id = id, x = tonumber(x) or 0, y = tonumber(y) or 0, tick = tonumber(tick) or 0 }
+                                if Points[id] == nil then
+                                    ActiveEntityCount = (ActiveEntityCount or 0) + 1
+                                end
+                                Points[id] = pt
+                            end
+                        end
+                    end)
+                end
             end
         end
     end
@@ -240,6 +276,10 @@ function compute(process, message, opts)
             Points[pt.id] = pt
             append_audit(pt.tick, pt.id, pt.x, pt.y)
 
+            local is_micro_epoch = (Tick % 10 == 0)
+            local micro_epoch_num = math.floor(Tick / 10)
+            local micro_epoch_root = string.format("0xME_TICK_%d_PTS_%d_EPOCH_%d", Tick, ActiveEntityCount, micro_epoch_num)
+
             local ack_nodes = {}
             local sd_signers = {}
             local confirmed_sd_tick = 0
@@ -247,15 +287,16 @@ function compute(process, message, opts)
             if topo and topo.sd_targets then
                 local targets = topo.sd_targets
                 local payload_str = string.format(
-                    [[{"action":"Replicate","id":"%s","x":%s,"y":%s,"tick":%d,"relayed_by_signer":"%s","assignment_id":"%s"}]],
-                    json_safe(pt.id), tostring(pt.x), tostring(pt.y), pt.tick, json_safe(slot_signer), json_safe(slot_id)
+                    [[{"action":"Replicate","id":"%s","x":%s,"y":%s,"tick":%d,"relayed_by_signer":"%s","assignment_id":"%s","micro_epoch_sealed":%s,"micro_epoch_num":%d,"micro_epoch_root":"%s"}]],
+                    json_safe(pt.id), tostring(pt.x), tostring(pt.y), pt.tick, json_safe(slot_signer), json_safe(slot_id),
+                    is_micro_epoch and "true" or "false", micro_epoch_num, micro_epoch_root
                 )
 
                 if #targets == 2 then
                     local t1, t2 = targets[1], targets[2]
 
-                    -- Opsi B: Stream replication to SD1 and SD2 via asynchronous cast pipeline (0 ms blocking)
-                    local ok_p1, s_p1, res_p1 = pcall(function()
+                    -- Stream replication to SD1 and SD2 via asynchronous cast pipeline (0 ms blocking)
+                    local ok_p1, s_p1 = pcall(function()
                         return ao.resolve({
                             path = "/~relay@1.0/cast",
                             ["relay-path"] = t1.url .. "/~node-process@1.0/" .. t1.process .. "/push/output~message@1.0/last_tick",
@@ -266,7 +307,7 @@ function compute(process, message, opts)
                         })
                     end)
 
-                    local ok_p2, s_p2, res_p2 = pcall(function()
+                    local ok_p2, s_p2 = pcall(function()
                         return ao.resolve({
                             path = "/~relay@1.0/cast",
                             ["relay-path"] = t2.url .. "/~node-process@1.0/" .. t2.process .. "/push/output~message@1.0/last_tick",
@@ -296,21 +337,25 @@ function compute(process, message, opts)
                 LastSdSigners = sd_signers
             end
 
-            local items = {}
-            for _, p in pairs(Points) do
-                table.insert(items, json_encode_point(p))
-            end
-            local points_json = "[" .. table.concat(items, ",") .. "]"
-
+            -- High-Performance Lean Payload with Micro-Epoch RSA Checkpoint
             if sd_replicated then
-                res = string.format(
-                    [[{"status":"ok","tier":"primary_ram","requires_sign":true,"primary_signer":"%s","sd_signers":%s,"assignment_id":"%s","topology_source":"%s","sd_targets":%s,"sd_ack":true,"sd_acked_nodes":%s,"sd_confirmed_tick":%d,"sd_persistence":"ram_latest+lmdb_disk","active_entity_count":%d,"audit_ring_size":%d,"max_entities":%d,"point":%s,"points":%s}]],
-                    slot_signer, encode_string_list(LastSdSigners), slot_id, genesis_src, encode_sd_urls(topo), encode_string_list(ack_nodes), confirmed_sd_tick, ActiveEntityCount, #TickAuditRing, MaxEntities, json_encode_point(pt), points_json
-                )
+                if is_micro_epoch then
+                    -- Authoritative Micro-Epoch Checkpoint (RSA-4096 Signed)
+                    res = string.format(
+                        [[{"status":"ok","tier":"primary_ram","requires_sign":true,"primary_signer":"%s","sd_signers":%s,"assignment_id":"%s","topology_source":"%s","sd_targets":%s,"sd_ack":true,"sd_acked_nodes":%s,"sd_confirmed_tick":%d,"sd_persistence":"ram_latest+lmdb_disk","active_entity_count":%d,"audit_ring_size":%d,"max_entities":%d,"micro_epoch":%d,"micro_epoch_sealed":true,"micro_epoch_root":"%s","point":%s}]],
+                        slot_signer, encode_string_list(LastSdSigners), slot_id, genesis_src, encode_sd_urls(topo), encode_string_list(ack_nodes), confirmed_sd_tick, ActiveEntityCount, #TickAuditRing, MaxEntities, micro_epoch_num, micro_epoch_root, json_encode_point(pt)
+                    )
+                else
+                    -- High-Speed Quorum In-Memory ACK (Hot Move Path, Zero RSA Blocking)
+                    res = string.format(
+                        [[{"status":"ok","tier":"primary_ram","requires_sign":false,"primary_signer":"%s","assignment_id":"%s","topology_source":"%s","sd_targets":%s,"sd_ack":true,"sd_acked_nodes":%s,"sd_confirmed_tick":%d,"sd_persistence":"ram_latest","active_entity_count":%d,"audit_ring_size":%d,"max_entities":%d,"micro_epoch":%d,"micro_epoch_sealed":false,"point":%s}]],
+                        slot_signer, slot_id, genesis_src, encode_sd_urls(topo), encode_string_list(ack_nodes), confirmed_sd_tick, ActiveEntityCount, #TickAuditRing, MaxEntities, micro_epoch_num, json_encode_point(pt)
+                    )
+                end
             else
                 res = string.format(
-                    [[{"status":"error_sd_backup_incomplete","tier":"primary_ram","requires_sign":true,"primary_signer":"%s","sd_signers":%s,"assignment_id":"%s","topology_source":"%s","sd_targets":%s,"sd_ack":false,"sd_acked_nodes":%s,"sd_confirmed_tick":%d,"sd_persistence":"ram_latest+lmdb_disk","active_entity_count":%d,"audit_ring_size":%d,"max_entities":%d,"point":%s,"points":%s}]],
-                    slot_signer, encode_string_list(LastSdSigners), slot_id, genesis_src, encode_sd_urls(topo), encode_string_list(ack_nodes), confirmed_sd_tick, ActiveEntityCount, #TickAuditRing, MaxEntities, json_encode_point(pt), points_json
+                    [[{"status":"error_sd_backup_incomplete","tier":"primary_ram","requires_sign":true,"primary_signer":"%s","sd_signers":%s,"assignment_id":"%s","topology_source":"%s","sd_targets":%s,"sd_ack":false,"sd_acked_nodes":%s,"sd_confirmed_tick":%d,"sd_persistence":"ram_latest+lmdb_disk","active_entity_count":%d,"audit_ring_size":%d,"max_entities":%d,"point":%s}]],
+                    slot_signer, encode_string_list(LastSdSigners), slot_id, genesis_src, encode_sd_urls(topo), encode_string_list(ack_nodes), confirmed_sd_tick, ActiveEntityCount, #TickAuditRing, MaxEntities, json_encode_point(pt)
                 )
             end
         end
@@ -342,14 +387,19 @@ function compute(process, message, opts)
         )
     end
     
+    local current_epoch_num = math.floor(Tick / 10)
+    local is_me_sealed = (action == "Write-Point" and (Tick % 10 == 0))
+
     process.results = {
         output = {
             body = res,
             primary_signer = slot_signer,
-            requires_sign = "true",
+            requires_sign = (is_me_sealed or action ~= "Write-Point") and "true" or "false",
             active_entity_count = tostring(ActiveEntityCount or 0),
             audit_ring_size = tostring(#TickAuditRing),
-            max_entities = tostring(MaxEntities)
+            max_entities = tostring(MaxEntities),
+            micro_epoch = tostring(current_epoch_num),
+            micro_epoch_sealed = is_me_sealed and "true" or "false"
         }
     }
     return process

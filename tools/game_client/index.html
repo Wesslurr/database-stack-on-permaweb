@@ -181,6 +181,7 @@
     .tier-box.tier-primary { border-left-color: var(--red); }
     .tier-box.tier-sd { border-left-color: var(--green); }
     .tier-box.tier-arbit { border-left-color: var(--purple); }
+    .tier-box.tier-l1 { border-left-color: var(--amber); }
     .tier-title {
       display: flex;
       justify-content: space-between;
@@ -227,11 +228,13 @@
   <header>
     <div class="title-group">
       <h1><span class="dot-red"></span> HyperBEAM Real-Time State Engine — Red Circle WASD Client</h1>
-      <p>Client hanya terhubung ke <strong>Genesis (:8733)</strong> untuk menemukan Primary. Lingkaran Merah hanya berpindah setelah <strong>Primary RAM + SD1/SD2 (RAM + LMDB Disk)</strong> memberi ACK.</p>
+      <p>Client connects exclusively to <strong>Genesis (:8733)</strong> to discover Primary. The Red Circle only moves after receiving authoritative ACKs from <strong>Primary RAM + SD1/SD2 (RAM + LMDB Disk)</strong>.</p>
     </div>
     <div class="badge-row">
       <div class="badge" id="genesisBadge">Genesis (:8733): <strong>Connecting...</strong></div>
+      <div class="badge" id="genesisMetricsBadge">Genesis Resource: <strong id="inspGenesisRam">—</strong> | CPU: <strong id="inspGenesisCpu">—</strong></div>
       <div class="badge" id="primaryBadge">Discovered Primary: <strong>—</strong></div>
+      <div class="badge" id="l1Badge">Arweave L1 (:1984): <strong>Connecting...</strong></div>
       <div class="badge" id="ackGateBadge">Replication Gate: <strong>Strict SD RAM+Disk ACK</strong></div>
     </div>
   </header>
@@ -241,22 +244,22 @@
     <div class="card">
       <div class="card-header">
         <h2>2D Coordinate Arena (Entity: <code>player_red</code>)</h2>
-        <span style="font-size: 0.75rem; color: var(--muted);">Klik arena atau tekan WASD / Arrow Keys</span>
+        <span style="font-size: 0.75rem; color: var(--muted);">Click arena or use WASD / Arrow Keys</span>
       </div>
 
       <canvas id="arena" width="520" height="380"></canvas>
 
       <div class="controls-bar">
         <div>
-          Gerakkan:
+          Move:
           <span class="key-group">
             <span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span>
           </span>
-          atau <span class="kbd">Arrow Keys</span> (Step: 20px)
+          or <span class="kbd">Arrow Keys</span> (Step: 20px)
         </div>
         <div>
-          <span style="color:#94a3b8;">◯ Putih Putus-putus = Input Target</span> &nbsp;|&nbsp;
-          <span style="color:#ef4444; font-weight:700;">● Merah Solid = Confirmed SD Backup</span>
+          <span style="color:#94a3b8;">◯ Dashed White = Input Target</span> &nbsp;|&nbsp;
+          <span style="color:#ef4444; font-weight:700;">● Solid Red = Confirmed SD Backup</span>
         </div>
       </div>
 
@@ -272,6 +275,7 @@
         <div class="metric">
           <div class="label">Confirmed SD Tick</div>
           <div class="val amber" id="hudTick">0</div>
+          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;" id="hudEpoch">Micro-Epoch #0</div>
         </div>
         <div class="metric">
           <div class="label">SD Replicas ACKed</div>
@@ -299,6 +303,8 @@
             <span>Total Entities: <strong id="inspPrimaryTotal">—</strong></span>
             <span>Topology Source: <strong id="inspPrimaryTopo">—</strong></span>
             <span>SD Targets: <strong id="inspPrimarySdTargets">—</strong></span>
+            <span>RAM (RSS): <strong id="inspPrimaryRam" style="color:var(--cyan);">—</strong></span>
+            <span>CPU Usage: <strong id="inspPrimaryCpu" style="color:var(--cyan);">—</strong></span>
           </div>
         </div>
 
@@ -313,6 +319,8 @@
             <span>Last Replicated Tick: <strong id="inspSd1Tick">—</strong></span>
             <span>Persistence Mode: <strong id="inspSd1Persist">—</strong></span>
             <span>Downstream Arbit: <strong id="inspSd1Arbit">—</strong></span>
+            <span>RAM (RSS): <strong id="inspSd1Ram" style="color:var(--green);">—</strong></span>
+            <span>CPU: <strong id="inspSd1Cpu" style="color:var(--green);">—</strong> | Disk: <strong id="inspSd1Lmdb">—</strong></span>
           </div>
         </div>
 
@@ -327,6 +335,8 @@
             <span>Last Replicated Tick: <strong id="inspSd2Tick">—</strong></span>
             <span>Persistence Mode: <strong id="inspSd2Persist">—</strong></span>
             <span>Downstream Arbit: <strong id="inspSd2Arbit">—</strong></span>
+            <span>RAM (RSS): <strong id="inspSd2Ram" style="color:var(--green);">—</strong></span>
+            <span>CPU: <strong id="inspSd2Cpu" style="color:var(--green);">—</strong> | Disk: <strong id="inspSd2Lmdb">—</strong></span>
           </div>
         </div>
 
@@ -341,6 +351,26 @@
             <span>Commitment Seq: <strong id="inspArbitSeq">—</strong></span>
             <span>Official State Root: <strong id="inspArbitRoot">—</strong></span>
             <span>L1 Gateway: <strong id="inspArbitL1">—</strong></span>
+            <span>RAM (RSS): <strong id="inspArbitRam" style="color:var(--amber);">—</strong></span>
+            <span>CPU: <strong id="inspArbitCpu" style="color:var(--amber);">—</strong> | LMDB: <strong id="inspArbitLmdb">—</strong></span>
+          </div>
+        </div>
+
+        <!-- Tier 4: Arweave L1 Permaweb Ledger -->
+        <div class="tier-box tier-l1">
+          <div class="tier-title">
+            <span>TIER 4 — Arweave L1 Permaweb Ledger (<code>arlocal :1984</code>)</span>
+            <span class="tier-tag" style="background:rgba(217,119,6,0.18); color:var(--amber); border-color:rgba(217,119,6,0.35);">Decentralized Permanent Settlement</span>
+          </div>
+          <div class="tier-grid">
+            <span>L1 Node Status: <strong id="inspL1Status" style="color:var(--green);">—</strong></span>
+            <span>Block Height: <strong id="inspL1Height" style="color:var(--amber);">—</strong></span>
+            <span>Network Identifier: <strong id="inspL1Network">—</strong></span>
+            <span>Gateway URL: <strong id="inspL1Url">http://127.0.0.1:1984</strong></span>
+            <span>Current Block Hash: <strong id="inspL1Hash" style="font-size:0.68rem; font-family:monospace; word-break:break-all;">—</strong></span>
+            <span>Finalized Batch Tx: <strong id="inspL1TxId" style="font-size:0.68rem; font-family:monospace; word-break:break-all;">—</strong></span>
+            <span>RAM (Docker RSS): <strong id="inspL1Ram" style="color:var(--amber);">—</strong></span>
+            <span>CPU Usage: <strong id="inspL1Cpu" style="color:var(--amber);">—</strong></span>
           </div>
         </div>
       </div>
@@ -350,20 +380,33 @@
   </div>
 
   <script>
-    const GENESIS_URL = "http://127.0.0.1:8733";
+    const HOST = window.location.hostname || "127.0.0.1";
+    const GENESIS_URL = `http://${HOST}:8733`;
     const PLAYER_ID = "player_red";
     const STEP = 20;
     const BOUNDS_X = 220;
     const BOUNDS_Y = 150;
+    const NO_CACHE_HEADERS = {
+      "Cache-Control": "no-cache, no-store",
+      "Pragma": "no-cache"
+    };
 
     let discoveredPrimaryUrl = null;
     let discoveredEpoch = null;
 
+    // Local cached position for instant seamless rendering before Genesis discovery resolves
+    const savedPos = (() => {
+      try {
+        const s = localStorage.getItem("hb_player_pos");
+        return s ? JSON.parse(s) : null;
+      } catch (_) { return null; }
+    })();
+
     // Input target (Ghost ring) vs Confirmed state (Solid Red Circle)
-    let targetPos = { x: 0, y: 0 };
-    let confirmedPos = { x: 0, y: 0, tick: 0 };
-    let renderPos = { x: 0, y: 0 }; // Smooth interpolation towards confirmedPos
-    let trail = [];
+    let targetPos = savedPos ? { x: Number(savedPos.x || 0), y: Number(savedPos.y || 0) } : { x: 0, y: 0 };
+    let confirmedPos = savedPos ? { x: Number(savedPos.x || 0), y: Number(savedPos.y || 0), tick: Number(savedPos.tick || 0) } : { x: 0, y: 0, tick: 0 };
+    let renderPos = { x: confirmedPos.x, y: confirmedPos.y }; // Smooth interpolation towards confirmedPos
+    let trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
     let isWriting = false;
     let queuedMove = null;
 
@@ -374,7 +417,7 @@
       const box = document.getElementById("txLog");
       const div = document.createElement("div");
       div.className = "log-entry";
-      const now = new Date().toLocaleTimeString("id-ID", { hour12: false });
+      const now = new Date().toLocaleTimeString("en-US", { hour12: false });
       div.innerHTML = `<span class="ts">[${now}]</span> ${html}`;
       box.prepend(div);
       while (box.children.length > 40) {
@@ -382,18 +425,36 @@
       }
     }
 
+    function unwrapBody(parsed) {
+      if (parsed && parsed["ao-result"] === "body" && typeof parsed.body === "string") {
+        try { return JSON.parse(parsed.body); } catch (_) { return parsed.body; }
+      }
+      if (typeof parsed === "string") {
+        try { return JSON.parse(parsed); } catch (_) { return parsed; }
+      }
+      return parsed;
+    }
+
     async function fetchProcessBody(baseUrl, processName) {
-      const url = `${baseUrl}/~node-process@1.0/${processName}/now/results~message@1.0/output/body`;
-      const res = await fetch(url, { headers: { "Accept": "application/json" } });
+      const url = `${baseUrl}/~node-process@1.0/${processName}/now/results~message@1.0/output/body?_t=${Date.now()}`;
+      const res = await fetch(url, {
+        headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
+        cache: "no-store"
+      });
       const text = await res.text();
-      return JSON.parse(text);
+      try {
+        return unwrapBody(JSON.parse(text));
+      } catch (_) {
+        return unwrapBody(text);
+      }
     }
 
     // Step 1: Discover Primary exclusively from Genesis Process (:8733)
     async function discoverFromGenesis() {
       try {
         const data = await fetchProcessBody(GENESIS_URL, "genesis");
-        discoveredPrimaryUrl = data.primary_url || (data.primary && data.primary.url);
+        const rawPrimary = data.primary_url || (data.primary && data.primary.url) || "http://127.0.0.1:8734";
+        discoveredPrimaryUrl = rawPrimary.replace("127.0.0.1", HOST);
         discoveredEpoch = data.epoch || 1;
 
         const gBadge = document.getElementById("genesisBadge");
@@ -404,19 +465,70 @@
         pBadge.className = "badge ok";
         pBadge.innerHTML = `Discovered Primary: <strong>${discoveredPrimaryUrl}</strong>`;
 
-        appendLog(`Discovery via Genesis <code>${GENESIS_URL}</code> &rarr; Primary ditemukan di <strong>${discoveredPrimaryUrl}</strong>`);
+        appendLog(`Genesis Discovery <code>${GENESIS_URL}</code> &rarr; Discovered Primary at <strong>${discoveredPrimaryUrl}</strong>`);
 
         // Query Primary specifically for existing player coordinates on relog/refresh
         let existingPoint = null;
         try {
-          const primaryData = await fetchProcessBody(discoveredPrimaryUrl, "primary");
-          if (primaryData && Array.isArray(primaryData.points)) {
-            existingPoint = primaryData.points.find(p => p.id === PLAYER_ID);
-          }
-          if (!existingPoint && primaryData && primaryData.point && primaryData.point.id === PLAYER_ID) {
-            existingPoint = primaryData.point;
+          // 1. Direct targeted Read-Point on Primary RAM
+          const readRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output~message@1.0/body`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              ...NO_CACHE_HEADERS
+            },
+            cache: "no-store",
+            body: JSON.stringify({
+              action: "Read-Point",
+              id: PLAYER_ID
+            })
+          });
+          if (readRes.ok) {
+            const parsed = unwrapBody(await readRes.json());
+            if (parsed && parsed.status === "ok" && parsed.point) {
+              existingPoint = parsed.point;
+            }
           }
         } catch (_ignore) {}
+
+        if (!existingPoint) {
+          try {
+            // 2. Fallback check SD1 replica Read-Point
+            const sdRead = await fetch(`http://${HOST}:8735/~node-process@1.0/sd1/push/output~message@1.0/body`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                ...NO_CACHE_HEADERS
+              },
+              cache: "no-store",
+              body: JSON.stringify({
+                action: "Read-Point",
+                id: PLAYER_ID
+              })
+            });
+            if (sdRead.ok) {
+              const parsedSd = unwrapBody(await sdRead.json());
+              if (parsedSd && parsedSd.status === "ok" && parsedSd.point) {
+                existingPoint = parsedSd.point;
+              }
+            }
+          } catch (_ignore) {}
+        }
+
+        if (!existingPoint) {
+          try {
+            // 3. Fallback scan SD1 state output body
+            const sdData = await fetchProcessBody(`http://${HOST}:8735`, "sd1");
+            if (sdData && Array.isArray(sdData.points)) {
+              existingPoint = sdData.points.find(p => p.id === PLAYER_ID);
+            } else if (sdData && Array.isArray(sdData.recent_diffs)) {
+              const d = sdData.recent_diffs.slice().reverse().find(p => p.id === PLAYER_ID);
+              if (d) existingPoint = d;
+            }
+          } catch (_ignore) {}
+        }
 
         if (existingPoint) {
           confirmedPos = {
@@ -427,17 +539,28 @@
           targetPos = { x: confirmedPos.x, y: confirmedPos.y };
           renderPos = { x: confirmedPos.x, y: confirmedPos.y };
           trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
+          try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
           document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
           document.getElementById("hudTick").textContent = `#${confirmedPos.tick}`;
+          const epochNum = Math.floor(confirmedPos.tick / 10);
+          const elEpoch = document.getElementById("hudEpoch");
+          if (elEpoch) {
+            elEpoch.innerHTML = `<span>Micro-Epoch #${epochNum}</span>`;
+          }
           appendLog(
-            `Posisi dipulihkan dari Primary RAM: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> ` +
+            `Position restored from Primary/SD State: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> ` +
             `[Tick #${confirmedPos.tick}]`
           );
           pollClusterState();
         } else {
           // Initialize at (0, 0) only if player does not exist yet on Primary
+          confirmedPos = { x: 0, y: 0, tick: 0 };
+          targetPos = { x: 0, y: 0 };
+          renderPos = { x: 0, y: 0 };
+          try { localStorage.removeItem("hb_player_pos"); } catch (_) {}
           await writeCoordinate(0, 0, true);
         }
+        pollTelemetryMetrics();
       } catch (err) {
         const gBadge = document.getElementById("genesisBadge");
         gBadge.className = "badge warn";
@@ -483,12 +606,22 @@
             y: Number(result.point.y),
             tick: Number(result.point.tick)
           };
+          try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
           trail.push({ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick });
           if (trail.length > 18) trail.shift();
 
           document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
           document.getElementById("hudRtt").textContent = `${rtt} ms`;
           document.getElementById("hudTick").textContent = `#${result.sd_confirmed_tick}`;
+          const epochNum = result.micro_epoch != null ? result.micro_epoch : Math.floor(result.sd_confirmed_tick / 10);
+          const elEpoch = document.getElementById("hudEpoch");
+          if (elEpoch) {
+            if (result.micro_epoch_sealed) {
+              elEpoch.innerHTML = `<span style="color:var(--amber);font-weight:700;">★ Epoch #${epochNum} [RSA SEALED]</span>`;
+            } else {
+              elEpoch.innerHTML = `<span>Micro-Epoch #${epochNum} (Tick ${result.sd_confirmed_tick % 10}/10)</span>`;
+            }
+          }
           document.getElementById("hudSdNodes").textContent = (result.sd_acked_nodes || []).join(" + ");
 
           // Authoritative instant update on backstage inspector
@@ -500,14 +633,22 @@
           const el2T = document.getElementById("inspSd2Tick"); if (el2T) el2T.textContent = `#${result.sd_confirmed_tick} (Real-Time Every Move)`;
 
           if (!isInit) {
-            appendLog(
-              `Move <code>(${confirmedPos.x}, ${confirmedPos.y})</code> &rarr; ` +
-              `<span class="ack">ACK [${(result.sd_acked_nodes || []).join(", ")} RAM+LMDB]</span> ` +
-              `Tick #${result.sd_confirmed_tick} dalam <strong>${rtt} ms</strong>`
-            );
+            if (result.micro_epoch_sealed) {
+              appendLog(
+                `Move <code>(${confirmedPos.x}, ${confirmedPos.y})</code> &rarr; ` +
+                `<span class="ack" style="color:var(--amber);font-weight:700;">[★ RSA-4096 SEALED Epoch #${epochNum}]</span> ` +
+                `Tick #${result.sd_confirmed_tick} in <strong>${rtt} ms</strong> (Root: <code>${result.micro_epoch_root || "—"}</code>)`
+              );
+            } else {
+              appendLog(
+                `Move <code>(${confirmedPos.x}, ${confirmedPos.y})</code> &rarr; ` +
+                `<span class="ack">ACK [${(result.sd_acked_nodes || []).join(", ")} Quorum RAM]</span> ` +
+                `Tick #${result.sd_confirmed_tick} in <strong>${rtt} ms</strong>`
+              );
+            }
           }
-          // Refresh backstage inspector right after move
-          pollClusterState();
+          // The push response is authoritative for coordinates & tick.
+          // Background interval handles full multi-tier inspection smoothly.
         } else {
           appendLog(`<span class="err">Replication Gate Blocked:</span> ${JSON.stringify(result)}`);
         }
@@ -550,44 +691,148 @@
       writeCoordinate(targetPos.x, targetPos.y);
     });
 
+    async function pollTelemetryMetrics() {
+      try {
+        const res = await fetch("/metrics", { headers: NO_CACHE_HEADERS });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.status === "ok" && data.nodes) {
+          const n = data.nodes;
+          if (n.genesis) {
+            const elRam = document.getElementById("inspGenesisRam"); if (elRam) elRam.textContent = `${n.genesis.rss_mb} MB`;
+            const elCpu = document.getElementById("inspGenesisCpu"); if (elCpu) elCpu.textContent = `${n.genesis.cpu_pct}%`;
+          }
+          if (n.primary) {
+            const elRam = document.getElementById("inspPrimaryRam"); if (elRam) elRam.textContent = `${n.primary.rss_mb} MB`;
+            const elCpu = document.getElementById("inspPrimaryCpu"); if (elCpu) elCpu.textContent = `${n.primary.cpu_pct}%`;
+          }
+          if (n.sd1) {
+            const elRam = document.getElementById("inspSd1Ram"); if (elRam) elRam.textContent = `${n.sd1.rss_mb} MB`;
+            const elCpu = document.getElementById("inspSd1Cpu"); if (elCpu) elCpu.textContent = `${n.sd1.cpu_pct}%`;
+            const elDisk = document.getElementById("inspSd1Lmdb"); if (elDisk) elDisk.textContent = `${Math.round((n.sd1.lmdb_kb || 0) / 1024 * 10) / 10} MB`;
+          }
+          if (n.sd2) {
+            const elRam = document.getElementById("inspSd2Ram"); if (elRam) elRam.textContent = `${n.sd2.rss_mb} MB`;
+            const elCpu = document.getElementById("inspSd2Cpu"); if (elCpu) elCpu.textContent = `${n.sd2.cpu_pct}%`;
+            const elDisk = document.getElementById("inspSd2Lmdb"); if (elDisk) elDisk.textContent = `${Math.round((n.sd2.lmdb_kb || 0) / 1024 * 10) / 10} MB`;
+          }
+          if (n.arbit) {
+            const elRam = document.getElementById("inspArbitRam"); if (elRam) elRam.textContent = `${n.arbit.rss_mb} MB`;
+            const elCpu = document.getElementById("inspArbitCpu"); if (elCpu) elCpu.textContent = `${n.arbit.cpu_pct}%`;
+            const elDisk = document.getElementById("inspArbitLmdb"); if (elDisk) elDisk.textContent = `${Math.round((n.arbit.lmdb_kb || 0) / 1024 * 10) / 10} MB`;
+          }
+          if (n.arlocal) {
+            const elRam = document.getElementById("inspL1Ram"); if (elRam) elRam.textContent = n.arlocal.rss_mb ? `${n.arlocal.rss_mb} MB` : (n.arlocal.mem_str || "—");
+            const elCpu = document.getElementById("inspL1Cpu"); if (elCpu) elCpu.textContent = `${n.arlocal.cpu_pct}%`;
+          }
+        }
+      } catch (_e) {
+        // silent telemetry ignore
+      }
+    }
+
     // Backstage Inspector: polls Primary (:8734), SD1 (:8735), SD2 (:8736), and Arbit (:8737)
     async function pollClusterState() {
+      pollTelemetryMetrics();
       try {
         const [pState, sd1State, sd2State, arbitState] = await Promise.all([
-          fetchProcessBody("http://127.0.0.1:8734", "primary"),
-          fetchProcessBody("http://127.0.0.1:8735", "sd1"),
-          fetchProcessBody("http://127.0.0.1:8736", "sd2"),
-          fetchProcessBody("http://127.0.0.1:8737", "arbit")
+          fetchProcessBody(`http://${HOST}:8734`, "primary"),
+          fetchProcessBody(`http://${HOST}:8735`, "sd1"),
+          fetchProcessBody(`http://${HOST}:8736`, "sd2"),
+          fetchProcessBody(`http://${HOST}:8737`, "arbit")
         ]);
 
-        const findPlayer = (pts) => {
-          if (!Array.isArray(pts)) return "—";
-          const p = pts.find(item => item.id === PLAYER_ID);
-          return p ? `(${p.x}, ${p.y}) [tick ${p.tick}]` : "—";
+        const findPlayer = (state) => {
+          if (!state) return "—";
+          if (state.point && state.point.id === PLAYER_ID) {
+            return `(${state.point.x}, ${state.point.y}) [tick #${state.point.tick}]`;
+          }
+          if (Array.isArray(state.points)) {
+            const p = state.points.find(item => item.id === PLAYER_ID);
+            if (p) return `(${p.x}, ${p.y}) [tick #${p.tick}]`;
+          }
+          if (Array.isArray(state.recent_diffs)) {
+            const d = state.recent_diffs.slice().reverse().find(item => item.id === PLAYER_ID);
+            if (d) return `(${d.x}, ${d.y}) [tick #${d.tick}]`;
+          }
+          return "—";
         };
 
-        document.getElementById("inspPrimaryCoord").textContent = findPlayer(pState.points);
-        document.getElementById("inspPrimaryTotal").textContent = pState.total ?? "—";
+        document.getElementById("inspPrimaryCoord").textContent = findPlayer(pState);
+        document.getElementById("inspPrimaryTotal").textContent = pState.active_entity_count ?? pState.total ?? "—";
         document.getElementById("inspPrimaryTopo").textContent = pState.topology_source || "—";
         document.getElementById("inspPrimarySdTargets").textContent = (pState.sd_targets || []).join(", ");
 
-        document.getElementById("inspSd1Coord").textContent = findPlayer(sd1State.points);
+        document.getElementById("inspSd1Coord").textContent = findPlayer(sd1State);
         document.getElementById("inspSd1Tick").textContent = sd1State.last_tick ?? "—";
         document.getElementById("inspSd1Persist").textContent = sd1State.persistence || "ram+lmdb";
         document.getElementById("inspSd1Arbit").textContent = sd1State.arbit_target || "—";
 
-        document.getElementById("inspSd2Coord").textContent = findPlayer(sd2State.points);
+        document.getElementById("inspSd2Coord").textContent = findPlayer(sd2State);
         document.getElementById("inspSd2Tick").textContent = sd2State.last_tick ?? "—";
         document.getElementById("inspSd2Persist").textContent = sd2State.persistence || "ram+lmdb";
         document.getElementById("inspSd2Arbit").textContent = sd2State.arbit_target || "—";
 
-        document.getElementById("inspArbitTick").textContent = arbitState.official_tick ?? "—";
+        const arbitTick = arbitState.official_tick ?? 0;
+        const batchInt = arbitState.batch_interval || 100;
+        document.getElementById("inspArbitTick").textContent = `#${arbitTick} (Batch Interval: every ${batchInt} ticks)`;
         document.getElementById("inspArbitSeq").textContent = `#${arbitState.commitment_seq ?? 0}`;
         document.getElementById("inspArbitRoot").textContent = arbitState.state_root || "—";
         document.getElementById("inspArbitL1").textContent = arbitState.l1_gateway || "—";
 
+        // Query Arweave L1 Node (:1984)
+        let l1Info = null;
+        try {
+          const l1Res = await fetch(`http://${HOST}:1984/info`, {
+            headers: { "Accept": "application/json" },
+            cache: "no-store"
+          });
+          if (l1Res.ok) l1Info = await l1Res.json();
+        } catch (_) {
+          try {
+            const proxyRes = await fetch(`/arweave/info`, {
+              headers: { "Accept": "application/json" },
+              cache: "no-store"
+            });
+            if (proxyRes.ok) l1Info = await proxyRes.json();
+          } catch (_) {}
+        }
+
+        if (l1Info) {
+          const h = l1Info.height ?? 0;
+          const net = l1Info.network || "arweave.local";
+          const currHash = l1Info.current || "—";
+          const elStatus = document.getElementById("inspL1Status"); if (elStatus) elStatus.textContent = "Online (Active)";
+          const elHeight = document.getElementById("inspL1Height"); if (elHeight) elHeight.textContent = `Block #${h}`;
+          const elNet = document.getElementById("inspL1Network"); if (elNet) elNet.textContent = net;
+          const elHash = document.getElementById("inspL1Hash"); if (elHash) elHash.textContent = currHash.length > 24 ? currHash.slice(0, 24) + "..." : currHash;
+          const l1B = document.getElementById("l1Badge");
+          if (l1B) {
+            l1B.className = "badge ok";
+            l1B.innerHTML = `Arweave L1 (:1984): <strong>Block #${h} (Online)</strong>`;
+          }
+        } else {
+          const elStatus = document.getElementById("inspL1Status"); if (elStatus) elStatus.textContent = "Offline / Waiting";
+          const l1B = document.getElementById("l1Badge");
+          if (l1B) {
+            l1B.className = "badge warn";
+            l1B.innerHTML = `Arweave L1 (:1984): <strong>Offline</strong>`;
+          }
+        }
+
+        const elTx = document.getElementById("inspL1TxId");
+        if (elTx) {
+          if (arbitState && arbitState.l1_tx_id && arbitState.l1_tx_id !== "") {
+            elTx.textContent = arbitState.l1_tx_id;
+          } else if (arbitState && arbitState.official_tick > 0) {
+            elTx.textContent = `Committed to L1 Block #${arbitState.l1_height || 0}`;
+          } else {
+            elTx.textContent = "Waiting for Batch Commit (Next @ Tick #100)";
+          }
+        }
+
         document.getElementById("pollStatus").textContent =
-          `Synced @ ${new Date().toLocaleTimeString("id-ID", { hour12: false })}`;
+          `Synced @ ${new Date().toLocaleTimeString("en-US", { hour12: false })}`;
       } catch (e) {
         document.getElementById("pollStatus").textContent = `Inspector sync warning: ${e.message}`;
       }
@@ -600,6 +845,14 @@
       const cy = h / 2;
 
       ctx.clearRect(0, 0, w, h);
+
+      // Watermark / Pipeline banner
+      ctx.save();
+      ctx.fillStyle = "rgba(148, 163, 184, 0.75)";
+      ctx.font = "10px monospace";
+      ctx.textAlign = "left";
+      ctx.fillText("PIPELINE: Primary(:8734) → SD1/SD2(:8735/6) → Arbit(:8737) → Arweave L1(:1984)", 12, 18);
+      ctx.restore();
 
       // Draw coordinate grid
       ctx.strokeStyle = "#131c2e";

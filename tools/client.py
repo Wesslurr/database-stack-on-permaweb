@@ -14,6 +14,8 @@ This client adheres strictly to the architectural boundary:
 
 import sys
 import json
+import http.client
+import urllib.parse
 import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional
@@ -26,6 +28,12 @@ class StateEngineClient:
         self.genesis_url = genesis_url.rstrip("/")
         self.primary_url: Optional[str] = None
         self.epoch: Optional[int] = None
+        self._connections: Dict[str, http.client.HTTPConnection] = {}
+
+    def _get_connection(self, netloc: str) -> http.client.HTTPConnection:
+        if netloc not in self._connections:
+            self._connections[netloc] = http.client.HTTPConnection(netloc, timeout=5)
+        return self._connections[netloc]
 
     def _unwrap_ao_body(self, data: Any) -> Dict[str, Any]:
         if isinstance(data, dict) and data.get("ao-result") == "body" and isinstance(data.get("body"), str):
@@ -37,29 +45,50 @@ class StateEngineClient:
     NO_CACHE_HEADERS = {
         "Cache-Control": "no-cache, no-store",
         "Pragma": "no-cache",
+        "Connection": "keep-alive",
     }
 
     def _http_get_json(self, url: str) -> Dict[str, Any]:
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path + (("?" + parsed.query) if parsed.query else "")
         headers = {"Accept": "application/json"}
         headers.update(self.NO_CACHE_HEADERS)
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        conn = self._get_connection(parsed.netloc)
+        try:
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read().decode("utf-8")
+            return json.loads(data)
+        except Exception:
+            conn.close()
+            conn = http.client.HTTPConnection(parsed.netloc, timeout=5)
+            self._connections[parsed.netloc] = conn
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
             data = resp.read().decode("utf-8")
             return json.loads(data)
 
     def _http_post_json(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         data_bytes = json.dumps(payload).encode("utf-8")
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path + (("?" + parsed.query) if parsed.query else "")
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
         headers.update(self.NO_CACHE_HEADERS)
-        req = urllib.request.Request(
-            url,
-            data=data_bytes,
-            headers=headers
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        conn = self._get_connection(parsed.netloc)
+        try:
+            conn.request("POST", path, body=data_bytes, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read().decode("utf-8")
+            return json.loads(data)
+        except Exception:
+            conn.close()
+            conn = http.client.HTTPConnection(parsed.netloc, timeout=5)
+            self._connections[parsed.netloc] = conn
+            conn.request("POST", path, body=data_bytes, headers=headers)
+            resp = conn.getresponse()
             data = resp.read().decode("utf-8")
             return json.loads(data)
 
@@ -122,6 +151,9 @@ class StateEngineClient:
             "active_entity_count": now_body.get("active_entity_count", 0),
             "audit_ring_size": now_body.get("audit_ring_size", 0),
             "max_entities": now_body.get("max_entities", 0),
+            "micro_epoch": now_body.get("micro_epoch"),
+            "micro_epoch_sealed": now_body.get("micro_epoch_sealed", False),
+            "micro_epoch_root": now_body.get("micro_epoch_root", ""),
         }
 
     def read_point(self, point_id: str) -> Dict[str, Any]:

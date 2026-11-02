@@ -216,9 +216,13 @@ function compute(process, message, opts)
             arbit_payload = nil
         end
 
+        local is_me_sealed = (msg.micro_epoch_sealed == true or msg.micro_epoch_sealed == "true" or (tick % 10 == 0))
+        local me_num = tonumber(msg.micro_epoch_num) or math.floor(tick / 10)
+        local me_root = msg.micro_epoch_root or ""
+
         res = string.format(
-            [[{"status":"replicated","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","relayed_by_signer":"%s","assignment_id":"%s","topology_source":"%s","arbit_target":"%s","arbit_batch_interval":%d,"last_batch_sent_tick":%d,"point_id":"%s","last_tick":%d,"count":%d,"state_root":"%s","last_committed_tick":%d,"last_l1_tx_id":"%s","last_pruned_tick":%d,"pruned_diff_count":%d,"recent_diff_count":%d,"max_diff_slots":%d,"recent_diffs":%s,"points":%s}]],
-            sd_signer, LastRelayedBySigner, assignment_id, genesis_src, arbit_target, batch_interval, LastBatchSentTick, json_safe(id), LastTick, count, json_safe(state_root), LastCommittedTick, json_safe(LastL1TxId), LastPrunedTick, PrunedDiffCount, #RecentDiffs, MaxDiffSlots, encode_diff_tail(5), format_replica_points()
+            [[{"status":"replicated","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","relayed_by_signer":"%s","assignment_id":"%s","topology_source":"%s","arbit_target":"%s","arbit_batch_interval":%d,"last_batch_sent_tick":%d,"point_id":"%s","last_tick":%d,"count":%d,"state_root":"%s","last_committed_tick":%d,"last_l1_tx_id":"%s","last_pruned_tick":%d,"pruned_diff_count":%d,"recent_diff_count":%d,"max_diff_slots":%d,"micro_epoch":%d,"micro_epoch_sealed":%s,"micro_epoch_root":"%s","recent_diffs":%s}]],
+            sd_signer, LastRelayedBySigner, assignment_id, genesis_src, arbit_target, batch_interval, LastBatchSentTick, json_safe(id), LastTick, count, json_safe(state_root), LastCommittedTick, json_safe(LastL1TxId), LastPrunedTick, PrunedDiffCount, #RecentDiffs, MaxDiffSlots, me_num, is_me_sealed and "true" or "false", json_safe(me_root), encode_diff_tail(5)
         )
     elseif action == "Prune-Committed-Slots" then
         local committed_tick = tonumber(msg.committed_tick or (msg.query and msg.query.committed_tick) or 0)
@@ -238,6 +242,20 @@ function compute(process, message, opts)
             [[{"status":"pruned","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","assignment_id":"%s","topology_source":"%s","committed_tick":%d,"last_committed_tick":%d,"last_l1_tx_id":"%s","last_pruned_tick":%d,"pruned_now":%d,"pruned_diff_count":%d,"recent_diff_count":%d,"max_diff_slots":%d,"count":%d,"last_tick":%d}]],
             sd_signer, assignment_id, genesis_src, committed_tick, LastCommittedTick, json_safe(LastL1TxId), LastPrunedTick, removed, PrunedDiffCount, #RecentDiffs, MaxDiffSlots, count, LastTick
         )
+    elseif action == "Read-Point" then
+        local id = msg.id or (msg.query and msg.query.id)
+        local p = id and ReplicaStore[tostring(id)]
+        if p then
+            res = string.format(
+                [[{"status":"ok","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","point":{"id":"%s","x":%s,"y":%s,"tick":%d}}]],
+                sd_signer, json_safe(p.id), tostring(p.x), tostring(p.y), p.tick
+            )
+        else
+            res = string.format(
+                [[{"status":"not_found","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","id":"%s"}]],
+                sd_signer, json_safe(id)
+            )
+        end
     else
         local count = 0
         for _ in pairs(ReplicaStore) do count = count + 1 end
@@ -256,7 +274,9 @@ function compute(process, message, opts)
             last_l1_tx_id = LastL1TxId,
             last_pruned_tick = tostring(LastPrunedTick),
             recent_diff_count = tostring(#RecentDiffs),
-            max_diff_slots = tostring(MaxDiffSlots)
+            max_diff_slots = tostring(MaxDiffSlots),
+            micro_epoch = tostring(math.floor(LastTick / 10)),
+            micro_epoch_sealed = (LastTick % 10 == 0) and "true" or "false"
         }
     }
     return process

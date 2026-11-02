@@ -122,7 +122,8 @@ def main():
         # - SD1 / SD2 / Arbit / Genesis: Pure LMDB Disk (`hb_store_lmdb` ONLY — 80% disk, minimal RAM)
         node_store = volatile_store if is_primary else lmdb_store
         stores = [node_store]
-        snapshot_slots = False if is_primary else 20
+        # Micro-Epoch alignment: snapshot every 10 ticks across worker processes
+        snapshot_slots = 10
         # Primary is a bounded RAM tier: reject oversized requests at the HTTP
         # layer. Other tiers keep a more permissive ceiling for checkpoints.
         http_max_body = 65536 if is_primary else 1048576
@@ -145,6 +146,9 @@ def main():
             "process_workers": True,
             "scheduling-mode": "local_confirmation",
             "scheduling_mode": "local_confirmation",
+            # Primary uses Micro-Epoch signing (moves are ultra-fast In-Memory Quorum, sealed every 10 ticks via RSA)
+            "force-signed": not is_primary,
+            "force_signed": not is_primary,
             "process-snapshot-slots": snapshot_slots,
             "process_snapshot_slots": snapshot_slots,
             "process-snapshot-time": False,

@@ -1,158 +1,150 @@
-# Proposal & Kompas Arsitektur Teknis End-to-End
+﻿# Architectural Blueprint & Technical Specification
 ## High-Frequency Real-Time State Engine & Distributed Replication Stack on AO / Permaweb
 
 ---
 
-## 1. Executive Summary & Tujuan PoC
+## 1. Executive Summary & PoC Objectives
 
-Dokumen ini adalah **kompas utama pembangunan Proof-of-Concept (PoC)** untuk mesin state real-time berfrekuensi tinggi (**target 60 tick/detik**) yang berjalan **100% di atas ekosistem asli AO Compute, HyperBEAM, dan Arweave (Permaweb)** di lingkungan lokal.
+This document serves as the **core architectural blueprint** for a high-frequency real-time state engine (targeting **60 ticks/second**) operating **100% natively on top of the AO Compute, HyperBEAM, and Arweave (Permaweb)** ecosystem in a local cluster environment.
 
-Fokus utama tahap ini adalah **membangun dan membuktikan Engine Stack secara maksimal dan konkret terlebih dahulu** (bukan membuat abstraksi *library* generik di awal). Setelah engine terbukti kencang, tahan banting, dan akurat pada beban penggunaan nyata, barulah di tahap berikutnya stack ini diekstrak menjadi *library/SDK* yang mudah dikustomisasi.
+The primary objective is to **build, prove, and battle-test the concrete Engine Stack** under real-world gameplay workloads prior to extracting generic library or SDK abstractions.
 
-Inti arsitektur ini bekerja sebagai **Peredam Frekuensi Bertingkat (*3-Tier Frequency Damper*)**:
-- **60 Hz (`tiap 16.6 ms`)** diserap habis di memori RAM oleh **Primary Process** via komunikasi langsung (*Direct Node-to-Node*).
-- **2 Hz (`tiap 500 ms`)** direplikasi secara asinkron ke **Shared Data (SD) Process** sebagai *hot backup* anti-kehilangan state.
-- **0.1–0.2 Hz (`tiap 5–10 detik` / event penting)** dikonsensuskan lewat kotak pesan resmi AO (*Inbox/Outbox SU*) ke **Arbit Process** dan diabadikan ke **Arweave L1**.
+The architecture operates as a **Multi-Tier Frequency Damper**:
+- **60 Hz (every ~16.6 ms):** Input streams are absorbed entirely in volatile RAM by the **Primary Process** via direct node-to-node dispatch (`dev_push`).
+- **Synchronous Write-Through Gate:** Client feedback is only confirmed once both **Shared Data Replicas (SD1 & SD2)** acknowledge state mutation in RAM and snapshot persistence to LMDB disk (`raw_tick >= pt.tick`).
+- **Micro-Epoch RSA Sealing (every 10 ticks):** Eliminates per-move cryptographic bottleneck by grouping moves into micro-epochs sealed with RSA-4096 state roots every 10 ticks.
+- **Downstream Asynchronous Batching (every 100 ticks):** SD1 asynchronously dispatches summarized diff checkpoints to the **Arbit Process** via `~relay@1.0/cast`, decoupling high-frequency moves from consensus latency.
+- **Permanent L1 Settlement:** Arbit anchors official state roots and triggers decentralized block finality on **Arweave L1 (`arlocal :1984`)**.
 
 ---
 
-## 2. Dua Paradigma Komunikasi: Kapan Pakai *Inbox/Outbox (SU)* vs *Direct Node-to-Node*
+## 2. Two Communication Paradigms: Direct Node-to-Node vs Scheduled AO Message Box
 
-Kunci utama agar tidak salah desain adalah memahami sifat fisik, kelebihan, dan kelemahan dari dua jalur komunikasi yang berbeda di ekosistem HyperBEAM/AO:
+A foundational architectural requirement is understanding the distinct properties, trade-offs, and appropriate roles of the two communication pathways available in HyperBEAM and AO:
 
-| Dimensi | 1. AO Message Box (`Inbox / Outbox` via SU & Arweave) | 2. Direct Node-to-Node (HTTP Native HyperBEAM Langsung) |
+| Dimension | 1. Scheduled AO Message Box (`Inbox / Outbox` via SU & Arweave) | 2. Direct Node-to-Node (Native HyperBEAM HTTP Dispatch) |
 | :--- | :--- | :--- |
-| **Cara Kerja** | Pesan dibungkus & ditandatangani (`ans104@1.0`), dikirim ke Scheduler (`scheduler@1.0` / `~process@1.0/push`), diberi nomor slot mutlak, dan dicatat di Arweave. | Request dikirim langsung dari Klien ke Node atau antar-Node HyperBEAM lewat koneksi HTTP persistent (`httpsig@1.0` / `relay@1.0`) langsung ke proses di RAM. |
-| **Kelebihan Utama (+)** | **Anti-Double-Spend & Tahan Mati:** Urutan transaksi mutlak (deterministik global). **Walaupun node proses tujuan sedang mati, pesan tetap masuk antrean SU/Arweave** dan pasti dieksekusi saat node hidup kembali. | **Kecepatan Setara Server Web2:** Latensi sub-milidetik hingga satuan milidetik, nol antrean SU global, dan nol biaya transaksi per tick. Sanggup melayani **60 tick/detik** tanpa lag. |
-| **Kelemahan (-)** | **Lambat:** Mengikuti ritme indexing SU dan penyimpanan Arweave (puluhan–ratusan milidetik). Mustahil dipakai untuk loop 60 tick/detik. | **Rentan Mati seperti Web2:** Bersifat *live-endpoint*; **jika node fisik tujuan mati, komunikasi langsung terputus saat itu juga** dan state transien di RAM yang belum di-snapshot bisa hilang. |
-| **Kapan WAJIB Dipakai?** | • Bootstrap & update konfigurasi di **Genesis Process**.<br>• Pengiriman checkpoint resmi & mutasi bernilai tinggi (anti-double-spend) dari SD ke **Arbit Process**.<br>• Koordinasi promosi failover / pergantian `Epoch`. | • Stream input real-time (60 Hz) & pembacaan state cepat antara **Klien $\leftrightarrow$ Primary Process**.<br>• Pengiriman snapshot tiap 0.5 detik & balasan ACK cepat antara **Primary Process $\leftrightarrow$ Shared Data Process**. |
+| **Mechanism** | Messages are wrapped and signed (`ans104@1.0`), dispatched to the Scheduler (`scheduler@1.0` / `~process@1.0/push`), assigned absolute slot numbers, and recorded to Arweave. | Requests are dispatched directly from client or peer HyperBEAM nodes over persistent HTTP (`relay@1.0` / `dev_push`) straight to process memory. |
+| **Key Advantage (+)** | **Anti-Double-Spend & Crash-Resilient:** Global deterministic transaction ordering. Even if the recipient node is temporarily down, messages persist in the scheduler queue and execute upon restart. | **Sub-50ms Web2-Grade Latency:** Sub-millisecond to low-millisecond compute loops, zero global scheduler queue delay, and zero per-tick transaction overhead. Capable of sustaining high-frequency game ticks. |
+| **Trade-Off (-)** | **Higher Latency:** Constrained by scheduler indexing and per-message cryptographic signing (~50–200ms per hop). Unsuitable for per-frame 60 Hz feedback loops. | **Transient Endpoint:** Pure memory state can be vulnerable if a physical node crashes prior to replication or disk commit. |
+| **Enforced Usage** | • Constitutional bootstrap & topology updates in **Genesis Process** (`:8733`).<br>• Checkpoint commitments & anti-double-spend adjudication in **Arbit Process** (`:8737`).<br>• Failover coordination and epoch promotion. | • Real-time input stream & low-latency coordinate writes between **Client $\leftrightarrow$ Primary Process** (`:8734`).<br>• Parallel replication & Quorum ACKs between **Primary $\leftrightarrow$ SD1 (`:8735`) / SD2 (`:8736`)**. |
 
-> **Rumus Sinergi Keduanya:** Kelemahan *Direct Node-to-Node* ("bisa mati kalau node mati") ditutup oleh **koordinasi bootstrap dari Genesis Process** (yang hidup di atas *Message Box SU* yang kebal mati) ditambah **replikasi 0.5 detik ke Shared Data Process** di node fisik berbeda!
+> **Architectural Synergy:** The transient nature of Direct Node-to-Node execution is fully mitigated by **dynamic topology resolution from Genesis** combined with **synchronous replication across two independent physical SD nodes with dual RAM + LMDB disk persistence**.
 
 ---
 
-## 3. Topologi Independen: Satu Proses = Satu Node HyperBEAM Mandiri
+## 3. Independent Topology: One Process = One Dedicated HyperBEAM Node
 
-Seluruh komponen berjalan **100% di mesin lokal** menggunakan ekosistem Permaweb asli без simulasi palsu:
-- **Docker** digunakan khusus untuk menyalakan **ArLocal (`:1984`)** sebagai node gateway Arweave L1 lokal.
-- **Tmux** digunakan untuk menyalakan dan memisahkan setiap **Node Pekerja HyperBEAM** sehingga tiap proses benar-benar hidup di node independen (jika 1 node dimatikan paksa, proses lain tidak ikut mati).
+All components run locally on authentic Permaweb infrastructure with zero mocked behaviors:
+- **Docker** hosts **ArLocal (`:1984`)** acting as the local Arweave L1 Permaweb gateway.
+- **Tmux** hosts 5 independent **HyperBEAM Worker Nodes**, ensuring process isolation (failure of one node never halts sibling nodes).
 
-| Node Fisik (Tmux / Docker) | Port Lokal | Proses yang Dijalankan | Mode Eksekusi HyperBEAM |
+| Physical Node (Tmux / Docker) | Local Port | Executed Process | HyperBEAM Storage & Driver Configuration |
 | :--- | :--- | :--- | :--- |
-| **`arlocal`** *(Docker)* | `:1984` | **Arweave L1 Node** | Penyimpanan permanen biner modul WASM/Lua & bundel transaksi ANS-104. |
-| **`hb-genesis`** *(Tmux)* | `:8733` | **1. Genesis Process** | **Scheduled AO Process** (`process@1.0` + `scheduler@1.0` + `lua@5.3a` + `patch@1.0`). |
-| **`hb-primary`** *(Tmux)* | `:8734` | **2. Primary Process** | **Direct Persistent Process** (`lua@5.3a` Gate + `wasm-64@1.0` Rust 60Hz Engine + `patch@1.0`). |
-| **`hb-sd-1`** *(Tmux)* | `:8735` | **3A. Shared Data Process 1** | **Direct Replica Process** (`lua@5.3a` + `hb_store_rocksdb` + `cron@1.0` + `ans104@1.0`). |
-| **`hb-sd-2`** *(Tmux)* | `:8736` | **3B. Shared Data Process 2** | **Direct Replica Process** (Replika independen ke-2 untuk kuorum & ketersediaan tinggi). |
-| **`hb-arbit`** *(Tmux)* | `:8737` | **4. Arbit Process** | **Scheduled AO Process** (`process@1.0` + `scheduler@1.0` + `lua@5.3a` + `patch@1.0` + `ans104@1.0`). |
-
-*(Catatan penting isolasi: **Arbit Process** berjalan di node `hb-arbit` miliknya sendiri, terpisah dari `hb-primary`. Jika `hb-primary` meledak/mati, `hb-sd` tetap bisa mengirim checkpoint terakhir ke `hb-arbit` tanpa gangguan!)*
+| **`arlocal`** *(Docker)* | `:1984` | **Arweave L1 Ledger** | Permanent storage for Lua/WASM bytecode and ANS-104 transaction bundles. |
+| **`hb-genesis`** *(Tmux)* | `:8733` | **1. Genesis Process** | **Constitutional Authority** (`process@1.0` + `scheduler@1.0` + `lua@5.3a` + `patch@1.0`). Single source of truth for cluster topology. |
+| **`hb-primary`** *(Tmux)* | `:8734` | **2. Primary Process** | **High-Frequency State Engine** (`hb_store_volatile` pure RAM, `process_workers: true`, micro-epoch RSA signing). |
+| **`hb-sd-1`** *(Tmux)* | `:8735` | **3A. Shared Data Replica 1** | **Hot Backup Replica** (`hb_store_lmdb`, RAM latest + LMDB disk snapshot slot 1, diff buffer, batch dispatcher). |
+| **`hb-sd-2`** *(Tmux)* | `:8736` | **3B. Shared Data Replica 2** | **Quorum Witness Replica** (`hb_store_lmdb`, independent dual replica for high availability and split-brain defense). |
+| **`hb-arbit`** *(Tmux)* | `:8737` | **4. Arbit Process** | **Consensus Gatekeeper** (`process@1.0` + `scheduler@1.0` + `hb_store_lmdb` + `relay@1.0`). Validates batch checkpoints and triggers L1 settlement. |
 
 ---
 
-## 4. Alur End-to-End (E2E Flow) & Pemilihan Tugas Tiap Komponen
+## 4. End-to-End Execution Flow & Component Responsibilities
 
-```
-                  ┌──────────────────────────────────────────────┐
-                  │              1. GENESIS PROCESS              │
-                  │       (Node: hb-genesis | Via Inbox/SU)      │
-                  │ • Simpan ModuleTxID, Epoch, & Otorisasi Node │
-                  │ • Bootstrap konfigurasi Direct Node-to-Node  │
-                  │ • Direktori Active Endpoint untuk Klien/Node │
-                  └──────┬────────────────┬───────────────┬──────┘
-       (1. Discovery &   │                │ (Bootstrap    │ (Otorisasi Epoch
-        Endpoint Lookup) │                │  Peer Direct) │  & Signer Resmi)
-                         ▼                ▼               ▼
-[ Klien / Players ] ══► ┌──────────────────────────┐      │
-  (Direct HTTP          │    2. PRIMARY PROCESS    │      │
-   Keep-Alive, 60 Hz)   │    (Node: hb-primary)    │      │
-                        │ • Lua: Session/Auth Gate │      │
-                        │ • Rust WASM (60 Tick/s): │      │
-                        │   - Fixed-Slot State RAM │      │
-                        │   - Ring Buffer 1-2 dtk  │      │
-                        └────────────┬─────────────┘      │
-                                     │                    │
-              (Direct Node-to-Node:  │  ▲ (Signed HTTP    │
-               Async Snapshot 0.5s   │  │  ACK Feedback)  │
-               / Critical Flush)     ▼  │                 │
-                        ┌──────────────────────────┐      │
-                        │  3. SHARED DATA PROCESS  │      │
-                        │ (Node: hb-sd-1, hb-sd-2) │      │
-                        │ • Validasi Epoch & Root  │      │
-                        │ • Rolling Store RocksDB  │      │
-                        │ • Bungkus Batch ANS-104  │      │
-                        └────────────┬─────────────┘      │
-                                     │                    │
-              (Inbox / Outbox via SU:│                    │
-               ANS-104 Checkpoint    │                    │
-               tiap 5-10 detik)      ▼                    │
-                        ┌──────────────────────────┐ ◄────┘
-                        │     4. ARBIT PROCESS     │
-                        │     (Node: hb-arbit)     │
-                        │ • Anti-Double-Spend Gate │
-                        │ • Verifikasi Bukti SD    │
-                        │ • Kunci Official State   │
-                        └────────────┬─────────────┘
-                                     │
-              (Scheduled Assignment  │
-               & L1 DataItem Commit) ▼
-                        ┌──────────────────────────┐
-                        │   5. ARWEAVE L1 (ArLocal)│
-                        │   (Docker :1984 Storage) │
-                        └──────────────────────────┘
+```text
+                  +----------------------------------------------+
+                  |              1. GENESIS PROCESS              |
+                  |       (Node: hb-genesis | Port :8733)        |
+                  | * Stores Epoch, Cluster Topology & Wallets   |
+                  | * Zero hardcoded URLs in any worker node     |
+                  +----------------------------------------------+
+                                         |
+                                         | Dynamic 1-Hop Discovery
+                                         v
++-----------------------+     Move (X, Y)      +--------------------------------+
+|      GAME CLIENT      | -------------------> |       2. PRIMARY PROCESS       |
+| (Red Circle WASD UI)  | <------------------- |  (hb-primary :8734 | Pure RAM) |
+| * Discover via Genesis|      Confirmed ACK   +--------------------------------+
+| * Zero client guess   |      (within RTT)           |                 |
++-----------------------+                             | Write-Through   | Write-Through
+                                                      | Parallel Gate   | Parallel Gate
+                                                      v                 v
+                               +-----------------------------+   +-----------------------------+
+                               |     3A. SHARED DATA 1       |   |     3B. SHARED DATA 2       |
+                               | (hb-sd-1 :8735 | RAM+LMDB)  |   | (hb-sd-2 :8736 | RAM+LMDB)  |
+                               | * Confirms slot & persistence|   | * Confirms slot & persistence|
+                               | * Quorum ACK -> Primary     |   | * Quorum ACK -> Primary     |
+                               +-----------------------------+   +-----------------------------+
+                                              |
+                                              | Async Batch Checkpoint (Every 100 Ticks)
+                                              | via ~relay@1.0/cast (No client block)
+                                              v
+                               +-----------------------------------------------+
+                               |               4. ARBIT PROCESS                |
+                               |         (hb-arbit :8737 | LMDB Consensus)     |
+                               | * Validates batch sequence & state root       |
+                               | * Triggers L1 Block Settlement on ArLocal     |
+                               | * Prunes upstream diff buffers via Cascade    |
+                               +-----------------------------------------------+
+                                                      |
+                                                      | Block Finality (GET /mine)
+                                                      v
+                               +-----------------------------------------------+
+                               |            5. ARWEAVE L1 PERMAWEB             |
+                               |             (arlocal :1984 | Docker)          |
+                               | * Permanent decentralized ledger settlement   |
+                               +-----------------------------------------------+
 ```
 
-### Rincian Tugas Spesifik & Batas Tanggung Jawab Tiap Komponen
+### Detailed Component Specifications
 
-#### 1. Genesis Process (`hb-genesis` — *Bootstrap & Control Plane*)
-* **Jalur Komunikasi:** **Inbox/Outbox (SU)** untuk seluruh perubahan konfigurasi/registrasi; ekspos baca cepat via `/now` (`patch@1.0`).
-* **Tugas Utama:**
-  1. Menyimpan konstitusi awal stack: `WasmModuleTxID` (yang sudah di-upload ke ArLocal), `ArbitProcessId`, nomor `Epoch` aktif, dan daftar alamat kriptografis (wallet JWK) operator node yang sah (`Primary` & `SD`).
-  2. Menjadi **pusat bootstrap komunikasi Direct Node-to-Node**: saat `hb-primary` dan `hb-sd` menyala, mereka membaca konfigurasi rekan (*peer endpoints*) dari Genesis dan mendaftarkan URL aktif + heartbeat mereka ke Genesis.
-  3. Melayani **Node Discovery** bagi Klien: klien cukup bertanya ke `GenesisProcessId` untuk mendapatkan URL `hb-primary` yang sedang aktif pada `Epoch` terbaru.
-  4. Mengatur **Failover Epoch**: bila `hb-primary` mati, Genesis menaikkan `Epoch + 1` dan mengarahkan topology ke node pengganti yang telah memulihkan snapshot terakhir dari SD.
+#### 1. Genesis Process (`hb-genesis :8733`)
+- **Communication Pathway:** Native AO Process (`process@1.0` + `scheduler@1.0`).
+- **Core Responsibilities:**
+  1. Acts as the constitutional bootstrap authority for the cluster.
+  2. Holds active `Epoch`, verified public keys / addresses of worker nodes, and dynamically advertises peer endpoints (`primary_url`, `sd1_url`, `sd2_url`, `arbit_url`, `l1_url`).
+  3. Strict zero-hardcoding guarantee: If cluster topology changes, worker nodes re-sync dynamically from Genesis without code redeployment.
 
-#### 2. Primary Process (`hb-primary` — *The 60Hz Real-Time Engine*)
-* **Jalur Komunikasi:** **Direct Node-to-Node HTTP Keep-Alive** (`httpsig@1.0` / `relay@1.0`).
-* **Tugas Utama (Pembagian Ketat Lua vs Rust WASM agar Tidak *Double-Parsing*):**
-  1. **Lua Gate (`lua@5.3a`):** Menangani kontrol berfrekuensi rendah—validasi otorisasi sesi pemain, sinkronisasi konfigurasi `Epoch` dari Genesis, mengatur timer snapshot 0.5 detik, dan menangani pemulihan state awal saat boot.
-  2. **Rust WASM Core (`wasm-64@1.0`):** Menjalankan loop state **60 tick/detik** murni di linear memory RAM:
-     - **Dense Fixed-Slot Array ($O(1)$):** Menyimpan state terkini seluruh entitas aktif tanpa alokasi heap liar.
-     - **Ring Buffer (60–120 slot = 1–2 detik histori):** Menyimpan delta pergerakan/input terbaru untuk interpolasi klien & kompensasi lag; otomatis menimpa slot lama (*zero memory leak, konstan $O(1)$*).
-     - **Snapshot Exporter:** Mengekspor ringkasan state kompak + `state_root` untuk dikirim ke SD.
-  3. **Dua Mode Pengiriman ke SD Process:**
-     - *Transient Tick State* (mis. koordinat gerak): dikirim **asinkron setiap 0.5 detik (30 tick)** via `relay@1.0` tanpa memblokir loop 60 Hz.
-     - *Critical Event* (mis. transaksi item/skor akhir): memicu **immediate sync flush** ke SD Process saat itu juga sebelum memberi konfirmasi selesai ke klien.
+#### 2. Primary Process (`hb-primary :8734`)
+- **Communication Pathway:** Direct Persistent HTTP (`dev_push` / `~node-process@1.0/primary/push`).
+- **Storage Profile:** 100% Volatile RAM (`hb_store_volatile`). No disk I/O on critical write path.
+- **Core Responsibilities:**
+  1. Absorbs real-time player input coordinates with minimum latency.
+  2. Maintains dense entity state map (`Points`) and bounded audit ring in memory.
+  3. **Micro-Epoch RSA Sealing:** Organizes sequential ticks into 10-tick micro-epochs. Moves within an epoch confirm via ultra-fast in-memory quorum; tick multiples of 10 seal an authoritative cryptographic root.
+  4. **Strict Write-Through Gate:** Dispatches parallel state writes to SD1 and SD2 via `ao.resolve`, awaiting dual RAM+Disk ACKs before confirming moves to client.
+  5. **Authoritative Relog Recovery:** Handles `Read-Point` queries to return verified player coordinates upon page reload or reconnection.
 
-#### 3. Shared Data (SD) Process (`hb-sd-1`, `hb-sd-2` — *Hot Replica & ANS-104 Bundler*)
-* **Jalur Komunikasi:** **Hibrida** — menerima snapshot dari Primary lewat **Direct Node-to-Node**, dan mengirim batch penyelesaian ke Arbit Process lewat **Inbox/Outbox (SU + ANS-104)**.
-* **Tugas Utama:**
-  1. **Validasi & Penyimpanan Cepat:** Memverifikasi tanda tangan `hb-primary`, memastikan `Epoch` cocok dengan Genesis (menolak *zombie primary* dari epoch lama), memastikan `tick` berurutan, lalu menyimpan *rolling snapshot* terbaru ke **`hb_store_rocksdb`** bawaan HyperBEAM.
-  2. **Signed ACK ke Primary:** Mengirim balik ACK bertanda tangan ke Primary Process sebagai bukti state sampai tick $T$ sudah aman di node fisik terpisah.
-  3. **Sumber Pemulihan Instan (*Failover Source*):** Menyediakan snapshot terakhir ($\le 0.5$ detik) jika Primary mati dan node baru mengambil alih di `Epoch + 1`.
-  4. **Pembungkus & Pengirim Checkpoint ANS-104 ke Arbit:** Setiap interval penyelesaian (mis. **5–10 detik** atau akhir sesi), node SD merangkum *Summary Checkpoint + Bukti Tanda Tangan Kuorum SD*, menandatanganinya menjadi bundel **ANS-104** menggunakan wallet JWK node SD (`ans104@1.0`), lalu mem-push-nya ke Inbox **Arbit Process**. *(Node SD cadangan mengecek tip `/now` Arbit lebih dulu agar tidak mengirim duplikat jika SD utama sehat).*
+#### 3. Shared Data Processes (`hb-sd-1 :8735` & `hb-sd-2 :8736`)
+- **Communication Pathway:** Hybrid — Receives direct synchronous writes from Primary; dispatches async checkpoints to Arbit.
+- **Storage Profile:** Dual RAM latest state + LMDB disk persistence (`hb_store_lmdb`).
+- **Core Responsibilities:**
+  1. Validates incoming tick sequence, ensuring monotonic progression and epoch matching.
+  2. Commits coordinates to memory and updates LMDB snapshot state on disk (`raw_tick >= pt.tick`).
+  3. Returns signed ACK payload to Primary with confirmed tick numbers and replica identity.
+  4. Maintains rolling diff buffer (`RecentDiffs`) for client lag compensation and downstream consensus.
+  5. Every 100 ticks (`arbit_batch_interval: 100`), SD1 dispatches an asynchronous batch checkpoint via `~relay@1.0/cast` to Arbit without blocking player move latency.
 
-#### 4. Arbit Process (`hb-arbit` — *Consensus Gatekeeper & Anti-Double-Spend Judge*)
-* **Jalur Komunikasi:** **Murni Inbox/Outbox (SU)** (`process@1.0` + `scheduler@1.0` + `ans104@1.0`).
-* **Tugas Utama:**
-  1. Berdiri sebagai gerbang konsensus tunggal yang **tahan mati & bebas double-spend** (karena setiap pesan masuk diurutkan secara mutlak oleh SU dan tersimpan meskipun node sempat restart).
-  2. Memverifikasi keabsahan bukti kuorum SD berdasarkan daftar operator sah dan `Epoch` dari Genesis, memvalidasi urutan `tick` & komitmen state (anti-replay, anti-spam, anti-cheat satu node), serta mencatat idempotensi batch.
-  3. Mengunci **Official Permanent State** yang diproyeksikan via `/now` (`patch@1.0`) sekaligus ter-anchor permanen bersama assignment SU ke **Arweave L1**.
+#### 4. Arbit Process (`hb-arbit :8737`)
+- **Communication Pathway:** Scheduled AO Process (`process@1.0` + `scheduler@1.0`).
+- **Storage Profile:** LMDB Disk (`hb_store_lmdb`).
+- **Core Responsibilities:**
+  1. Enforces anti-double-spend consensus and anti-replay validation on batch checkpoints.
+  2. Advances `OfficialTick`, increments `CommitmentSeq`, and computes official `OfficialStateRoot`.
+  3. Executes block settlement against Arweave L1 (`arlocal :1984/mine`).
+  4. Dispatches Cascade-of-Relief prune notifications upstream to SD1 and SD2, releasing older diff slots up to the finalized tick.
 
-#### 5. Arweave L1 (`arlocal :1984` — *Permanent Permaweb Settlement*)
-* **Tugas Utama:** Menyimpan abadi biner modul Rust WASM & skrip Lua proses sejak Fase Spawn, serta menyimpan seluruh bundel transaksi ANS-104 dan riwayat settlement Arbit Process.
+#### 5. Arweave L1 Permaweb (`arlocal :1984`)
+- **Core Responsibilities:** Decentralized immutable storage layer recording module bytecode, block headers, and finalized state commitments.
 
 ---
 
-## 5. Urutan Pembuktian PoC (Roadmap Pembangunan dari Nol)
+## 5. Verification & Testing Matrix
 
-Agar pembangunan tetap tajam, bersih, dan nol *over-engineering*, kita mengeksekusinya dalam 4 langkah konkret:
+The implementation is verified end-to-end against rigorous automated test suites:
 
-1. **Tahap 1 — Infrastruktur Node Pekerja Lokal (Docker + Tmux):**
-   Menyiapkan skrip bersih untuk menyalakan `ArLocal (:1984)` via Docker dan 5 node HyperBEAM independen (`hb-genesis`, `hb-primary`, `hb-sd-1`, `hb-sd-2`, `hb-arbit`) via Tmux di atas engine asli HyperBEAM.
-2. **Tahap 2 — Bootstrap Konstitusi & Message Box Flow (`Genesis` & `Arbit`):**
-   Menghidupkan **Genesis Process** dan **Arbit Process** menggunakan mekanisme native AO (`process@1.0` + `scheduler@1.0` + `ans104@1.0`), lengkap dengan registrasi konfigurasi node direct dan verifikasi anti-double-spend.
-3. **Tahap 3 — Mesin Real-Time 60 Hz & Direct Node-to-Node Flow (`Primary` & `SD`):**
-   Membangun modul **Rust WASM** (Fixed-Slot State + Ring Buffer 1–2 detik + Snapshot Exporter) + **Lua Gate** di `hb-primary`, menghubungkan lemparan snapshot 0.5 detik via HTTP direct ke `hb-sd-1`/`hb-sd-2` (`hb_store_rocksdb`), hingga tembus batch ANS-104 ke `hb-arbit` & `ArLocal`.
-4. **Tahap 4 — Simulasi Tugas Penggunaan Nyata (60 Tick/s + Uji Mati Node):**
-   Menjalankan skenario beban nyata 60 tick/detik (simulasi pergerakan entitas + event transaksi penting + mematikan paksa node di tengah jalan) untuk mengukur latensi, memori konstan Ring Buffer, ketahanan Inbox/Outbox Arbit, dan kecepatan pemulihan dari SD. *(Baru setelah Tahap 4 lulus penuh, kita memikirkan ekstraksi menjadi library/SDK umum).*
+1. **Constitutional Discovery Test:** Zero hardcoded IP or port references in any Lua process script; all peers resolve dynamically from Genesis.
+2. **Multi-Tier E2E Coordinate Test ([`tests/test_e2e_2d_points.py`](tests/test_e2e_2d_points.py)):** 55/55 assertions verifying Genesis resolution, Primary RAM updates, SD1/SD2 dual replication, Arbit consensus commitment, and Arweave L1 block height progression.
+3. **Cluster Health & Interconnect Test ([`tests/test_e2e_connectivity.sh`](tests/test_e2e_connectivity.sh)):** 34/34 assertions verifying ArLocal mining, node Arweave addresses, isolated wallet storage, and direct node-to-node HTTP round-trips.
+4. **Interactive Red Circle WASD Client ([`tools/game_client/`](tools/game_client/)):** Live web-based verification of player movement, instant relog position restoration, micro-epoch indicator, and 4-tier backstage telemetry.
