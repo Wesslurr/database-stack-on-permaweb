@@ -1,0 +1,9 @@
+port: 8737
+priv_key_location: /home/weslur/database/engine/data/arbit/wallet.json
+gateway: http://127.0.0.1:1984
+bundler_ans104: http://127.0.0.1:1984
+
+store/ao-types: list=(".")
+store/1/ao-types: atom=("store-module")
+store/1/store-module: hb_store_lmdb
+store/1/name: /home/weslur/database/engine/data/arbit/lmdb

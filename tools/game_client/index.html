@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HyperBEAM 2D State Engine — Red Circle WASD Live Client</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --panel: #131b2e;
+      --panel-border: #23314f;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --red: #ef4444;
+      --red-glow: rgba(239, 68, 68, 0.45);
+      --green: #10b981;
+      --amber: #f59e0b;
+      --cyan: #06b6d4;
+      --purple: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 16px 20px;
+      gap: 14px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      padding: 12px 18px;
+    }
+    .title-group h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .dot-red {
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--red);
+      box-shadow: 0 0 12px var(--red);
+      display: inline-block;
+    }
+    .title-group p {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+    .badge-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .badge {
+      font-size: 0.76rem;
+      padding: 6px 11px;
+      border-radius: 6px;
+      background: #0d1424;
+      border: 1px solid var(--panel-border);
+      color: var(--muted);
+    }
+    .badge strong { color: var(--text); }
+    .badge.ok { border-color: rgba(16, 185, 129, 0.5); color: var(--green); }
+    .badge.warn { border-color: rgba(245, 158, 11, 0.5); color: var(--amber); }
+
+    .main-grid {
+      display: grid;
+      grid-template-columns: 560px 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 1100px) {
+      .main-grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--panel-border);
+    }
+    .card-header h2 {
+      font-size: 0.92rem;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--cyan);
+    }
+    canvas {
+      background: #070a10;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      display: block;
+      margin: 0 auto;
+      cursor: crosshair;
+    }
+    .controls-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 10px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .key-group {
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+    }
+    .kbd {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      padding: 2px 7px;
+      font-weight: 700;
+      color: #f8fafc;
+      font-size: 0.75rem;
+    }
+    .hud-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .metric {
+      background: #0b101d;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 8px 10px;
+    }
+    .metric .label {
+      font-size: 0.68rem;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .metric .val {
+      font-size: 1.02rem;
+      font-weight: 700;
+      margin-top: 3px;
+      color: #f8fafc;
+    }
+    .metric .val.green { color: var(--green); }
+    .metric .val.cyan { color: var(--cyan); }
+    .metric .val.amber { color: var(--amber); }
+
+    .tiers-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .tier-box {
+      background: #0b101d;
+      border: 1px solid #1e293b;
+      border-left: 4px solid var(--cyan);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 0.8rem;
+    }
+    .tier-box.tier-primary { border-left-color: var(--red); }
+    .tier-box.tier-sd { border-left-color: var(--green); }
+    .tier-box.tier-arbit { border-left-color: var(--purple); }
+    .tier-title {
+      display: flex;
+      justify-content: space-between;
+      font-weight: 700;
+      margin-bottom: 6px;
+      color: #f8fafc;
+    }
+    .tier-tag {
+      font-size: 0.7rem;
+      padding: 1px 7px;
+      border-radius: 4px;
+      background: #172136;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .tier-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 4px 12px;
+      color: var(--muted);
+      font-size: 0.76rem;
+    }
+    .tier-grid span strong { color: var(--text); }
+
+    .log-box {
+      margin-top: 10px;
+      background: #070a10;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 8px 10px;
+      height: 155px;
+      overflow-y: auto;
+      font-size: 0.74rem;
+      line-height: 1.45;
+      color: #cbd5e1;
+    }
+    .log-entry { margin-bottom: 3px; }
+    .log-entry .ts { color: #64748b; }
+    .log-entry .ack { color: var(--green); font-weight: 600; }
+    .log-entry .err { color: var(--red); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title-group">
+      <h1><span class="dot-red"></span> HyperBEAM Real-Time State Engine — Red Circle WASD Client</h1>
+      <p>Client hanya terhubung ke <strong>Genesis (:8733)</strong> untuk menemukan Primary. Lingkaran Merah hanya berpindah setelah <strong>Primary RAM + SD1/SD2 (RAM + LMDB Disk)</strong> memberi ACK.</p>
+    </div>
+    <div class="badge-row">
+      <div class="badge" id="genesisBadge">Genesis (:8733): <strong>Connecting...</strong></div>
+      <div class="badge" id="primaryBadge">Discovered Primary: <strong>—</strong></div>
+      <div class="badge" id="ackGateBadge">Replication Gate: <strong>Strict SD RAM+Disk ACK</strong></div>
+    </div>
+  </header>
+
+  <div class="main-grid">
+    <!-- Left Column: Interactive 2D Arena -->
+    <div class="card">
+      <div class="card-header">
+        <h2>2D Coordinate Arena (Entity: <code>player_red</code>)</h2>
+        <span style="font-size: 0.75rem; color: var(--muted);">Klik arena atau tekan WASD / Arrow Keys</span>
+      </div>
+
+      <canvas id="arena" width="520" height="380"></canvas>
+
+      <div class="controls-bar">
+        <div>
+          Gerakkan:
+          <span class="key-group">
+            <span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span>
+          </span>
+          atau <span class="kbd">Arrow Keys</span> (Step: 20px)
+        </div>
+        <div>
+          <span style="color:#94a3b8;">◯ Putih Putus-putus = Input Target</span> &nbsp;|&nbsp;
+          <span style="color:#ef4444; font-weight:700;">● Merah Solid = Confirmed SD Backup</span>
+        </div>
+      </div>
+
+      <div class="hud-metrics">
+        <div class="metric">
+          <div class="label">Confirmed (X, Y)</div>
+          <div class="val cyan" id="hudCoords">(0, 0)</div>
+        </div>
+        <div class="metric">
+          <div class="label">Write + SD ACK RTT</div>
+          <div class="val green" id="hudRtt">— ms</div>
+        </div>
+        <div class="metric">
+          <div class="label">Confirmed SD Tick</div>
+          <div class="val amber" id="hudTick">0</div>
+        </div>
+        <div class="metric">
+          <div class="label">SD Replicas ACKed</div>
+          <div class="val green" id="hudSdNodes">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Column: Live Backstage Cluster Inspector -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Backstage Multi-Tier Node Inspector (Live)</h2>
+        <span style="font-size: 0.74rem; color: var(--muted);" id="pollStatus">Polling cluster...</span>
+      </div>
+
+      <div class="tiers-stack">
+        <!-- Tier 1: Primary -->
+        <div class="tier-box tier-primary">
+          <div class="tier-title">
+            <span>TIER 1 — Primary Process (<code>:8734</code>)</span>
+            <span class="tier-tag">RAM Maximized (hb_store_volatile)</span>
+          </div>
+          <div class="tier-grid">
+            <span>Player Coord: <strong id="inspPrimaryCoord">—</strong></span>
+            <span>Total Entities: <strong id="inspPrimaryTotal">—</strong></span>
+            <span>Topology Source: <strong id="inspPrimaryTopo">—</strong></span>
+            <span>SD Targets: <strong id="inspPrimarySdTargets">—</strong></span>
+          </div>
+        </div>
+
+        <!-- Tier 2A: SD1 -->
+        <div class="tier-box tier-sd">
+          <div class="tier-title">
+            <span>TIER 2A — Shared Data Replica 1 (<code>sd1 :8735</code>)</span>
+            <span class="tier-tag">RAM Latest + LMDB Disk Snapshot (slot=1)</span>
+          </div>
+          <div class="tier-grid">
+            <span>Player Backup: <strong id="inspSd1Coord">—</strong></span>
+            <span>Last Replicated Tick: <strong id="inspSd1Tick">—</strong></span>
+            <span>Persistence Mode: <strong id="inspSd1Persist">—</strong></span>
+            <span>Downstream Arbit: <strong id="inspSd1Arbit">—</strong></span>
+          </div>
+        </div>
+
+        <!-- Tier 2B: SD2 -->
+        <div class="tier-box tier-sd">
+          <div class="tier-title">
+            <span>TIER 2B — Shared Data Replica 2 (<code>sd2 :8736</code>)</span>
+            <span class="tier-tag">RAM Latest + LMDB Disk Snapshot (slot=1)</span>
+          </div>
+          <div class="tier-grid">
+            <span>Player Backup: <strong id="inspSd2Coord">—</strong></span>
+            <span>Last Replicated Tick: <strong id="inspSd2Tick">—</strong></span>
+            <span>Persistence Mode: <strong id="inspSd2Persist">—</strong></span>
+            <span>Downstream Arbit: <strong id="inspSd2Arbit">—</strong></span>
+          </div>
+        </div>
+
+        <!-- Tier 3: Arbit -->
+        <div class="tier-box tier-arbit">
+          <div class="tier-title">
+            <span>TIER 3 — Arbit Consensus Process (<code>arbit :8737</code>)</span>
+            <span class="tier-tag">Async Checkpoint via ~relay@1.0/cast</span>
+          </div>
+          <div class="tier-grid">
+            <span>Official Tick: <strong id="inspArbitTick">—</strong></span>
+            <span>Commitment Seq: <strong id="inspArbitSeq">—</strong></span>
+            <span>Official State Root: <strong id="inspArbitRoot">—</strong></span>
+            <span>L1 Gateway: <strong id="inspArbitL1">—</strong></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="log-box" id="txLog"></div>
+    </div>
+  </div>
+
+  <script>
+    const GENESIS_URL = "http://127.0.0.1:8733";
+    const PLAYER_ID = "player_red";
+    const STEP = 20;
+    const BOUNDS_X = 220;
+    const BOUNDS_Y = 150;
+
+    let discoveredPrimaryUrl = null;
+    let discoveredEpoch = null;
+
+    // Input target (Ghost ring) vs Confirmed state (Solid Red Circle)
+    let targetPos = { x: 0, y: 0 };
+    let confirmedPos = { x: 0, y: 0, tick: 0 };
+    let renderPos = { x: 0, y: 0 }; // Smooth interpolation towards confirmedPos
+    let trail = [];
+    let isWriting = false;
+    let queuedMove = null;
+
+    const canvas = document.getElementById("arena");
+    const ctx = canvas.getContext("2d");
+
+    function appendLog(html) {
+      const box = document.getElementById("txLog");
+      const div = document.createElement("div");
+      div.className = "log-entry";
+      const now = new Date().toLocaleTimeString("id-ID", { hour12: false });
+      div.innerHTML = `<span class="ts">[${now}]</span> ${html}`;
+      box.prepend(div);
+      while (box.children.length > 40) {
+        box.removeChild(box.lastChild);
+      }
+    }
+
+    async function fetchProcessBody(baseUrl, processName) {
+      const url = `${baseUrl}/~node-process@1.0/${processName}/now/results~message@1.0/output/body`;
+      const res = await fetch(url, { headers: { "Accept": "application/json" } });
+      const text = await res.text();
+      return JSON.parse(text);
+    }
+
+    // Step 1: Discover Primary exclusively from Genesis Process (:8733)
+    async function discoverFromGenesis() {
+      try {
+        const data = await fetchProcessBody(GENESIS_URL, "genesis");
+        discoveredPrimaryUrl = data.primary_url || (data.primary && data.primary.url);
+        discoveredEpoch = data.epoch || 1;
+
+        const gBadge = document.getElementById("genesisBadge");
+        gBadge.className = "badge ok";
+        gBadge.innerHTML = `Genesis (:8733): <strong>Connected (Epoch ${discoveredEpoch})</strong>`;
+
+        const pBadge = document.getElementById("primaryBadge");
+        pBadge.className = "badge ok";
+        pBadge.innerHTML = `Discovered Primary: <strong>${discoveredPrimaryUrl}</strong>`;
+
+        appendLog(`Discovery via Genesis <code>${GENESIS_URL}</code> &rarr; Primary ditemukan di <strong>${discoveredPrimaryUrl}</strong>`);
+
+        // Query Primary specifically for existing player coordinates on relog/refresh
+        let existingPoint = null;
+        try {
+          const primaryData = await fetchProcessBody(discoveredPrimaryUrl, "primary");
+          if (primaryData && Array.isArray(primaryData.points)) {
+            existingPoint = primaryData.points.find(p => p.id === PLAYER_ID);
+          }
+          if (!existingPoint && primaryData && primaryData.point && primaryData.point.id === PLAYER_ID) {
+            existingPoint = primaryData.point;
+          }
+        } catch (_ignore) {}
+
+        if (existingPoint) {
+          confirmedPos = {
+            x: Number(existingPoint.x),
+            y: Number(existingPoint.y),
+            tick: Number(existingPoint.tick || 0)
+          };
+          targetPos = { x: confirmedPos.x, y: confirmedPos.y };
+          renderPos = { x: confirmedPos.x, y: confirmedPos.y };
+          trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
+          document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+          document.getElementById("hudTick").textContent = `#${confirmedPos.tick}`;
+          appendLog(
+            `Posisi dipulihkan dari Primary RAM: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> ` +
+            `[Tick #${confirmedPos.tick}]`
+          );
+          pollClusterState();
+        } else {
+          // Initialize at (0, 0) only if player does not exist yet on Primary
+          await writeCoordinate(0, 0, true);
+        }
+      } catch (err) {
+        const gBadge = document.getElementById("genesisBadge");
+        gBadge.className = "badge warn";
+        gBadge.innerHTML = `Genesis (:8733): <strong>Error (${err.message})</strong>`;
+      }
+    }
+
+    // Step 2: Client Write-Point to Primary (waits for SD1 & SD2 RAM+Disk ACK)
+    async function writeCoordinate(nx, ny, isInit = false) {
+      if (!discoveredPrimaryUrl) return;
+      if (isWriting) {
+        queuedMove = { x: nx, y: ny };
+        return;
+      }
+      isWriting = true;
+      const t0 = performance.now();
+
+      try {
+        // Single-hop schedule + compute + commit resolution via HyperBEAM dev_push
+        const pushRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output~message@1.0/body`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            ...NO_CACHE_HEADERS
+          },
+          body: JSON.stringify({
+            action: "Write-Point",
+            id: PLAYER_ID,
+            x: nx,
+            y: ny
+          })
+        });
+        if (!pushRes.ok) throw new Error(`Push HTTP ${pushRes.status}`);
+
+        const rawJson = await pushRes.json();
+        const result = unwrapBody(rawJson);
+        const rtt = Math.round(performance.now() - t0);
+
+        if (result.status === "ok" && result.sd_ack === true && result.point) {
+          confirmedPos = {
+            x: Number(result.point.x),
+            y: Number(result.point.y),
+            tick: Number(result.point.tick)
+          };
+          trail.push({ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick });
+          if (trail.length > 18) trail.shift();
+
+          document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+          document.getElementById("hudRtt").textContent = `${rtt} ms`;
+          document.getElementById("hudTick").textContent = `#${result.sd_confirmed_tick}`;
+          document.getElementById("hudSdNodes").textContent = (result.sd_acked_nodes || []).join(" + ");
+
+          // Authoritative instant update on backstage inspector
+          const currentCoordStr = `(${confirmedPos.x}, ${confirmedPos.y}) [tick #${confirmedPos.tick}]`;
+          const elP = document.getElementById("inspPrimaryCoord"); if (elP) elP.textContent = currentCoordStr;
+          const el1 = document.getElementById("inspSd1Coord"); if (el1) el1.textContent = currentCoordStr;
+          const el2 = document.getElementById("inspSd2Coord"); if (el2) el2.textContent = currentCoordStr;
+          const el1T = document.getElementById("inspSd1Tick"); if (el1T) el1T.textContent = `#${result.sd_confirmed_tick} (Real-Time Every Move)`;
+          const el2T = document.getElementById("inspSd2Tick"); if (el2T) el2T.textContent = `#${result.sd_confirmed_tick} (Real-Time Every Move)`;
+
+          if (!isInit) {
+            appendLog(
+              `Move <code>(${confirmedPos.x}, ${confirmedPos.y})</code> &rarr; ` +
+              `<span class="ack">ACK [${(result.sd_acked_nodes || []).join(", ")} RAM+LMDB]</span> ` +
+              `Tick #${result.sd_confirmed_tick} dalam <strong>${rtt} ms</strong>`
+            );
+          }
+          // Refresh backstage inspector right after move
+          pollClusterState();
+        } else {
+          appendLog(`<span class="err">Replication Gate Blocked:</span> ${JSON.stringify(result)}`);
+        }
+      } catch (err) {
+        appendLog(`<span class="err">Write Error:</span> ${err.message}`);
+      } finally {
+        isWriting = false;
+        if (queuedMove) {
+          const next = queuedMove;
+          queuedMove = null;
+          if (next.x !== confirmedPos.x || next.y !== confirmedPos.y) {
+            writeCoordinate(next.x, next.y);
+          }
+        }
+      }
+    }
+
+    function moveBy(dx, dy) {
+      targetPos.x = Math.max(-BOUNDS_X, Math.min(BOUNDS_X, targetPos.x + dx));
+      targetPos.y = Math.max(-BOUNDS_Y, Math.min(BOUNDS_Y, targetPos.y + dy));
+      writeCoordinate(targetPos.x, targetPos.y);
+    }
+
+    window.addEventListener("keydown", (e) => {
+      const key = e.key.toLowerCase();
+      if (key === "w" || e.key === "ArrowUp") { e.preventDefault(); moveBy(0, -STEP); }
+      else if (key === "s" || e.key === "ArrowDown") { e.preventDefault(); moveBy(0, STEP); }
+      else if (key === "a" || e.key === "ArrowLeft") { e.preventDefault(); moveBy(-STEP, 0); }
+      else if (key === "d" || e.key === "ArrowRight") { e.preventDefault(); moveBy(STEP, 0); }
+    });
+
+    canvas.addEventListener("click", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      const clickX = Math.round((e.clientX - rect.left - cx) / 10) * 10;
+      const clickY = Math.round((e.clientY - rect.top - cy) / 10) * 10;
+      targetPos.x = Math.max(-BOUNDS_X, Math.min(BOUNDS_X, clickX));
+      targetPos.y = Math.max(-BOUNDS_Y, Math.min(BOUNDS_Y, clickY));
+      writeCoordinate(targetPos.x, targetPos.y);
+    });
+
+    // Backstage Inspector: polls Primary (:8734), SD1 (:8735), SD2 (:8736), and Arbit (:8737)
+    async function pollClusterState() {
+      try {
+        const [pState, sd1State, sd2State, arbitState] = await Promise.all([
+          fetchProcessBody("http://127.0.0.1:8734", "primary"),
+          fetchProcessBody("http://127.0.0.1:8735", "sd1"),
+          fetchProcessBody("http://127.0.0.1:8736", "sd2"),
+          fetchProcessBody("http://127.0.0.1:8737", "arbit")
+        ]);
+
+        const findPlayer = (pts) => {
+          if (!Array.isArray(pts)) return "—";
+          const p = pts.find(item => item.id === PLAYER_ID);
+          return p ? `(${p.x}, ${p.y}) [tick ${p.tick}]` : "—";
+        };
+
+        document.getElementById("inspPrimaryCoord").textContent = findPlayer(pState.points);
+        document.getElementById("inspPrimaryTotal").textContent = pState.total ?? "—";
+        document.getElementById("inspPrimaryTopo").textContent = pState.topology_source || "—";
+        document.getElementById("inspPrimarySdTargets").textContent = (pState.sd_targets || []).join(", ");
+
+        document.getElementById("inspSd1Coord").textContent = findPlayer(sd1State.points);
+        document.getElementById("inspSd1Tick").textContent = sd1State.last_tick ?? "—";
+        document.getElementById("inspSd1Persist").textContent = sd1State.persistence || "ram+lmdb";
+        document.getElementById("inspSd1Arbit").textContent = sd1State.arbit_target || "—";
+
+        document.getElementById("inspSd2Coord").textContent = findPlayer(sd2State.points);
+        document.getElementById("inspSd2Tick").textContent = sd2State.last_tick ?? "—";
+        document.getElementById("inspSd2Persist").textContent = sd2State.persistence || "ram+lmdb";
+        document.getElementById("inspSd2Arbit").textContent = sd2State.arbit_target || "—";
+
+        document.getElementById("inspArbitTick").textContent = arbitState.official_tick ?? "—";
+        document.getElementById("inspArbitSeq").textContent = `#${arbitState.commitment_seq ?? 0}`;
+        document.getElementById("inspArbitRoot").textContent = arbitState.state_root || "—";
+        document.getElementById("inspArbitL1").textContent = arbitState.l1_gateway || "—";
+
+        document.getElementById("pollStatus").textContent =
+          `Synced @ ${new Date().toLocaleTimeString("id-ID", { hour12: false })}`;
+      } catch (e) {
+        document.getElementById("pollStatus").textContent = `Inspector sync warning: ${e.message}`;
+      }
+    }
+
+    function renderLoop() {
+      const w = canvas.width;
+      const h = canvas.height;
+      const cx = w / 2;
+      const cy = h / 2;
+
+      ctx.clearRect(0, 0, w, h);
+
+      // Draw coordinate grid
+      ctx.strokeStyle = "#131c2e";
+      ctx.lineWidth = 1;
+      for (let x = 0; x <= w; x += 20) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      }
+      for (let y = 0; y <= h; y += 20) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      }
+
+      // Draw X/Y axes
+      ctx.strokeStyle = "#263554";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(w, cy); ctx.stroke();
+
+      // Draw replicated trail
+      for (let i = 0; i < trail.length; i++) {
+        const pt = trail[i];
+        const alpha = ((i + 1) / trail.length) * 0.35;
+        ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(cx + pt.x, cy + pt.y, 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Draw Ghost Ring (Unconfirmed / In-Flight Input Target)
+      if (targetPos.x !== confirmedPos.x || targetPos.y !== confirmedPos.y || isWriting) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(226, 232, 240, 0.75)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.arc(cx + targetPos.x, cy + targetPos.y, 17, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Smoothly interpolate visual position towards confirmedPos
+      renderPos.x += (confirmedPos.x - renderPos.x) * 0.35;
+      renderPos.y += (confirmedPos.y - renderPos.y) * 0.35;
+
+      // Draw Confirmed Solid Red Circle (ONLY moves after Primary + SD1/SD2 ACK)
+      ctx.save();
+      ctx.shadowColor = "rgba(239, 68, 68, 0.75)";
+      ctx.shadowBlur = 18;
+      ctx.fillStyle = "#ef4444";
+      ctx.beginPath();
+      ctx.arc(cx + renderPos.x, cy + renderPos.y, 15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = "#fecaca";
+      ctx.stroke();
+      ctx.restore();
+
+      // Label above circle
+      ctx.fillStyle = "#f8fafc";
+      ctx.font = "11px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(
+        `${PLAYER_ID} (${confirmedPos.x}, ${confirmedPos.y}) [tick #${confirmedPos.tick}]`,
+        cx + renderPos.x,
+        cy + renderPos.y - 22
+      );
+
+      requestAnimationFrame(renderLoop);
+    }
+
+    discoverFromGenesis();
+    setInterval(pollClusterState, 1200);
+    requestAnimationFrame(renderLoop);
+  </script>
+</body>
+</html>

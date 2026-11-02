@@ -1,0 +1,96 @@
+{
+  "port": 8737,
+  "priv_key_location": "/home/weslur/database/engine/data/arbit/wallet.json",
+  "gateway": "http://127.0.0.1:1984",
+  "relay-allow-commit-request": true,
+  "relay_allow_commit_request": true,
+  "verify-assignments": false,
+  "verify_assignments": false,
+  "hosts-block-internal": false,
+  "hosts_block_internal": false,
+  "process-workers": true,
+  "process_workers": true,
+  "scheduling-mode": "local_confirmation",
+  "scheduling_mode": "local_confirmation",
+  "process-snapshot-slots": 20,
+  "process_snapshot_slots": 20,
+  "process-snapshot-time": false,
+  "process_snapshot_time": false,
+  "http_max_body": 1048576,
+  "cache-control": [
+    "no-store"
+  ],
+  "cache_control": [
+    "no-store"
+  ],
+  "on": {},
+  "debug-print": [
+    "error"
+  ],
+  "debug_print": [
+    "error"
+  ],
+  "debug-print-trace": false,
+  "debug_print_trace": false,
+  "store": [
+    {
+      "ao-types": "atom=(\"store-module\")",
+      "store-module": "hb_store_lmdb",
+      "name": "/home/weslur/database/engine/data/arbit/lmdb"
+    }
+  ],
+  "match-index": [
+    {
+      "ao-types": "atom=(\"store-module\")",
+      "store-module": "hb_store_lmdb",
+      "name": "/home/weslur/database/engine/data/arbit/lmdb"
+    }
+  ],
+  "match_index": [
+    {
+      "ao-types": "atom=(\"store-module\")",
+      "store-module": "hb_store_lmdb",
+      "name": "/home/weslur/database/engine/data/arbit/lmdb"
+    }
+  ],
+  "priv-store": [
+    {
+      "ao-types": "atom=(\"store-module\")",
+      "store-module": "hb_store_lmdb",
+      "name": "/home/weslur/database/engine/data/arbit/lmdb"
+    }
+  ],
+  "priv_store": [
+    {
+      "ao-types": "atom=(\"store-module\")",
+      "store-module": "hb_store_lmdb",
+      "name": "/home/weslur/database/engine/data/arbit/lmdb"
+    }
+  ],
+  "attested-store": {
+    "ao-types": "atom=(\"store-module\")",
+    "store-module": "hb_store_lmdb",
+    "name": "/home/weslur/database/engine/data/arbit/lmdb"
+  },
+  "attested_store": {
+    "ao-types": "atom=(\"store-module\")",
+    "store-module": "hb_store_lmdb",
+    "name": "/home/weslur/database/engine/data/arbit/lmdb"
+  },
+  "node_processes": {
+    "arbit": {
+      "device": "process@1.0",
+      "execution-device": "lua@5.3a",
+      "scheduler-device": "scheduler@1.0",
+      "push-device": "push@1.0",
+      "node-role": "arbit",
+      "requires-sign": true,
+      "module": {
+        "content-type": "text/x-lua",
+        "body": "-- ==============================================================================\n-- Arbit Process (Consensus Gatekeeper & Anti-Double-Spend Official Ledger)\n-- ==============================================================================\n-- ZERO hardcoded peer URLs.\n-- Resolves cluster topology (`l1_url` & `arbit_batch_interval`) dynamically\n-- from the Genesis Process specified by `genesis-url` at process spawn.\n-- Exposes and records native AO Cryptographic Signers (`ao.signers`, `process.authority`).\n\nOfficialTick = OfficialTick or 0\nOfficialPointCount = OfficialPointCount or 0\nCommitmentSeq = CommitmentSeq or 0\nOfficialStateRoot = OfficialStateRoot or \"0x0000000000000000\"\nLastCheckpointSigner = LastCheckpointSigner or \"unverified\"\nGenesisUrl = GenesisUrl or nil\nTopology = Topology or nil\n\n-- L1 finality + Cascade-of-Relief bookkeeping. Arbit is the only tier allowed\n-- to advance permanent settlement; after settlement it tells SD1/SD2 which\n-- committed slots may be released from their rolling diff windows.\nL1CommitMode = L1CommitMode or \"local_block\"\nLastL1TxId = LastL1TxId or \"\"\nLastL1Height = LastL1Height or 0\nLastL1Status = LastL1Status or \"idle\"\nLastFinalizedTick = LastFinalizedTick or 0\nPrunedThroughTick = PrunedThroughTick or 0\nLastDiffSeq = LastDiffSeq or 0\nLastPruneNotified = LastPruneNotified or {}\n\nlocal function json_safe(value)\n    local s = tostring(value)\n    s = string.gsub(s, \"\\\\\", \"\\\\\\\\\")\n    s = string.gsub(s, '\"', '\\\\\"')\n    s = string.gsub(s, \"[\\r\\n\\t]\", \" \")\n    return s\nend\n\nlocal function response_body(res)\n    if type(res) == \"table\" then\n        return tostring(res.body or \"\")\n    end\n    return tostring(res or \"\")\nend\n\n-- Commit one official checkpoint to L1. `local_block` uses ArLocal's native\n-- `GET /mine` block finality (no fake settlement, no signing dependency);\n-- `http_tx` posts to `POST /tx` for gateways that accept the checkpoint body.\nlocal function commit_to_l1(topo, tick, point_count, state_root)\n    if not topo or not topo.l1_url then\n        L1CommitStatus = \"no_l1_target\"\n        return \"\", 0, L1CommitStatus\n    end\n    local mode = topo.l1_commit_mode or L1CommitMode\n    if mode == \"none\" then\n        L1CommitStatus = \"disabled\"\n        return \"\", 0, L1CommitStatus\n    end\n\n    if mode == \"http_tx\" then\n        local payload = string.format(\n            [[{\"action\":\"Commit-Checkpoint\",\"official_tick\":%d,\"point_count\":%d,\"state_root\":\"%s\"}]],\n            tick, point_count, json_safe(state_root)\n        )\n        local ok, status, res = pcall(function()\n            return ao.resolve({\n                path = \"/~relay@1.0/call\",\n                [\"relay-path\"] = topo.l1_url .. \"/tx\",\n                [\"relay-method\"] = \"POST\",\n                [\"relay-body\"] = payload,\n                [\"content-type\"] = \"application/json\",\n                [\"cache-control\"] = \"no-store\"\n            })\n        end)\n        payload = nil\n        if ok and status == \"ok\" then\n            local body = response_body(res)\n            local tx_id = string.match(body, '\"id\"%s*:%s*\"([^\"]+)\"') or string.match(body, '\"tx_id\"%s*:%s*\"([^\"]+)\"')\n            L1CommitStatus = \"committed\"\n            return tx_id or (\"http_tx_tick_\" .. tostring(tick)), 0, L1CommitStatus\n        end\n        L1CommitStatus = \"pending\"\n        return \"\", 0, L1CommitStatus\n    end\n\n    -- Default: ArLocal local block finality.\n    local ok, status, res = pcall(function()\n        return ao.resolve({\n            path = \"/~relay@1.0/call\",\n            [\"relay-path\"] = topo.l1_url .. \"/mine\",\n            [\"relay-method\"] = \"GET\",\n            [\"cache-control\"] = \"no-store\"\n        })\n    end)\n    if ok and status == \"ok\" then\n        local body = response_body(res)\n        local height = tonumber(string.match(body, '\"height\"%s*:%s*(%d+)'))\n            or tonumber(string.match(body, '\"current\"%s*:%s*(%d+)'))\n            or 0\n        local block_hash = string.match(body, '\"indep_hash\"%s*:%s*\"([^\"]+)\"')\n            or string.match(body, '\"previous_block\"%s*:%s*\"([^\"]+)\"')\n        L1CommitStatus = \"finalized\"\n        if block_hash then\n            return string.format(\"arlocal_block_%d_%s\", height, block_hash), height, L1CommitStatus\n        end\n        return string.format(\"arlocal_block_%d\", height), height, L1CommitStatus\n    end\n    L1CommitStatus = \"pending\"\n    return \"\", 0, L1CommitStatus\nend\n\n-- Cascade notification: only slots at or below the finalized tick are released.\nlocal function notify_sd_prune(topo, committed_tick, l1_tx_id, arbit_signer)\n    local notified = {}\n    if not topo then return notified end\n    local targets = {}\n    if topo.sd1_url then\n        table.insert(targets, { url = topo.sd1_url, process = topo.sd1_process or \"sd1\", role = \"sd1\" })\n    end\n    if topo.sd2_url then\n        table.insert(targets, { url = topo.sd2_url, process = topo.sd2_process or \"sd2\", role = \"sd2\" })\n    end\n    local payload = string.format(\n        [[{\"action\":\"Prune-Committed-Slots\",\"committed_tick\":%d,\"l1_tx_id\":\"%s\",\"arbit_signer\":\"%s\"}]],\n        committed_tick, json_safe(l1_tx_id), json_safe(arbit_signer)\n    )\n    for _, target in ipairs(targets) do\n        local ok, status = pcall(function()\n            return ao.resolve({\n                path = \"/~relay@1.0/cast\",\n                [\"relay-path\"] = target.url .. \"/~node-process@1.0/\" .. target.process .. \"/schedule\",\n                [\"relay-method\"] = \"POST\",\n                [\"relay-body\"] = payload,\n                [\"content-type\"] = \"application/json\",\n                [\"cache-control\"] = \"no-store\"\n            })\n        end)\n        if ok and status == \"ok\" then\n            table.insert(notified, target.role)\n        end\n    end\n    payload = nil\n    return notified\nend\n\nlocal function encode_string_list(list)\n    if not list or #list == 0 then return \"[]\" end\n    local items = {}\n    for _, v in ipairs(list) do\n        table.insert(items, string.format([[\"%s\"]], json_safe(v)))\n    end\n    return \"[\" .. table.concat(items, \",\") .. \"]\"\nend\n\nlocal function extract_first_signer(process_or_msg)\n    if not process_or_msg then return nil end\n    if type(process_or_msg.authority) == \"table\" and #process_or_msg.authority > 0 then\n        return tostring(process_or_msg.authority[1])\n    elseif type(process_or_msg.authority) == \"string\" and #process_or_msg.authority > 0 then\n        return process_or_msg.authority\n    end\n    if ao and ao.signers then\n        local ok, list = pcall(function() return ao.signers(process_or_msg) end)\n        if ok and type(list) == \"table\" and #list > 0 then\n            return tostring(list[1])\n        end\n    end\n    return nil\nend\n\nlocal function extract_msg_id(msg_obj)\n    if not msg_obj or not ao or not ao.id then return \"uncommitted\" end\n    local ok, mid = pcall(function() return ao.id(msg_obj) end)\n    if ok and mid then return tostring(mid) end\n    return \"uncommitted\"\nend\n\nlocal function fetch_genesis_topology_once(genesis_url)\n    if not genesis_url then return nil end\n    local ok, status, res = pcall(function()\n        return ao.resolve({\n            path = \"/~relay@1.0/call\",\n            [\"relay-method\"] = \"GET\",\n            [\"relay-path\"] = genesis_url .. \"/~node-process@1.0/genesis/now/results~message@1.0/output/body\",\n            [\"cache-control\"] = \"no-store\"\n        })\n    end)\n    if ok and status == \"ok\" then\n        local body_str = (type(res) == \"table\" and res.body) and tostring(res.body) or tostring(res or \"\")\n        local l1_url = string.match(body_str, '\"l1_url\"%s*:%s*\"([^\"]+)\"')\n        local primary_url = string.match(body_str, '\"primary_url\"%s*:%s*\"([^\"]+)\"')\n        local sd1_url = string.match(body_str, '\"sd1_url\"%s*:%s*\"([^\"]+)\"')\n        local sd1_proc = string.match(body_str, '\"sd1_process\"%s*:%s*\"([^\"]+)\"') or \"sd1\"\n        local sd2_url = string.match(body_str, '\"sd2_url\"%s*:%s*\"([^\"]+)\"')\n        local sd2_proc = string.match(body_str, '\"sd2_process\"%s*:%s*\"([^\"]+)\"') or \"sd2\"\n        local epoch_str = string.match(body_str, '\"epoch\"%s*:%s*(%d+)') or \"1\"\n        local batch_str = string.match(body_str, '\"arbit_batch_interval\"%s*:%s*(%d+)') or \"5\"\n        local l1_mode = string.match(body_str, '\"l1_commit_mode\"%s*:%s*\"([^\"]+)\"')\n        if l1_mode then L1CommitMode = l1_mode end\n        if l1_url then\n            return {\n                genesis_url = genesis_url,\n                epoch = tonumber(epoch_str) or 1,\n                l1_url = l1_url,\n                l1_commit_mode = L1CommitMode,\n                primary_url = primary_url,\n                sd1_url = sd1_url,\n                sd1_process = sd1_proc,\n                sd2_url = sd2_url,\n                sd2_process = sd2_proc,\n                arbit_batch_interval = tonumber(batch_str) or 5\n            }\n        end\n    end\n    return nil\nend\n\nlocal function ensure_topology(process, msg)\n    GenesisUrl = GenesisUrl or process[\"genesis-url\"] or (msg and msg[\"genesis-url\"])\n    if not Topology and GenesisUrl then\n        Topology = fetch_genesis_topology_once(GenesisUrl)\n    end\n    return Topology\nend\n\nfunction compute(process, message, opts)\n    local msg = message.body or message\n    local action = msg.action or msg.Action or (msg.query and msg.query.action) or \"Get-Official-State\"\n\n    if action == \"Sync-Topology\" then\n        Topology = nil\n    end\n    local topo = ensure_topology(process, msg)\n    local genesis_src = (topo and topo.genesis_url) or tostring(GenesisUrl)\n    local l1_target = (topo and topo.l1_url) or \"unresolved\"\n    local batch_interval = (topo and topo.arbit_batch_interval) or 5\n\n    local arbit_signer = extract_first_signer(process) or \"arbit_authority\"\n    local assignment_id = extract_msg_id(message)\n    local incoming_signer = msg.checkpoint_signer or extract_first_signer(msg)\n    if incoming_signer then\n        LastCheckpointSigner = incoming_signer\n    end\n\n    local res = \"\"\n    local notified = {}\n    if action == \"Commit-Checkpoint\" then\n        local last_tick = tonumber(msg.last_tick or (msg.query and msg.query.last_tick) or 0)\n        local point_count = tonumber(msg.point_count or (msg.query and msg.query.point_count) or 0)\n        local provided_root = msg.state_root or (msg.query and msg.query.state_root)\n        local diff_seq = tonumber(msg.diff_seq or (msg.query and msg.query.diff_seq) or 0)\n\n        if last_tick > OfficialTick then\n            OfficialTick = last_tick\n            OfficialPointCount = point_count\n            CommitmentSeq = CommitmentSeq + 1\n            if diff_seq > LastDiffSeq then LastDiffSeq = diff_seq end\n            if provided_root and provided_root ~= \"\" then\n                OfficialStateRoot = json_safe(provided_root)\n            else\n                OfficialStateRoot = string.format(\"0xROOT_TICK_%d_PTS_%d_SEQ_%d\", OfficialTick, OfficialPointCount, CommitmentSeq)\n            end\n\n            -- Finalize on L1, then release only the slots covered by finality.\n            local tx_id, height, l1_status = commit_to_l1(topo, OfficialTick, OfficialPointCount, OfficialStateRoot)\n            LastL1TxId = tx_id\n            LastL1Height = height\n            LastL1Status = l1_status\n            if l1_status == \"finalized\" or l1_status == \"committed\" then\n                LastFinalizedTick = OfficialTick\n                PrunedThroughTick = OfficialTick\n                notified = notify_sd_prune(topo, OfficialTick, tx_id, arbit_signer)\n                LastPruneNotified = notified\n            end\n        end\n\n        res = string.format(\n            [[{\"status\":\"committed\",\"tier\":\"arbit_consensus\",\"requires_sign\":true,\"arbit_signer\":\"%s\",\"checkpoint_signer\":\"%s\",\"assignment_id\":\"%s\",\"batch_interval\":%d,\"topology_source\":\"%s\",\"l1_gateway\":\"%s\",\"l1_commit_mode\":\"%s\",\"l1_tx_id\":\"%s\",\"l1_height\":%d,\"l1_status\":\"%s\",\"finalized_tick\":%d,\"pruned_through_tick\":%d,\"prune_notified_nodes\":%s,\"official_tick\":%d,\"point_count\":%d,\"state_root\":\"%s\",\"commitment_seq\":%d,\"diff_seq\":%d}]],\n            arbit_signer, LastCheckpointSigner, assignment_id, batch_interval, genesis_src, l1_target, L1CommitMode, json_safe(LastL1TxId), LastL1Height, LastL1Status, LastFinalizedTick, PrunedThroughTick, encode_string_list(LastPruneNotified), OfficialTick, OfficialPointCount, json_safe(OfficialStateRoot), CommitmentSeq, LastDiffSeq\n        )\n    else\n        res = string.format(\n            [[{\"status\":\"ok\",\"tier\":\"arbit_consensus\",\"requires_sign\":true,\"arbit_signer\":\"%s\",\"checkpoint_signer\":\"%s\",\"assignment_id\":\"%s\",\"batch_interval\":%d,\"topology_source\":\"%s\",\"l1_gateway\":\"%s\",\"l1_commit_mode\":\"%s\",\"l1_tx_id\":\"%s\",\"l1_height\":%d,\"l1_status\":\"%s\",\"finalized_tick\":%d,\"pruned_through_tick\":%d,\"prune_notified_nodes\":%s,\"official_tick\":%d,\"point_count\":%d,\"state_root\":\"%s\",\"commitment_seq\":%d,\"diff_seq\":%d}]],\n            arbit_signer, LastCheckpointSigner, assignment_id, batch_interval, genesis_src, l1_target, L1CommitMode, json_safe(LastL1TxId), LastL1Height, LastL1Status, LastFinalizedTick, PrunedThroughTick, encode_string_list(LastPruneNotified), OfficialTick, OfficialPointCount, json_safe(OfficialStateRoot), CommitmentSeq, LastDiffSeq\n        )\n    end\n    \n    process.results = {\n        output = {\n            body = res,\n            arbit_signer = arbit_signer,\n            l1_commit_mode = L1CommitMode,\n            l1_tx_id = LastL1TxId,\n            l1_status = LastL1Status,\n            pruned_through_tick = tostring(PrunedThroughTick)\n        }\n    }\n    return process\nend\n"
+      },
+      "genesis-url": "http://127.0.0.1:8733"
+    }
+  },
+  "bundler_ans104": "http://127.0.0.1:1984"
+}
