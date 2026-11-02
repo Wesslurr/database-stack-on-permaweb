@@ -30,6 +30,15 @@ for i in {1..30}; do
 done
 
 echo ""
+# Automatically initialize HyperBEAM git submodule if absent
+if [ ! -f "$HB_SRC/rebar.config" ]; then
+    echo ""
+    echo "=== [Setup] Initializing HyperBEAM git submodule automatically ==="
+    git -C "$PROJECT_ROOT" submodule update --init --recursive
+    echo "  [OK] HyperBEAM submodule initialized."
+fi
+
+echo ""
 echo "=== [2.5/4] Precompiling HyperBEAM once (avoids shared _build races) ==="
 (
     cd "$HB_SRC"

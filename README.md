@@ -7,7 +7,7 @@
 [![HyperBEAM](https://img.shields.io/badge/HyperBEAM-Erlang%20OTP%2026-red)](https://github.com/permaweb/hyperbeam)
 [![Tests](https://img.shields.io/badge/E2E%20Tests-89%2F89%20Passing-brightgreen)](tests/)
 
-A production-grade, multi-tier distributed state engine designed for high-frequency interactive applications (such as real-time multiplayer games, streaming IoT coordinates, and low-latency order books) operating natively on the **AO Compute & HyperBEAM** architecture with decentralized settlement on **Arweave L1**.
+A beta test, multi-tier distributed state engine designed for high-frequency interactive applications (such as real-time multiplayer games, streaming IoT coordinates, and low-latency order books) operating natively on the **AO Compute & HyperBEAM** architecture with decentralized settlement on **Arweave L1**.
 
 ---
 
@@ -90,14 +90,21 @@ The local cluster operates across 6 isolated execution environments:
 - Python 3.10+
 - tmux
 
-### 1. Start Cluster
+### 1. Clone with Submodule
+```bash
+git clone --recurse-submodules https://github.com/Wesslurr/database-stack-on-permaweb.git
+cd database-stack-on-permaweb
+```
+*(If cloned normally without submodules, `./tools/cluster_up.sh` automatically fetches and sets up the `HyperBEAM` submodule on first run).*
+
+### 2. Start Cluster
 Launch ArLocal in Docker and all 5 HyperBEAM nodes in independent tmux sessions:
 ```bash
 ./tools/cluster_up.sh
 ```
 All nodes will initialize and perform automated self-health checks.
 
-### 2. Launch Interactive Game Client
+### 3. Launch Interactive Game Client
 Start the game client server with live OS and Docker container telemetry:
 ```bash
 python3 tools/game_client/serve.py
@@ -108,7 +115,7 @@ Open your browser at **`http://localhost:8080/`**.
 - Observe real-time Round-Trip Time (RTT), confirmed tick numbers, and micro-epoch indicators.
 - Inspect the **Backstage Multi-Tier Inspector** on the right column to monitor live RAM (RSS), CPU, LMDB disk sizes, and Arweave L1 block height progression.
 
-### 3. Stop Cluster
+### 4. Stop Cluster
 Gracefully shut down all tmux node sessions and stop ArLocal:
 ```bash
 ./tools/cluster_down.sh
