@@ -228,7 +228,7 @@
   <header>
     <div class="title-group">
       <h1><span class="dot-red"></span> HyperStack State Engine — Red Circle WASD Latency Benchmark</h1>
-      <p><strong>HyperStack Status: Active Development & Latency Benchmark.</strong> Client discovers Primary via <strong>Genesis (:8733)</strong>. The Red Circle serves as an authentic visual testbed to measure live multi-tier latency without client-side prediction. Moves confirm ONLY after <strong>Primary RAM + SD1/SD2 Quorum (RAM + LMDB Disk)</strong> ACK. <em>(Target: sub-50ms / 60 Hz; current dual-replica quorum benchmark: ~80–120 ms)</em>.</p>
+      <p><strong>HyperStack Status (100% Localhost Multi-Node Environment):</strong> Client discovers Primary via <strong>Genesis (:8733)</strong>. All 6 nodes run purely on localhost loopback with zero WAN latency. The Red Circle serves as a live visual benchmark to inspect true local database latency without client-side prediction. Moves confirm ONLY after <strong>Primary RAM + SD1/SD2 Quorum (RAM + LMDB Disk)</strong> ACK. <em>(Local Target: 60 ticks/s = ~16.6 ms or under 20 ms; current local quorum benchmark: ~80–120 ms)</em>.</p>
     </div>
     <div class="badge-row">
       <div class="badge" id="genesisBadge">Genesis (:8733): <strong>Connecting...</strong></div>
@@ -269,8 +269,9 @@
           <div class="val cyan" id="hudCoords">(0, 0)</div>
         </div>
         <div class="metric">
-          <div class="label">Write + SD ACK RTT</div>
+          <div class="label">Local Write + Quorum RTT</div>
           <div class="val green" id="hudRtt">— ms</div>
+          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;">Target: &le;20 ms (60 ticks/s)</div>
         </div>
         <div class="metric">
           <div class="label">Confirmed SD Tick</div>

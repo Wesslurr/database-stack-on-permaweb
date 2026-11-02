@@ -7,10 +7,12 @@
 
 This document serves as the **core architectural blueprint** for **HyperStack**, a high-frequency real-time state engine (targeting **60 ticks/second**) operating **100% natively on top of the AO Compute, HyperBEAM, and Arweave (Permaweb)** ecosystem in a local cluster environment.
 
-> ### ⚠️ Project Status & Latency Reality
-> - **Active Construction & Architectural Foundation:** HyperStack is currently in active construction and beta testing as a reference architecture.
-> - **Interactive Visual Proving Ground:** The project provides an interactive **Red Circle WASD Game Client** (`http://localhost:8080/`) designed specifically to expose live end-to-end latency with zero client prediction or mocked figures.
-> - **Current Latency Benchmark:** While the architectural flow, dual SD quorum replication, micro-epoch RSA sealing, and Arweave L1 consensus are 100% operational (verified by 89/89 E2E test assertions), **round-trip latency currently hovers around ~80–120 ms and has not yet achieved the ultimate sub-50 ms target**. Resolving this gap represents the next milestone on the engineering roadmap.
+> ### ⚠️ Project Status & Local Latency Reality
+> - **100% Localhost Architecture:** All components currently run **100% locally on a single machine** (localhost loopback via WSL/Linux), meaning all measured latencies are free from internet/WAN network delays.
+> - **Active Construction & Architectural Foundation:** HyperStack is an architectural foundation under active construction and beta testing.
+> - **Explicit Local Database Latency Target (60 Ticks/Second / ~16.6 ms):** The ultimate target for 60 Hz interactive applications is **60 ticks per second**, which equals **~16.6 ms per tick (or under 20 ms local round-trip write + quorum replication)**.
+> - **Current Local Latency Gap:** Despite running entirely locally, current round-trip write latency under strict dual-replica quorum (Primary RAM + SD1 RAM+LMDB + SD2 RAM+LMDB) measures **~80–120 ms**. **The engine has not yet met the 16–20 ms (60 tick/s) target.** Bridging this gap through dedicated binary channels and asynchronous batch decoupling is the primary focus of the next development phase.
+> - **Interactive Visual Proving Ground:** The **Red Circle WASD Game Client** (`http://localhost:8080/`) exposes this exact local latency live without client-side prediction or mocked numbers.
 
 The primary objective is to **build, prove, and battle-test the concrete Engine Stack** under real-world gameplay workloads prior to extracting generic library or SDK abstractions.
 
