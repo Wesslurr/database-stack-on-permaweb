@@ -227,8 +227,8 @@
 <body>
   <header>
     <div class="title-group">
-      <h1><span class="dot-red"></span> HyperBEAM Real-Time State Engine — Red Circle WASD Client</h1>
-      <p>Client connects exclusively to <strong>Genesis (:8733)</strong> to discover Primary. The Red Circle only moves after receiving authoritative ACKs from <strong>Primary RAM + SD1/SD2 (RAM + LMDB Disk)</strong>.</p>
+      <h1><span class="dot-red"></span> HyperStack State Engine — Red Circle WASD Latency Benchmark</h1>
+      <p><strong>HyperStack Status: Active Development & Latency Benchmark.</strong> Client discovers Primary via <strong>Genesis (:8733)</strong>. The Red Circle serves as an authentic visual testbed to measure live multi-tier latency without client-side prediction. Moves confirm ONLY after <strong>Primary RAM + SD1/SD2 Quorum (RAM + LMDB Disk)</strong> ACK. <em>(Target: sub-50ms / 60 Hz; current dual-replica quorum benchmark: ~80–120 ms)</em>.</p>
     </div>
     <div class="badge-row">
       <div class="badge" id="genesisBadge">Genesis (:8733): <strong>Connecting...</strong></div>
@@ -851,7 +851,7 @@
       ctx.fillStyle = "rgba(148, 163, 184, 0.75)";
       ctx.font = "10px monospace";
       ctx.textAlign = "left";
-      ctx.fillText("PIPELINE: Primary(:8734) → SD1/SD2(:8735/6) → Arbit(:8737) → Arweave L1(:1984)", 12, 18);
+      ctx.fillText("HYPERSTACK PIPELINE: Primary(:8734) → SD1/SD2(:8735/6) → Arbit(:8737) → Arweave L1(:1984)", 12, 18);
       ctx.restore();
 
       // Draw coordinate grid

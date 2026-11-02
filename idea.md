@@ -1,11 +1,16 @@
-﻿# Architectural Blueprint & Technical Specification
+﻿# HyperStack: Architectural Blueprint & Technical Specification
 ## High-Frequency Real-Time State Engine & Distributed Replication Stack on AO / Permaweb
 
 ---
 
 ## 1. Executive Summary & PoC Objectives
 
-This document serves as the **core architectural blueprint** for a high-frequency real-time state engine (targeting **60 ticks/second**) operating **100% natively on top of the AO Compute, HyperBEAM, and Arweave (Permaweb)** ecosystem in a local cluster environment.
+This document serves as the **core architectural blueprint** for **HyperStack**, a high-frequency real-time state engine (targeting **60 ticks/second**) operating **100% natively on top of the AO Compute, HyperBEAM, and Arweave (Permaweb)** ecosystem in a local cluster environment.
+
+> ### ⚠️ Project Status & Latency Reality
+> - **Active Construction & Architectural Foundation:** HyperStack is currently in active construction and beta testing as a reference architecture.
+> - **Interactive Visual Proving Ground:** The project provides an interactive **Red Circle WASD Game Client** (`http://localhost:8080/`) designed specifically to expose live end-to-end latency with zero client prediction or mocked figures.
+> - **Current Latency Benchmark:** While the architectural flow, dual SD quorum replication, micro-epoch RSA sealing, and Arweave L1 consensus are 100% operational (verified by 89/89 E2E test assertions), **round-trip latency currently hovers around ~80–120 ms and has not yet achieved the ultimate sub-50 ms target**. Resolving this gap represents the next milestone on the engineering roadmap.
 
 The primary objective is to **build, prove, and battle-test the concrete Engine Stack** under real-world gameplay workloads prior to extracting generic library or SDK abstractions.
 

@@ -1,13 +1,23 @@
-﻿# HyperBEAM Real-Time State Engine
+﻿# HyperStack: Real-Time State Engine
 
 > **High-Frequency Real-Time State Engine & Distributed Replication Stack on AO Compute & Arweave Permaweb**
 
+[![Project](https://img.shields.io/badge/Project-HyperStack-orange)](https://github.com/Wesslurr/database-stack-on-permaweb)
+[![Status](https://img.shields.io/badge/Status-Active%20Construction%20%2F%20Beta-amber)](idea.md)
 [![Permaweb](https://img.shields.io/badge/Arweave-Permaweb-black?logo=arweave)](https://arweave.org/)
 [![AO Compute](https://img.shields.io/badge/AO-Compute-blue)](https://ao.g8way.io/)
 [![HyperBEAM](https://img.shields.io/badge/HyperBEAM-Erlang%20OTP%2026-red)](https://github.com/permaweb/hyperbeam)
 [![Tests](https://img.shields.io/badge/E2E%20Tests-89%2F89%20Passing-brightgreen)](tests/)
 
-A beta test, multi-tier distributed state engine designed for high-frequency interactive applications (such as real-time multiplayer games, streaming IoT coordinates, and low-latency order books) operating natively on the **AO Compute & HyperBEAM** architecture with decentralized settlement on **Arweave L1**.
+> [!IMPORTANT]
+> ### 🚧 Project Status & Latency Transparency Notice
+> **HyperStack** is an experimental multi-tier state engine and distributed replication stack built directly on **HyperBEAM, AO Compute, and Arweave L1**.
+>
+> - **Under Active Construction:** This repository represents an architectural foundation currently under active construction and research. While the core multi-tier pipeline, dual-replica LMDB persistence, micro-epoch RSA sealing, and Arweave L1 settlement are fully functional (with 89/89 automated tests passing), the project is in a beta testing stage.
+> - **Interactive Visual Latency Benchmark (The Red Circle Test):** To maintain 100% transparency without artificial benchmarks or client-side prediction, this repo includes an interactive WASD web client (`http://localhost:8080/`). The Red Circle moves strictly after true backend confirmation, allowing anyone to inspect real-world multi-tier latency directly on their machine.
+> - **Latency Reality vs Target:** The target performance for HyperStack is **sub-50 ms / 60 Hz** real-time responsiveness. **Currently, the engine has not yet met this target.** Under strict synchronous write-through replication across two independent physical replicas (Primary RAM &rarr; SD1 RAM+LMDB + SD2 RAM+LMDB quorum), observed round-trip latency (RTT) hovers around **~80–120 ms**. Further architectural optimizations and dedicated binary transport conduits are actively underway in upcoming phases.
+
+**HyperStack** is designed for high-frequency interactive applications (such as real-time multiplayer games, streaming IoT coordinates, and low-latency order books) operating natively on the **AO Compute & HyperBEAM** architecture with decentralized settlement on **Arweave L1**.
 
 ---
 

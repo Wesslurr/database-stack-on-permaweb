@@ -162,5 +162,5 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 if __name__ == "__main__":
     with ThreadedTCPServer(("0.0.0.0", PORT), Handler) as httpd:
-        print(f"[Game-UI] Serving Red Circle WASD Client + Telemetry at http://127.0.0.1:{PORT}")
+        print(f"[HyperStack-UI] Serving Red Circle WASD Client + Telemetry at http://127.0.0.1:{PORT}")
         httpd.serve_forever()
