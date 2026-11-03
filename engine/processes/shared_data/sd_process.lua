@@ -2,10 +2,8 @@
 -- Shared Data Process (Hot Backup Replica & ANS-104 Checkpoint Bundler)
 -- ==============================================================================
 -- ZERO hardcoded peer URLs.
--- Resolves downstream Arbit endpoint (`arbit_url`, `arbit_process`, and
--- `arbit_batch_interval`) dynamically from the Genesis Process specified by
--- `genesis-url` at process spawn.
--- Exposes and records native AO Cryptographic Signers (`ao.signers`, `process.authority`).
+-- Resolves downstream Arbit endpoint dynamically from Genesis Process.
+-- Exposes and records native AO Cryptographic Signers (ao.signers, process authority).
 
 ReplicaStore = ReplicaStore or {}
 LastTick = LastTick or 0
@@ -13,11 +11,9 @@ LastBatchSentTick = LastBatchSentTick or 0
 LastRelayedBySigner = LastRelayedBySigner or "unverified"
 GenesisUrl = GenesisUrl or nil
 Topology = Topology or nil
+CurrentEpoch = CurrentEpoch or 1
+PrevStateRoot = PrevStateRoot or "0x0000000000000000"
 
--- Cascade-of-Relief: `ReplicaStore` keeps the latest value per entity, while
--- `RecentDiffs` holds a bounded rolling window of uncommitted diffs. Once Arbit
--- reports L1 finality, `Prune-Committed-Slots` releases everything at or below
--- the committed tick. Memory is therefore O(entities) + O(MaxDiffSlots).
 RecentDiffs = RecentDiffs or {}
 DiffSeq = DiffSeq or 0
 LastCommittedTick = LastCommittedTick or 0
@@ -27,11 +23,23 @@ PrunedDiffCount = PrunedDiffCount or 0
 MaxDiffSlots = MaxDiffSlots or 256
 
 local function json_safe(value)
+    if value == nil then return "" end
     local s = tostring(value)
     s = string.gsub(s, "\\", "\\\\")
     s = string.gsub(s, '"', '\\"')
-    s = string.gsub(s, "[\r\n\t]", " ")
+    s = string.gsub(s, "[\r\n\t\b\f]", " ")
     return s
+end
+
+local function canonical_hash(str)
+    local h1 = 2166136261
+    local h2 = 5381
+    for i = 1, #str do
+        local b = string.byte(str, i)
+        h1 = ((h1 ~ b) * 16777619) % 4294967296
+        h2 = ((h2 * 33) + b) % 4294967296
+    end
+    return string.format("0x%08x%08x", h1, h2)
 end
 
 local function prune_diffs_through(tick)
@@ -60,22 +68,18 @@ local function encode_diff_tail(limit)
     return "[" .. table.concat(items, ",") .. "]"
 end
 
-local function replica_state_root(count)
-    return string.format("0xSD_TICK_%d_PTS_%d_SEQ_%d", LastTick, count, DiffSeq)
-end
-
 local function extract_first_signer(process_or_msg)
     if not process_or_msg then return nil end
-    if type(process_or_msg.authority) == "table" and #process_or_msg.authority > 0 then
-        return tostring(process_or_msg.authority[1])
-    elseif type(process_or_msg.authority) == "string" and #process_or_msg.authority > 0 then
-        return process_or_msg.authority
-    end
     if ao and ao.signers then
         local ok, list = pcall(function() return ao.signers(process_or_msg) end)
         if ok and type(list) == "table" and #list > 0 then
             return tostring(list[1])
         end
+    end
+    if type(process_or_msg.authority) == "table" and #process_or_msg.authority > 0 then
+        return tostring(process_or_msg.authority[1])
+    elseif type(process_or_msg.authority) == "string" and #process_or_msg.authority > 0 then
+        return process_or_msg.authority
     end
     return nil
 end
@@ -145,54 +149,71 @@ function compute(process, message, opts)
         Topology = nil
     end
     local topo = ensure_topology(process, msg)
-    local genesis_src = (topo and topo.genesis_url) or tostring(GenesisUrl)
+    local genesis_src = (topo and topo.genesis_url) or tostring(GenesisUrl or "")
     local arbit_target = (topo and topo.arbit_url) or "unresolved"
     local batch_interval = (topo and topo.arbit_batch_interval) or 5
     local node_role = tostring(process["node-role"] or "sd1")
 
     local sd_signer = extract_first_signer(process) or "sd_authority"
     local assignment_id = extract_msg_id(message)
-    local incoming_signer = msg.relayed_by_signer or extract_first_signer(msg)
+    local incoming_signer = extract_first_signer(msg) or msg.relayed_by_signer
     if incoming_signer then
         LastRelayedBySigner = incoming_signer
+    end
+
+    -- Epoch fencing: check incoming epoch if provided
+    local msg_epoch = tonumber(msg.epoch or (msg.query and msg.query.epoch))
+    if msg_epoch then
+        if msg_epoch < CurrentEpoch then
+            local err_res = string.format([[{"status":"error_stale_epoch","tier":"shared_data_replica","epoch":%d,"current_epoch":%d}]], msg_epoch, CurrentEpoch)
+            process.results = { output = { body = err_res, last_tick = tostring(LastTick), sd_signer = sd_signer } }
+            return process
+        elseif msg_epoch > CurrentEpoch then
+            CurrentEpoch = msg_epoch
+        end
     end
 
     local res = ""
     if action == "Replicate" then
         local id = msg.id or (msg.query and msg.query.id)
-        local x = tonumber(msg.x or (msg.query and msg.query.x) or 0)
-        local y = tonumber(msg.y or (msg.query and msg.query.y) or 0)
+        local raw_x = msg.x or (msg.query and msg.query.x) or 0
+        local raw_y = msg.y or (msg.query and msg.query.y) or 0
+        local x = tonumber(raw_x) or 0
+        local y = tonumber(raw_y) or 0
         local tick = tonumber(msg.tick or (msg.query and msg.query.tick) or 0)
 
+        local is_stale_update = false
         if id then
-            ReplicaStore[id] = { id = id, x = x, y = y, tick = tick }
-            if tick > LastTick then LastTick = tick end
+            local existing = ReplicaStore[id]
+            -- Monotonic tick check per entity: reject or ignore stale out-of-order ticks
+            if existing and tick <= existing.tick then
+                is_stale_update = true
+            else
+                ReplicaStore[id] = { id = id, x = x, y = y, tick = tick }
+                if tick > LastTick then LastTick = tick end
 
-            -- Keep a bounded rolling diff window for failover/replay. Committed
-            -- slots are released by the Arbit prune cascade, not by unbounded
-            -- growth of this table.
-            DiffSeq = DiffSeq + 1
-            table.insert(RecentDiffs, { seq = DiffSeq, id = tostring(id), x = x, y = y, tick = tick })
-            while #RecentDiffs > MaxDiffSlots do
-                table.remove(RecentDiffs, 1)
+                DiffSeq = DiffSeq + 1
+                table.insert(RecentDiffs, { seq = DiffSeq, id = tostring(id), x = x, y = y, tick = tick })
+                while #RecentDiffs > MaxDiffSlots do
+                    table.remove(RecentDiffs, 1)
+                end
             end
         end
 
         local count = 0
         for _ in pairs(ReplicaStore) do count = count + 1 end
-        local state_root = replica_state_root(count)
-        
-        -- Decoupled Batch Checkpoint to Arbit Process:
-        -- SD updates in REAL-TIME on every single tick (1, 2, 3...) in RAM + LMDB Disk,
-        -- while Arbit receives periodic batch checkpoints every `batch_interval` ticks (e.g. 100 ticks)
-        -- or early when uncommitted diffs approach MaxDiffSlots capacity (emergency sweet spot guard),
-        -- dispatched asynchronously by SD1.
+        local state_root = canonical_hash(string.format("SD_TICK:%d:COUNT:%d:SEQ:%d:PREV:%s", LastTick, count, DiffSeq, PrevStateRoot))
+        PrevStateRoot = state_root
+
+        -- Periodic or early threshold batch checkpoint to Arbit
         local uncommitted_count = #RecentDiffs
-        local count_trigger = (LastTick % batch_interval == 0)
+        local count_trigger = (LastTick % batch_interval == 0) or (LastTick >= 5 and LastBatchSentTick == 0)
         local guard_trigger = (uncommitted_count >= MaxDiffSlots)
+        local is_checkpoint_sender = (node_role == "sd1") or (node_role == "sd2" and (LastTick - LastBatchSentTick >= batch_interval * 2))
+
         local should_batch_arbit = (
             topo and topo.arbit_url and
-            node_role == "sd1" and
+            is_checkpoint_sender and
             LastTick > 0 and
             (count_trigger or guard_trigger) and
             LastTick > LastBatchSentTick
@@ -200,8 +221,8 @@ function compute(process, message, opts)
         if should_batch_arbit then
             LastBatchSentTick = LastTick
             local arbit_payload = string.format(
-                [[{"action":"Commit-Checkpoint","last_tick":%d,"point_count":%d,"state_root":"%s","checkpoint_signer":"%s","sd_node":"%s","diff_seq":%d}]],
-                LastTick, count, json_safe(state_root), json_safe(sd_signer), json_safe(node_role), DiffSeq
+                [[{"action":"Commit-Checkpoint","last_tick":%d,"point_count":%d,"state_root":"%s","checkpoint_signer":"%s","sd_node":"%s","diff_seq":%d,"epoch":%d}]],
+                LastTick, count, json_safe(state_root), json_safe(sd_signer), json_safe(node_role), DiffSeq, CurrentEpoch
             )
             pcall(function()
                 ao.resolve({
@@ -218,15 +239,25 @@ function compute(process, message, opts)
 
         local is_me_sealed = (msg.micro_epoch_sealed == true or msg.micro_epoch_sealed == "true" or (tick % 10 == 0))
         local me_num = tonumber(msg.micro_epoch_num) or math.floor(tick / 10)
-        local me_root = msg.micro_epoch_root or ""
+        local me_root = msg.micro_epoch_root or state_root
+
+        local status_str = is_stale_update and "stale_tick_ignored" or "replicated"
 
         res = string.format(
-            [[{"status":"replicated","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","relayed_by_signer":"%s","assignment_id":"%s","topology_source":"%s","arbit_target":"%s","arbit_batch_interval":%d,"last_batch_sent_tick":%d,"point_id":"%s","last_tick":%d,"count":%d,"state_root":"%s","last_committed_tick":%d,"last_l1_tx_id":"%s","last_pruned_tick":%d,"pruned_diff_count":%d,"recent_diff_count":%d,"max_diff_slots":%d,"micro_epoch":%d,"micro_epoch_sealed":%s,"micro_epoch_root":"%s","recent_diffs":%s}]],
-            sd_signer, LastRelayedBySigner, assignment_id, genesis_src, arbit_target, batch_interval, LastBatchSentTick, json_safe(id), LastTick, count, json_safe(state_root), LastCommittedTick, json_safe(LastL1TxId), LastPrunedTick, PrunedDiffCount, #RecentDiffs, MaxDiffSlots, me_num, is_me_sealed and "true" or "false", json_safe(me_root), encode_diff_tail(5)
+            [[{"status":"%s","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","relayed_by_signer":"%s","assignment_id":"%s","topology_source":"%s","arbit_target":"%s","arbit_batch_interval":%d,"last_batch_sent_tick":%d,"point_id":"%s","last_tick":%d,"count":%d,"state_root":"%s","last_committed_tick":%d,"last_l1_tx_id":"%s","last_pruned_tick":%d,"pruned_diff_count":%d,"recent_diff_count":%d,"max_diff_slots":%d,"micro_epoch":%d,"micro_epoch_sealed":%s,"micro_epoch_root":"%s","recent_diffs":%s,"points":%s}]],
+            status_str, json_safe(sd_signer), json_safe(LastRelayedBySigner), json_safe(assignment_id), json_safe(genesis_src), json_safe(arbit_target), batch_interval, LastBatchSentTick, json_safe(id), LastTick, count, json_safe(state_root), LastCommittedTick, json_safe(LastL1TxId), LastPrunedTick, PrunedDiffCount, #RecentDiffs, MaxDiffSlots, me_num, is_me_sealed and "true" or "false", json_safe(me_root), encode_diff_tail(5), format_replica_points()
         )
     elseif action == "Prune-Committed-Slots" then
         local committed_tick = tonumber(msg.committed_tick or (msg.query and msg.query.committed_tick) or 0)
         local l1_tx_id = msg.l1_tx_id or (msg.query and msg.query.l1_tx_id) or ""
+
+        -- Prune authentication & safety check: cannot prune future or uncommitted ticks
+        if committed_tick > LastTick or l1_tx_id == "" then
+            local err_res = string.format([[{"status":"error_invalid_prune_request","tier":"shared_data_replica","last_tick":%d,"requested_tick":%d}]], LastTick, committed_tick)
+            process.results = { output = { body = err_res, last_tick = tostring(LastTick), sd_signer = sd_signer } }
+            return process
+        end
+
         if committed_tick > LastCommittedTick then
             LastCommittedTick = committed_tick
         end
@@ -240,7 +271,7 @@ function compute(process, message, opts)
         for _ in pairs(ReplicaStore) do count = count + 1 end
         res = string.format(
             [[{"status":"pruned","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","assignment_id":"%s","topology_source":"%s","committed_tick":%d,"last_committed_tick":%d,"last_l1_tx_id":"%s","last_pruned_tick":%d,"pruned_now":%d,"pruned_diff_count":%d,"recent_diff_count":%d,"max_diff_slots":%d,"count":%d,"last_tick":%d}]],
-            sd_signer, assignment_id, genesis_src, committed_tick, LastCommittedTick, json_safe(LastL1TxId), LastPrunedTick, removed, PrunedDiffCount, #RecentDiffs, MaxDiffSlots, count, LastTick
+            json_safe(sd_signer), json_safe(assignment_id), json_safe(genesis_src), committed_tick, LastCommittedTick, json_safe(LastL1TxId), LastPrunedTick, removed, PrunedDiffCount, #RecentDiffs, MaxDiffSlots, count, LastTick
         )
     elseif action == "Read-Point" then
         local id = msg.id or (msg.query and msg.query.id)
@@ -248,23 +279,24 @@ function compute(process, message, opts)
         if p then
             res = string.format(
                 [[{"status":"ok","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","point":{"id":"%s","x":%s,"y":%s,"tick":%d}}]],
-                sd_signer, json_safe(p.id), tostring(p.x), tostring(p.y), p.tick
+                json_safe(sd_signer), json_safe(p.id), tostring(p.x), tostring(p.y), p.tick
             )
         else
             res = string.format(
                 [[{"status":"not_found","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","id":"%s"}]],
-                sd_signer, json_safe(id)
+                json_safe(sd_signer), json_safe(id)
             )
         end
     else
         local count = 0
         for _ in pairs(ReplicaStore) do count = count + 1 end
+        local state_root = canonical_hash(string.format("SD_TICK:%d:COUNT:%d:SEQ:%d:PREV:%s", LastTick, count, DiffSeq, PrevStateRoot))
         res = string.format(
             [[{"status":"ok","tier":"shared_data_replica","persistence":"ram_latest+lmdb_disk","requires_sign":true,"sd_signer":"%s","relayed_by_signer":"%s","assignment_id":"%s","topology_source":"%s","arbit_target":"%s","arbit_batch_interval":%d,"last_batch_sent_tick":%d,"last_tick":%d,"count":%d,"state_root":"%s","last_committed_tick":%d,"last_l1_tx_id":"%s","last_pruned_tick":%d,"pruned_diff_count":%d,"recent_diff_count":%d,"max_diff_slots":%d,"recent_diffs":%s,"points":%s}]],
-            sd_signer, LastRelayedBySigner, assignment_id, genesis_src, arbit_target, batch_interval, LastBatchSentTick, LastTick, count, json_safe(replica_state_root(count)), LastCommittedTick, json_safe(LastL1TxId), LastPrunedTick, PrunedDiffCount, #RecentDiffs, MaxDiffSlots, encode_diff_tail(5), format_replica_points()
+            json_safe(sd_signer), json_safe(LastRelayedBySigner), json_safe(assignment_id), json_safe(genesis_src), json_safe(arbit_target), batch_interval, LastBatchSentTick, LastTick, count, json_safe(state_root), LastCommittedTick, json_safe(LastL1TxId), LastPrunedTick, PrunedDiffCount, #RecentDiffs, MaxDiffSlots, encode_diff_tail(5), format_replica_points()
         )
     end
-    
+
     process.results = {
         output = {
             body = res,

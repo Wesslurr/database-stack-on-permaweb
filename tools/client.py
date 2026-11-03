@@ -111,6 +111,12 @@ class StateEngineClient:
         """Queries Genesis process to discover the active Primary Process URL."""
         body = self._fetch_process_now_body(self.genesis_url, "genesis")
         primary_url = body.get("primary_url") or (body.get("primary", {}) if isinstance(body.get("primary"), dict) else {}).get("url")
+        if not primary_url or body.get("status") != "ok":
+            try:
+                push_res = self._push_process_body(self.genesis_url, "genesis", {"action": "Get-Topology"})
+                primary_url = push_res.get("primary_url") or (push_res.get("primary", {}) if isinstance(push_res.get("primary"), dict) else {}).get("url")
+            except Exception:
+                pass
         if primary_url:
             self.primary_url = primary_url.rstrip("/")
             self.epoch = body.get("epoch", 1)
