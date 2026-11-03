@@ -13,6 +13,8 @@ This client adheres strictly to the architectural boundary:
 """
 
 import sys
+import os
+import hashlib
 import json
 import http.client
 import urllib.parse
@@ -24,16 +26,25 @@ from typing import Dict, Any, Optional
 class StateEngineClient:
     """Client interface for interacting with the HyperBEAM Real-time State Engine."""
 
-    def __init__(self, genesis_url: str = "http://127.0.0.1:8733"):
+    def __init__(self, genesis_url: str = "http://127.0.0.1:8733", client_signer: Optional[str] = None):
         self.genesis_url = genesis_url.rstrip("/")
         self.primary_url: Optional[str] = None
         self.epoch: Optional[int] = None
+        self.client_signer = client_signer or os.environ.get("CLIENT_SIGNER", "client_" + hashlib.sha256(b"local_default_identity").hexdigest()[:16])
         self._connections: Dict[str, http.client.HTTPConnection] = {}
 
     def _get_connection(self, netloc: str) -> http.client.HTTPConnection:
         if netloc not in self._connections:
-            self._connections[netloc] = http.client.HTTPConnection(netloc, timeout=5)
-        return self._connections[netloc]
+            conn = http.client.HTTPConnection(netloc, timeout=5)
+            self._connections[netloc] = conn
+        conn = self._connections[netloc]
+        if conn.sock:
+            try:
+                import socket
+                conn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
+        return conn
 
     def _unwrap_ao_body(self, data: Any) -> Dict[str, Any]:
         if isinstance(data, dict) and data.get("ao-result") == "body" and isinstance(data.get("body"), str):
@@ -103,7 +114,7 @@ class StateEngineClient:
         Single-hop schedule + compute + output resolution via HyperBEAM `dev_push`.
         Eliminates the extra client HTTP round-trip.
         """
-        push_url = f"{base_url}/~node-process@1.0/{process_name}/push/output~message@1.0/body"
+        push_url = f"{base_url}/~node-process@1.0/{process_name}/push/output/body"
         data = self._http_post_json(push_url, payload)
         return self._unwrap_ao_body(data)
 
@@ -123,7 +134,7 @@ class StateEngineClient:
             return self.primary_url
         raise RuntimeError(f"Genesis did not report a primary_url: {body}")
 
-    def write_point(self, point_id: str, x: float, y: float) -> Dict[str, Any]:
+    def write_point(self, point_id: str, x: float, y: float, client_signer: Optional[str] = None) -> Dict[str, Any]:
         """
         Writes a 2D coordinate point to the Primary Process in 1 single HTTP `/push` hop.
         Returns feedback ONLY after Primary + Shared Data (SD1 & SD2) confirm
@@ -136,7 +147,8 @@ class StateEngineClient:
             "action": "Write-Point",
             "id": str(point_id),
             "x": float(x),
-            "y": float(y)
+            "y": float(y),
+            "client_signer": client_signer or self.client_signer
         }
 
         now_body = self._push_process_body(self.primary_url, "primary", payload)

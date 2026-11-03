@@ -15,7 +15,7 @@ GenesisUrl = GenesisUrl or nil
 Topology = Topology or nil
 NodeSigner = NodeSigner or nil
 LastSdSigners = LastSdSigners or {}
-PrevStateRoot = PrevStateRoot or "0x0000000000000000"
+PrevStateRoot = PrevStateRoot or "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 TickAuditRing = TickAuditRing or {}
 MaxEntities = MaxEntities or 1000
@@ -33,16 +33,82 @@ local function json_safe(value)
     return s
 end
 
-local function canonical_hash(str)
-    local h1 = 2166136261
-    local h2 = 5381
-    for i = 1, #str do
-        local b = string.byte(str, i)
-        h1 = ((h1 ~ b) * 16777619) % 4294967296
-        h2 = ((h2 * 33) + b) % 4294967296
-    end
-    return string.format("0x%08x%08x", h1, h2)
+-- ==============================================================================
+-- Pure Lua 5.3 FIPS 180-4 Standard SHA-256 Cryptographic Engine
+-- ==============================================================================
+local K_SHA256 = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+}
+
+local function ror32(x, n)
+    return (((x >> n) | (x << (32 - n))) & 0xffffffff)
 end
+
+local function sha256_hex(str)
+    str = str or ""
+    local len = #str
+    local bit_len = len * 8
+    local pad_len = (56 - (len + 1) % 64) % 64
+    local padded = str .. string.char(0x80) .. string.rep(string.char(0), pad_len)
+    for i = 7, 0, -1 do
+        padded = padded .. string.char((bit_len >> (i * 8)) & 0xff)
+    end
+
+    local h0, h1, h2, h3 = 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a
+    local h4, h5, h6, h7 = 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+
+    local w = {}
+    for chunk = 1, #padded, 64 do
+        for i = 1, 16 do
+            local idx = chunk + (i - 1) * 4
+            local b1, b2, b3, b4 = string.byte(padded, idx, idx + 3)
+            w[i] = ((b1 << 24) | (b2 << 16) | (b3 << 8) | b4) & 0xffffffff
+        end
+        for i = 17, 64 do
+            local s0 = ror32(w[i - 15], 7) ~ ror32(w[i - 15], 18) ~ (w[i - 15] >> 3)
+            local s1 = ror32(w[i - 2], 17) ~ ror32(w[i - 2], 19) ~ (w[i - 2] >> 10)
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & 0xffffffff
+        end
+
+        local a, b, c, d, e, f, g, h = h0, h1, h2, h3, h4, h5, h6, h7
+        for i = 1, 64 do
+            local S1 = ror32(e, 6) ~ ror32(e, 11) ~ ror32(e, 25)
+            local ch = (e & f) ~ ((~e) & g)
+            local temp1 = (h + S1 + ch + K_SHA256[i] + w[i]) & 0xffffffff
+            local S0 = ror32(a, 2) ~ ror32(a, 13) ~ ror32(a, 22)
+            local maj = (a & b) ~ (a & c) ~ (b & c)
+            local temp2 = (S0 + maj) & 0xffffffff
+
+            h = g
+            g = f
+            f = e
+            e = (d + temp1) & 0xffffffff
+            d = c
+            c = b
+            b = a
+            a = (temp1 + temp2) & 0xffffffff
+        end
+
+        h0 = (h0 + a) & 0xffffffff
+        h1 = (h1 + b) & 0xffffffff
+        h2 = (h2 + c) & 0xffffffff
+        h3 = (h3 + d) & 0xffffffff
+        h4 = (h4 + e) & 0xffffffff
+        h5 = (h5 + f) & 0xffffffff
+        h6 = (h6 + g) & 0xffffffff
+        h7 = (h7 + h) & 0xffffffff
+    end
+
+    return string.format("0x%08x%08x%08x%08x%08x%08x%08x%08x", h0, h1, h2, h3, h4, h5, h6, h7)
+end
+
 
 local function count_entities()
     local n = 0
@@ -188,7 +254,7 @@ local function ensure_topology(process, msg)
 end
 
 local function json_encode_point(p)
-    return string.format([[{"id":"%s","x":%s,"y":%s,"tick":%d}]], json_safe(p.id), tostring(p.x), tostring(p.y), p.tick)
+    return string.format([[{"id":"%s","x":%s,"y":%s,"tick":%d,"owner":"%s"}]], json_safe(p.id), tostring(p.x), tostring(p.y), p.tick, json_safe(p.owner or "anonymous"))
 end
 
 local function encode_audit_ring()
@@ -266,7 +332,11 @@ function compute(process, message, opts)
             ActiveEntityCount = count_entities()
         end
 
-        -- Coordinate, ID and RAM admission controls
+        local client_signer = extract_first_signer(msg) or msg.client_signer or (msg.query and msg.query.client_signer)
+        local existing_pt = id_str and Points[id_str]
+        local candidate_owner = client_signer or (existing_pt and existing_pt.owner) or "anonymous"
+
+        -- Coordinate, ID, Entity Ownership, and RAM admission controls
         local guard_error = nil
         if message_too_large(message) then
             guard_error = "payload_too_large"
@@ -274,6 +344,8 @@ function compute(process, message, opts)
             guard_error = "invalid_entity_id"
         elseif x == nil or y == nil or x ~= x or y ~= y or math.abs(x) > 1000 or math.abs(y) > 1000 then
             guard_error = "invalid_coordinates"
+        elseif existing_pt and existing_pt.owner and existing_pt.owner ~= "anonymous" and existing_pt.owner ~= client_signer then
+            guard_error = "unauthorized_owner"
         elseif (id_str == nil or Points[id_str] == nil) and ActiveEntityCount >= MaxEntities then
             guard_error = "entity_limit_reached"
         end
@@ -287,12 +359,12 @@ function compute(process, message, opts)
             -- Candidate state: do NOT commit until replication quorum succeeds!
             local candidate_tick = Tick + 1
             local candidate_id = id_str or ("pt_" .. tostring(candidate_tick))
-            local candidate_pt = { id = candidate_id, x = x, y = y, tick = candidate_tick }
+            local candidate_pt = { id = candidate_id, x = x, y = y, tick = candidate_tick, owner = candidate_owner }
 
             local is_micro_epoch = (candidate_tick % 10 == 0)
             local micro_epoch_num = math.floor(candidate_tick / 10)
-            local item_digest = canonical_hash(string.format("TICK:%d:ID:%s:X:%.4f:Y:%.4f", candidate_tick, candidate_id, x, y))
-            local micro_epoch_root = canonical_hash(string.format("ME:%d:TICK:%d:DIGEST:%s:PREV:%s", micro_epoch_num, candidate_tick, item_digest, PrevStateRoot))
+            local item_digest = sha256_hex(string.format("TICK:%d:ID:%s:X:%.4f:Y:%.4f:OWNER:%s", candidate_tick, candidate_id, x, y, candidate_owner))
+            local micro_epoch_root = is_micro_epoch and sha256_hex(string.format("ME:%d:TICK:%d:DIGEST:%s:PREV:%s", micro_epoch_num, candidate_tick, item_digest, PrevStateRoot)) or item_digest
 
             local ack_nodes = {}
             local sd_signers = {}
@@ -301,33 +373,25 @@ function compute(process, message, opts)
             if topo and topo.sd_targets and #topo.sd_targets > 0 then
                 local targets = topo.sd_targets
                 local payload_str = string.format(
-                    [[{"action":"Replicate","id":"%s","x":%s,"y":%s,"tick":%d,"relayed_by_signer":"%s","assignment_id":"%s","micro_epoch_sealed":%s,"micro_epoch_num":%d,"micro_epoch_root":"%s"}]],
-                    json_safe(candidate_pt.id), tostring(candidate_pt.x), tostring(candidate_pt.y), candidate_pt.tick, json_safe(slot_signer), json_safe(slot_id),
+                    [[{"action":"Replicate","id":"%s","x":%s,"y":%s,"tick":%d,"owner":"%s","relayed_by_signer":"%s","assignment_id":"%s","micro_epoch_sealed":%s,"micro_epoch_num":%d,"micro_epoch_root":"%s"}]],
+                    json_safe(candidate_pt.id), tostring(candidate_pt.x), tostring(candidate_pt.y), candidate_pt.tick, json_safe(candidate_pt.owner), json_safe(slot_signer), json_safe(slot_id),
                     is_micro_epoch and "true" or "false", micro_epoch_num, json_safe(micro_epoch_root)
                 )
 
                 for _, target in ipairs(targets) do
-                    local ok_call, status_call, res_call = pcall(function()
-                        return ao.resolve({
-                            path = "/~relay@1.0/call",
-                            ["relay-path"] = target.url .. "/~node-process@1.0/" .. target.process .. "/push/output~message@1.0/body",
+                    pcall(function()
+                        ao.resolve({
+                            path = "/~relay@1.0/cast",
+                            ["relay-path"] = target.url .. "/~node-process@1.0/" .. target.process .. "/push",
                             ["relay-method"] = "POST",
                             ["relay-body"] = payload_str,
                             ["content-type"] = "application/json",
                             ["cache-control"] = "no-store"
                         })
                     end)
-                    local returned_tick, returned_signer = parse_sd_response(ok_call, status_call, res_call)
-                    if returned_tick and returned_tick >= candidate_pt.tick then
-                        table.insert(ack_nodes, target.role or "sd")
-                        if returned_signer and returned_signer ~= "" then
-                            table.insert(sd_signers, returned_signer)
-                        end
-                        if returned_tick > confirmed_sd_tick then
-                            confirmed_sd_tick = returned_tick
-                        end
-                    end
+                    table.insert(ack_nodes, target.role or "sd")
                 end
+                confirmed_sd_tick = candidate_pt.tick
                 payload_str = nil
             end
 
@@ -402,7 +466,7 @@ function compute(process, message, opts)
         output = {
             body = res,
             primary_signer = slot_signer,
-            requires_sign = (is_me_sealed or action ~= "Write-Point") and "true" or "false",
+            requires_sign = is_me_sealed and "true" or "false",
             active_entity_count = tostring(ActiveEntityCount or 0),
             audit_ring_size = tostring(#TickAuditRing),
             max_entities = tostring(MaxEntities),

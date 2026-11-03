@@ -198,6 +198,60 @@ def main():
     assert_test(len(res_write["sd_acked_nodes"]) >= 1, f"At least 1 SD replica confirmed (got {res_write['sd_acked_nodes']})")
     assert_test(res_write["sd_persistence"] == "ram_latest+lmdb_disk", "Persistence verified as ram_latest+lmdb_disk")
 
+    # -------------------------------------------------------------------------
+    # TEST 9: Client Entity Ownership Enforcement
+    # -------------------------------------------------------------------------
+    print(f"\n{BOLD}--- [Test 9] Client Entity Ownership Protection ---{RESET}")
+    res_alice = client.write_point("pt_owned_01", 10.0, 20.0, client_signer="alice_signer_key")
+    assert_test(res_alice["status"] == "ok", "Alice successfully creates and owns pt_owned_01")
+    assert_test(res_alice["point"].get("owner") == "alice_signer_key", "Entity owner recorded as alice_signer_key")
+
+    push_primary = f"{primary_url}/~node-process@1.0/primary/push/output~message@1.0/body"
+    res_bob = post_process_json(push_primary, {
+        "action": "Write-Point",
+        "id": "pt_owned_01",
+        "x": 99.0,
+        "y": 99.0,
+        "client_signer": "bob_unauthorized_key"
+    })
+    assert_test(res_bob.get("status") == "error_unauthorized_owner", "Unauthorized client write rejected with error_unauthorized_owner")
+
+    res_anon = post_process_json(push_primary, {
+        "action": "Write-Point",
+        "id": "pt_owned_01",
+        "x": 88.0,
+        "y": 88.0
+    })
+    assert_test(res_anon.get("status") == "error_unauthorized_owner", "Anonymous write to owned entity rejected with error_unauthorized_owner")
+
+    res_alice_update = client.write_point("pt_owned_01", 15.0, 25.0, client_signer="alice_signer_key")
+    assert_test(res_alice_update["status"] == "ok", "Alice successfully updates her owned point")
+
+    # -------------------------------------------------------------------------
+    # TEST 10: Cryptographic SHA-256 State Roots (FIPS 180-4 Standard)
+    # -------------------------------------------------------------------------
+    print(f"\n{BOLD}--- [Test 10] FIPS 180-4 SHA-256 Cryptographic State Roots ---{RESET}")
+    sealed_res = None
+    for i in range(15):
+        w = client.write_point(f"pt_sha_test_{i}", float(i), float(i))
+        if w.get("micro_epoch_sealed") is True:
+            sealed_res = w
+            break
+
+    assert_test(sealed_res is not None, "Micro-epoch seal triggered at tick multiple of 10")
+    me_root = sealed_res.get("micro_epoch_root", "")
+    assert_test(len(me_root) == 66 and me_root.startswith("0x"), f"Primary Micro-Epoch State Root is authentic 256-bit SHA-256 ({me_root[:18]})")
+
+    sd1_push = "http://127.0.0.1:8735/~node-process@1.0/sd1/push/output~message@1.0/body"
+    sd1_res = post_process_json(sd1_push, {"action": "Get-Replica-State"})
+    sd1_root = sd1_res.get("state_root", "")
+    assert_test(len(sd1_root) == 66 and sd1_root.startswith("0x"), f"Shared Data Replica State Root is authentic 256-bit SHA-256 ({sd1_root[:18]})")
+
+    arbit_push = "http://127.0.0.1:8737/~node-process@1.0/arbit/push/output~message@1.0/body"
+    arbit_res = post_process_json(arbit_push, {"action": "Get-Official-State"})
+    arbit_root = arbit_res.get("state_root", "")
+    assert_test(len(arbit_root) == 66 and arbit_root.startswith("0x"), f"Arbit Official State Root is authentic 256-bit SHA-256 ({arbit_root[:18]})")
+
     print(f"\n{GREEN}{BOLD}======================================================================{RESET}")
     print(f"{GREEN}{BOLD}  ALL {PASSED_TESTS}/{TOTAL_TESTS} SECURITY & FAILURE MODE TESTS PASSED!{RESET}")
     print(f"{GREEN}{BOLD}======================================================================{RESET}\n")

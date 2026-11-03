@@ -1,10 +1,12 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 
 # HyperBEAM cluster runtime data
+_build/
+logs/
 engine/data/*/lmdb/
 engine/data/*/*.log
 engine/data/*/erl_crash.dump

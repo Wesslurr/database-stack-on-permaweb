@@ -95,7 +95,9 @@ def main():
             "scheduler-device": "scheduler@1.0",
             "push-device": "push@1.0",
             "node-role": role,
-            "requires-sign": True,
+            "requires-sign": role in ("genesis", "arbit"),
+            "scheduler-commitment-spec": "ans104@1.0" if role in ("genesis", "arbit") else "httpsig@1.0",
+            "scheduler_commitment_spec": "ans104@1.0" if role in ("genesis", "arbit") else "httpsig@1.0",
             "module": {
                 "content-type": "text/x-lua",
                 "body": script_body,
@@ -115,6 +117,7 @@ def main():
             "ao-types": 'atom=("store-module")',
             "store-module": "hb_store_lmdb",
             "name": os.path.join(DATA_DIR, node["name"], "lmdb"),
+            "sync": False,
         }
 
         # Tiered Storage Policy:
@@ -122,8 +125,8 @@ def main():
         # - SD1 / SD2 / Arbit / Genesis: Pure LMDB Disk (`hb_store_lmdb` ONLY — 80% disk, minimal RAM)
         node_store = volatile_store if is_primary else lmdb_store
         stores = [node_store]
-        # Micro-Epoch alignment: snapshot every 10 ticks across worker processes
-        snapshot_slots = 10
+        # Micro-Epoch alignment: Primary stays fast in RAM; replicas snapshot every 10 ticks
+        snapshot_slots = 1000 if is_primary else 10
         # Primary is a bounded RAM tier: reject oversized requests at the HTTP
         # layer. Other tiers keep a more permissive ceiling for checkpoints.
         http_max_body = 65536 if is_primary else 1048576
@@ -131,6 +134,9 @@ def main():
         if not is_primary:
             os.makedirs(os.path.join(DATA_DIR, node["name"], "lmdb"), exist_ok=True)
 
+        # Micro-Epoch signing: Genesis and Arbit sign official topology & settlements,
+        # while Primary & SD hot path runs ultra-fast in-memory/disk quorum without per-tick RSA bottleneck
+        is_auth_authority = role in ("genesis", "arbit")
         cfg = {
             "port": node["port"],
             "priv_key_location": os.path.join(DATA_DIR, node["name"], "wallet.json"),
@@ -146,9 +152,10 @@ def main():
             "process_workers": True,
             "scheduling-mode": "local_confirmation",
             "scheduling_mode": "local_confirmation",
-            # Primary uses Micro-Epoch signing (moves are ultra-fast In-Memory Quorum, sealed every 10 ticks via RSA)
-            "force-signed": not is_primary,
-            "force_signed": not is_primary,
+            "scheduler-default-commitment-spec": "ans104@1.0" if is_auth_authority else "httpsig@1.0",
+            "scheduler_default_commitment_spec": "ans104@1.0" if is_auth_authority else "httpsig@1.0",
+            "force-signed": is_auth_authority,
+            "force_signed": is_auth_authority,
             "process-snapshot-slots": snapshot_slots,
             "process_snapshot_slots": snapshot_slots,
             "process-snapshot-time": False,
