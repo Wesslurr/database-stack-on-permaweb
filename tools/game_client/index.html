@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -472,7 +472,7 @@
         let existingPoint = null;
         try {
           // 1. Direct targeted Read-Point on Primary RAM
-          const readRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output~message@1.0/body`, {
+          const readRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output/body`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -496,7 +496,7 @@
         if (!existingPoint) {
           try {
             // 2. Fallback check SD1 replica Read-Point
-            const sdRead = await fetch(`http://${HOST}:8735/~node-process@1.0/sd1/push/output~message@1.0/body`, {
+            const sdRead = await fetch(`http://${HOST}:8735/~node-process@1.0/sd1/push/output/body`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
@@ -581,7 +581,7 @@
 
       try {
         // Single-hop schedule + compute + commit resolution via HyperBEAM dev_push
-        const pushRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output~message@1.0/body`, {
+        const pushRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output/body`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -592,7 +592,8 @@
             action: "Write-Point",
             id: PLAYER_ID,
             x: nx,
-            y: ny
+            y: ny,
+            client_signer: "player_red_signer"
           })
         });
         if (!pushRes.ok) throw new Error(`Push HTTP ${pushRes.status}`);
