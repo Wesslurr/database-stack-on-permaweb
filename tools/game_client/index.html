@@ -79,11 +79,11 @@
 
     .main-grid {
       display: grid;
-      grid-template-columns: 560px 1fr;
+      grid-template-columns: 940px 1fr;
       gap: 16px;
       align-items: start;
     }
-    @media (max-width: 1100px) {
+    @media (max-width: 1500px) {
       .main-grid { grid-template-columns: 1fr; }
     }
     .card {
@@ -222,6 +222,108 @@
     .log-entry .ts { color: #64748b; }
     .log-entry .ack { color: var(--green); font-weight: 600; }
     .log-entry .err { color: var(--red); font-weight: 600; }
+
+    /* ---------- Arena wrapper + hover tooltip ---------- */
+    .arena-wrap { position: relative; }
+    canvas#arena { width: 100%; height: auto; max-width: 900px; }
+    .tooltip {
+      position: absolute;
+      pointer-events: none;
+      background: rgba(7, 10, 16, 0.94);
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 6px 9px;
+      font-size: 0.72rem;
+      font-family: monospace;
+      color: #e2e8f0;
+      white-space: nowrap;
+      display: none;
+      z-index: 5;
+    }
+
+    /* ---------- Swarm simulation panel ---------- */
+    .swarm-panel {
+      margin-top: 12px;
+      background: #0b101d;
+      border: 1px solid #1e293b;
+      border-left: 4px solid var(--purple);
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+    .swarm-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .swarm-head h3 {
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--purple);
+    }
+    .btn {
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #f8fafc;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .btn:hover { border-color: var(--cyan); }
+    .btn.primary { background: rgba(168, 85, 247, 0.18); border-color: rgba(168, 85, 247, 0.6); }
+    .btn.running { background: rgba(16, 185, 129, 0.18); border-color: rgba(16, 185, 129, 0.6); color: var(--green); }
+    .btn-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .slider-row {
+      display: grid;
+      grid-template-columns: 170px 1fr 92px;
+      gap: 10px;
+      align-items: center;
+      font-size: 0.76rem;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+    .slider-row input[type=range] { width: 100%; accent-color: var(--purple); }
+    .slider-row .sval { color: #f8fafc; font-weight: 700; text-align: right; font-family: monospace; }
+    .swarm-stats {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .swarm-stats .metric .val { font-size: 0.92rem; }
+    .swarm-note { font-size: 0.68rem; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+    .toggle { font-size: 0.74rem; color: var(--muted); display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+
+    /* ---------- Entity legend chips ---------- */
+    .legend {
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      max-height: 92px;
+      overflow-y: auto;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.66rem;
+      font-family: monospace;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #0d1424;
+      border: 1px solid #1e293b;
+      color: #cbd5e1;
+      cursor: default;
+    }
+    .chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .chip.hl { border-color: #f8fafc; color: #fff; }
   </style>
 </head>
 <body>
@@ -243,11 +345,14 @@
     <!-- Left Column: Interactive 2D Arena -->
     <div class="card">
       <div class="card-header">
-        <h2>2D Coordinate Arena (Entity: <code>player_red</code>)</h2>
+        <h2>2D Cartesian Arena — <span id="arenaCount">0</span> Entities (<code>player_red</code> + <span id="arenaSimCount">0</span> Simulated)</h2>
         <span style="font-size: 0.75rem; color: var(--muted);">Click arena or use WASD / Arrow Keys</span>
       </div>
 
-      <canvas id="arena" width="520" height="380"></canvas>
+      <div class="arena-wrap">
+        <canvas id="arena" width="900" height="600"></canvas>
+        <div class="tooltip" id="tooltip"></div>
+      </div>
 
       <div class="controls-bar">
         <div>
@@ -258,8 +363,56 @@
           or <span class="kbd">Arrow Keys</span> (Step: 20px)
         </div>
         <div>
-          <span style="color:#94a3b8;">◯ Dashed White = Input Target</span> &nbsp;|&nbsp;
-          <span style="color:#ef4444; font-weight:700;">● Solid Red = Confirmed SD Backup</span>
+          <span style="color:#94a3b8;">◯ Dashed = Input Target</span> &nbsp;|&nbsp;
+          <span style="color:#ef4444; font-weight:700;">● Red = player_red (Confirmed)</span> &nbsp;|&nbsp;
+          <span style="background:linear-gradient(90deg,#22d3ee,#a855f7,#f59e0b,#10b981);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:700;">● Colored = Simulated Entities (Confirmed SD Backup)</span>
+        </div>
+      </div>
+
+      <!-- Entity legend: one colored chip per confirmed entity -->
+      <div class="legend" id="legend"></div>
+
+      <!-- Swarm Simulation Panel -->
+      <div class="swarm-panel">
+        <div class="swarm-head">
+          <h3>Swarm Simulation — Random Walk of All Simulated Entities</h3>
+          <div class="btn-row">
+            <button class="btn primary" id="btnSwarm">▶ Start Swarm</button>
+            <button class="btn" id="btnScatter">✦ Scatter Once</button>
+            <label class="toggle"><input type="checkbox" id="chkLabels" /> Show all labels</label>
+            <label class="toggle"><input type="checkbox" id="chkTrails" checked /> Trails</label>
+          </div>
+        </div>
+        <div class="slider-row">
+          <span>Move interval (every entity):</span>
+          <input type="range" id="sldInterval" min="20" max="5000" step="10" value="1000" />
+          <span class="sval" id="valInterval">1000 ms</span>
+        </div>
+        <div class="slider-row">
+          <span>Step size (max px per move):</span>
+          <input type="range" id="sldStep" min="5" max="80" step="5" value="30" />
+          <span class="sval" id="valStep">30 px</span>
+        </div>
+        <div class="slider-row">
+          <span>Max in-flight writes:</span>
+          <input type="range" id="sldInflight" min="1" max="8" step="1" value="2" />
+          <span class="sval" id="valInflight">2</span>
+        </div>
+        <div class="swarm-stats">
+          <div class="metric"><div class="label">Requested</div><div class="val" id="stTarget">0 w/s</div></div>
+          <div class="metric"><div class="label">Achieved (ACKed)</div><div class="val green" id="stAchieved">0 w/s</div></div>
+          <div class="metric"><div class="label">Avg Write RTT</div><div class="val cyan" id="stRtt">— ms</div></div>
+          <div class="metric"><div class="label">Total ACKed / Errors</div><div class="val amber" id="stTotal">0 / 0</div></div>
+          <div class="metric"><div class="label">Coalesced (skipped)</div><div class="val" id="stSkipped">0</div></div>
+        </div>
+        <div class="swarm-note">
+          Every interval, each simulated entity picks a new random target. Writes go through the same
+          <code>Write-Point</code> path as <code>player_red</code> (Primary RAM → SD1/SD2 replication), signed with that entity's own owner.
+          If an entity still has a write in flight, its newest target replaces the pending one ("coalesced") — so <strong>Achieved</strong>
+          shows the real throughput the Primary sustains, not just what was requested.
+          <br><strong>Measured locally:</strong> the Primary handles writes one at a time and tops out at ~10 writes/s total
+          (2 in flight is best; more only increases latency). With 35 entities, each entity can really update about every ~3.5 s.
+          Shorter intervals still work, but extra targets get coalesced. <code>player_red</code> shares the same queue, so WASD gets slower while the swarm runs.
         </div>
       </div>
 
@@ -385,8 +538,8 @@
     const GENESIS_URL = `http://${HOST}:8733`;
     const PLAYER_ID = "player_red";
     const STEP = 20;
-    const BOUNDS_X = 220;
-    const BOUNDS_Y = 150;
+    const BOUNDS_X = 430;
+    const BOUNDS_Y = 280;
     const NO_CACHE_HEADERS = {
       "Cache-Control": "no-cache, no-store",
       "Pragma": "no-cache"
@@ -413,6 +566,263 @@
 
     const canvas = document.getElementById("arena");
     const ctx = canvas.getContext("2d");
+
+    // ================= Multi-entity store (all points in Primary RAM) =================
+    // id -> { id, x, y, tick, owner, rx, ry, tx, ty, trail[], color, inflight, pending }
+    const entities = new Map();
+    let colorIndex = new Map();
+    let hoveredId = null;
+
+    // Distinct neon colors: golden-angle hue spacing over the sorted id list,
+    // skipping the red band (hue 340..20) so player_red stays unique.
+    function recomputeColors() {
+      const ids = [...entities.keys()].filter(id => id !== PLAYER_ID).sort();
+      colorIndex = new Map();
+      ids.forEach((id, i) => {
+        const hue = 22 + ((i * 137.508) % 316);
+        const light = i % 2 === 0 ? 60 : 68;
+        colorIndex.set(id, `hsl(${hue.toFixed(1)}, 88%, ${light}%)`);
+      });
+    }
+    function colorOf(id) {
+      if (id === PLAYER_ID) return "#ef4444";
+      return colorIndex.get(id) || "hsl(190, 88%, 60%)";
+    }
+
+    function upsertEntity(p) {
+      if (!p || p.id == null) return;
+      const id = String(p.id);
+      const x = Number(p.x), y = Number(p.y), tick = Number(p.tick || 0);
+      let e = entities.get(id);
+      if (!e) {
+        e = { id, x, y, tick, owner: p.owner || "anonymous", rx: x, ry: y, tx: x, ty: y, trail: [], inflight: false, pending: null };
+        entities.set(id, e);
+        recomputeColors();
+        renderLegend();
+        return;
+      }
+      if (tick < e.tick) return; // never regress to an older tick
+      if (tick > e.tick) {
+        e.trail.push({ x: e.x, y: e.y });
+        if (e.trail.length > 8) e.trail.shift();
+      }
+      e.x = x; e.y = y; e.tick = tick;
+      if (p.owner) e.owner = p.owner;
+      if (!e.inflight && !e.pending) { e.tx = x; e.ty = y; }
+    }
+
+    function renderLegend() {
+      const box = document.getElementById("legend");
+      const ids = [...entities.keys()].sort((a, b) => (a === PLAYER_ID ? -1 : b === PLAYER_ID ? 1 : a.localeCompare(b)));
+      box.innerHTML = ids.map(id =>
+        `<span class="chip" data-id="${id}"><i style="background:${colorOf(id)};box-shadow:0 0 6px ${colorOf(id)}"></i>${id}</span>`
+      ).join("");
+      box.querySelectorAll(".chip").forEach(ch => {
+        ch.addEventListener("mouseenter", () => { hoveredId = ch.dataset.id; });
+        ch.addEventListener("mouseleave", () => { hoveredId = null; });
+      });
+      const total = entities.size;
+      const sim = [...entities.keys()].filter(id => id !== PLAYER_ID).length;
+      document.getElementById("arenaCount").textContent = total;
+      document.getElementById("arenaSimCount").textContent = sim;
+    }
+
+    async function pollAllEntities() {
+      if (!discoveredPrimaryUrl) return;
+      try {
+        const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output/body`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+          cache: "no-store",
+          body: JSON.stringify({ action: "Read-All" })
+        });
+        if (!res.ok) return;
+        const data = unwrapBody(await res.json());
+        if (data && Array.isArray(data.points)) {
+          const seen = new Set();
+          data.points.forEach(p => {
+            seen.add(String(p.id));
+            if (String(p.id) === PLAYER_ID) return; // player_red handled by its own path
+            upsertEntity(p);
+          });
+          // keep player_red in the store for counting/legend
+          if (!entities.has(PLAYER_ID)) {
+            entities.set(PLAYER_ID, { id: PLAYER_ID, x: 0, y: 0, tick: 0, owner: "player_red_signer", rx: 0, ry: 0, tx: 0, ty: 0, trail: [] });
+            renderLegend();
+          }
+          let removed = false;
+          for (const id of [...entities.keys()]) {
+            if (id !== PLAYER_ID && !seen.has(id)) { entities.delete(id); removed = true; }
+          }
+          if (removed) { recomputeColors(); renderLegend(); }
+          document.getElementById("inspPrimaryTotal").textContent =
+            `${data.points.length} (${seen.has(PLAYER_ID) ? 1 : 0} Player + ${data.points.length - (seen.has(PLAYER_ID) ? 1 : 0)} Simulated in RAM)`;
+        }
+      } catch (_) {}
+    }
+
+    // ================= Swarm simulation =================
+    const swarm = {
+      running: false,
+      intervalMs: 1000,
+      step: 30,
+      maxInflight: 2,
+      inflight: 0,
+      timer: null,
+      queue: [],          // ids with a pending target, FIFO
+      acked: 0,
+      errors: 0,
+      skipped: 0,
+      requested: 0,
+      rttSum: 0,
+      rttN: 0,
+      ackTimes: [],       // timestamps of ACKs for the rolling rate
+      reqTimes: []
+    };
+
+    function simIds() {
+      return [...entities.keys()].filter(id => id !== PLAYER_ID);
+    }
+
+    function planTarget(e, scatter = false) {
+      let nx, ny;
+      if (scatter) {
+        nx = Math.round((Math.random() * 2 - 1) * BOUNDS_X);
+        ny = Math.round((Math.random() * 2 - 1) * BOUNDS_Y);
+      } else {
+        const ang = Math.random() * Math.PI * 2;
+        const r = swarm.step * (0.4 + Math.random() * 0.6);
+        const bx = e.pending ? e.pending.x : e.x;
+        const by = e.pending ? e.pending.y : e.y;
+        nx = Math.round(bx + Math.cos(ang) * r);
+        ny = Math.round(by + Math.sin(ang) * r);
+        // bounce off the walls
+        if (Math.abs(nx) > BOUNDS_X) nx = Math.sign(nx) * (2 * BOUNDS_X - Math.abs(nx));
+        if (Math.abs(ny) > BOUNDS_Y) ny = Math.sign(ny) * (2 * BOUNDS_Y - Math.abs(ny));
+      }
+      nx = Math.max(-BOUNDS_X, Math.min(BOUNDS_X, nx));
+      ny = Math.max(-BOUNDS_Y, Math.min(BOUNDS_Y, ny));
+      if (e.pending) swarm.skipped++;
+      else swarm.queue.push(e.id);
+      e.pending = { x: nx, y: ny };
+      e.tx = nx; e.ty = ny;
+      swarm.requested++;
+      swarm.reqTimes.push(performance.now());
+    }
+
+    function swarmTick(scatter = false) {
+      simIds().forEach(id => planTarget(entities.get(id), scatter));
+      pumpSwarm();
+    }
+
+    function pumpSwarm() {
+      while (swarm.inflight < swarm.maxInflight && swarm.queue.length > 0) {
+        const id = swarm.queue.shift();
+        const e = entities.get(id);
+        if (!e || !e.pending || e.inflight) continue;
+        const target = e.pending;
+        e.pending = null;
+        e.inflight = true;
+        swarm.inflight++;
+        sendSwarmWrite(e, target).finally(() => {
+          e.inflight = false;
+          swarm.inflight--;
+          if (e.pending && !swarm.queue.includes(e.id)) swarm.queue.push(e.id);
+          pumpSwarm();
+        });
+      }
+    }
+
+    async function sendSwarmWrite(e, target) {
+      if (!discoveredPrimaryUrl) return;
+      const t0 = performance.now();
+      try {
+        const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output/body`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+          body: JSON.stringify({
+            action: "Write-Point",
+            id: e.id,
+            x: target.x,
+            y: target.y,
+            client_signer: e.owner && e.owner !== "anonymous" ? e.owner : "sim_swarm_worker"
+          })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const r = unwrapBody(await res.json());
+        const rtt = performance.now() - t0;
+        if (r && r.status === "ok" && r.sd_ack === true && r.point) {
+          upsertEntity(r.point);
+          swarm.acked++;
+          swarm.rttSum += rtt; swarm.rttN++;
+          swarm.ackTimes.push(performance.now());
+        } else {
+          swarm.errors++;
+          if (swarm.errors <= 5 || swarm.errors % 50 === 0) {
+            appendLog(`<span class="err">Swarm write rejected</span> <code>${e.id}</code>: ${r && r.status}`);
+          }
+        }
+      } catch (err) {
+        swarm.errors++;
+        if (swarm.errors <= 5 || swarm.errors % 50 === 0) {
+          appendLog(`<span class="err">Swarm write error</span> <code>${e.id}</code>: ${err.message}`);
+        }
+      }
+    }
+
+    function restartSwarmTimer() {
+      if (swarm.timer) clearInterval(swarm.timer);
+      swarm.timer = swarm.running ? setInterval(() => swarmTick(false), swarm.intervalMs) : null;
+    }
+
+    function updateSwarmStats() {
+      const now = performance.now();
+      const win = 2000;
+      swarm.ackTimes = swarm.ackTimes.filter(t => now - t < win);
+      swarm.reqTimes = swarm.reqTimes.filter(t => now - t < win);
+      const n = simIds().length;
+      const requestedRate = swarm.running ? (n * 1000 / swarm.intervalMs) : 0;
+      document.getElementById("stTarget").textContent = `${requestedRate.toFixed(1)} w/s`;
+      document.getElementById("stAchieved").textContent = `${(swarm.ackTimes.length * 1000 / win).toFixed(1)} w/s`;
+      document.getElementById("stRtt").textContent = swarm.rttN ? `${Math.round(swarm.rttSum / swarm.rttN)} ms` : "— ms";
+      document.getElementById("stTotal").textContent = `${swarm.acked} / ${swarm.errors}`;
+      document.getElementById("stSkipped").textContent = `${swarm.skipped}`;
+      // reset RTT average every ~5s so it reflects current load
+      if (swarm.rttN > 200) { swarm.rttSum = swarm.rttSum / swarm.rttN * 20; swarm.rttN = 20; }
+    }
+
+    function bindSwarmControls() {
+      const btn = document.getElementById("btnSwarm");
+      btn.addEventListener("click", () => {
+        swarm.running = !swarm.running;
+        btn.textContent = swarm.running ? "⏸ Pause Swarm" : "▶ Start Swarm";
+        btn.className = swarm.running ? "btn running" : "btn primary";
+        appendLog(swarm.running
+          ? `Swarm simulation <span class="ack">STARTED</span>: ${simIds().length} entities, every ${swarm.intervalMs} ms`
+          : `Swarm simulation <strong>PAUSED</strong>`);
+        restartSwarmTimer();
+        if (swarm.running) swarmTick(false);
+      });
+      document.getElementById("btnScatter").addEventListener("click", () => swarmTick(true));
+
+      const sI = document.getElementById("sldInterval");
+      sI.addEventListener("input", () => {
+        swarm.intervalMs = Number(sI.value);
+        document.getElementById("valInterval").textContent = `${swarm.intervalMs} ms`;
+        restartSwarmTimer();
+      });
+      const sS = document.getElementById("sldStep");
+      sS.addEventListener("input", () => {
+        swarm.step = Number(sS.value);
+        document.getElementById("valStep").textContent = `${swarm.step} px`;
+      });
+      const sF = document.getElementById("sldInflight");
+      sF.addEventListener("input", () => {
+        swarm.maxInflight = Number(sF.value);
+        document.getElementById("valInflight").textContent = `${swarm.maxInflight}`;
+        pumpSwarm();
+      });
+    }
 
     function appendLog(html) {
       const box = document.getElementById("txLog");
@@ -682,16 +1092,50 @@
       else if (key === "d" || e.key === "ArrowRight") { e.preventDefault(); moveBy(STEP, 0); }
     });
 
-    canvas.addEventListener("click", (e) => {
+    function canvasPoint(e) {
       const rect = canvas.getBoundingClientRect();
-      const cx = canvas.width / 2;
-      const cy = canvas.height / 2;
-      const clickX = Math.round((e.clientX - rect.left - cx) / 10) * 10;
-      const clickY = Math.round((e.clientY - rect.top - cy) / 10) * 10;
+      const sx = canvas.width / rect.width;
+      const sy = canvas.height / rect.height;
+      return {
+        x: (e.clientX - rect.left) * sx - canvas.width / 2,
+        y: (e.clientY - rect.top) * sy - canvas.height / 2
+      };
+    }
+
+    canvas.addEventListener("click", (e) => {
+      const p = canvasPoint(e);
+      const clickX = Math.round(p.x / 10) * 10;
+      const clickY = Math.round(p.y / 10) * 10;
       targetPos.x = Math.max(-BOUNDS_X, Math.min(BOUNDS_X, clickX));
       targetPos.y = Math.max(-BOUNDS_Y, Math.min(BOUNDS_Y, clickY));
       writeCoordinate(targetPos.x, targetPos.y);
     });
+
+    const tooltip = document.getElementById("tooltip");
+    canvas.addEventListener("mousemove", (e) => {
+      const p = canvasPoint(e);
+      let best = null, bestD = 14 * 14;
+      const check = (id, x, y) => {
+        const d = (x - p.x) ** 2 + (y - p.y) ** 2;
+        if (d < bestD) { bestD = d; best = id; }
+      };
+      check(PLAYER_ID, renderPos.x, renderPos.y);
+      for (const ent of entities.values()) if (ent.id !== PLAYER_ID) check(ent.id, ent.rx, ent.ry);
+      hoveredId = best;
+      if (best) {
+        const ent = best === PLAYER_ID ? { ...confirmedPos, owner: "player_red_signer" } : entities.get(best);
+        const rect = canvas.getBoundingClientRect();
+        tooltip.style.display = "block";
+        tooltip.style.left = `${e.clientX - rect.left + 14}px`;
+        tooltip.style.top = `${e.clientY - rect.top + 10}px`;
+        tooltip.innerHTML =
+          `<span style="color:${colorOf(best)};font-weight:700;">● ${best}</span><br>` +
+          `pos (${ent.x}, ${ent.y}) · tick #${ent.tick}<br>owner: ${ent.owner || "anonymous"}`;
+      } else {
+        tooltip.style.display = "none";
+      }
+    });
+    canvas.addEventListener("mouseleave", () => { hoveredId = null; tooltip.style.display = "none"; });
 
     async function pollTelemetryMetrics() {
       try {
@@ -761,7 +1205,6 @@
         };
 
         document.getElementById("inspPrimaryCoord").textContent = findPlayer(pState);
-        document.getElementById("inspPrimaryTotal").textContent = pState.active_entity_count ?? pState.total ?? "—";
         document.getElementById("inspPrimaryTopo").textContent = pState.topology_source || "—";
         document.getElementById("inspPrimarySdTargets").textContent = (pState.sd_targets || []).join(", ");
 
@@ -856,21 +1299,114 @@
       ctx.fillText("HYPERSTACK PIPELINE: Primary(:8734) → SD1/SD2(:8735/6) → Arbit(:8737) → Arweave L1(:1984)", 12, 18);
       ctx.restore();
 
-      // Draw coordinate grid
-      ctx.strokeStyle = "#131c2e";
+      // ---- Cartesian grid: minor every 10px, major every 50px, labeled every 100px ----
       ctx.lineWidth = 1;
-      for (let x = 0; x <= w; x += 20) {
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-      }
-      for (let y = 0; y <= h; y += 20) {
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
-      }
+      ctx.strokeStyle = "#0e1524";
+      for (let gx = cx % 10; gx <= w; gx += 10) { ctx.beginPath(); ctx.moveTo(gx + 0.5, 0); ctx.lineTo(gx + 0.5, h); ctx.stroke(); }
+      for (let gy = cy % 10; gy <= h; gy += 10) { ctx.beginPath(); ctx.moveTo(0, gy + 0.5); ctx.lineTo(w, gy + 0.5); ctx.stroke(); }
+      ctx.strokeStyle = "#16213a";
+      for (let gx = cx % 50; gx <= w; gx += 50) { ctx.beginPath(); ctx.moveTo(gx + 0.5, 0); ctx.lineTo(gx + 0.5, h); ctx.stroke(); }
+      for (let gy = cy % 50; gy <= h; gy += 50) { ctx.beginPath(); ctx.moveTo(0, gy + 0.5); ctx.lineTo(w, gy + 0.5); ctx.stroke(); }
 
-      // Draw X/Y axes
-      ctx.strokeStyle = "#263554";
+      // Arena boundary (allowed movement area)
+      ctx.save();
+      ctx.strokeStyle = "rgba(168, 85, 247, 0.35)";
+      ctx.setLineDash([6, 6]);
+      ctx.strokeRect(cx - BOUNDS_X + 0.5, cy - BOUNDS_Y + 0.5, BOUNDS_X * 2, BOUNDS_Y * 2);
+      ctx.restore();
+
+      // Main X/Y axes with arrowheads
+      ctx.strokeStyle = "#3b4f7a";
+      ctx.fillStyle = "#3b4f7a";
       ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(w, cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(8, cy + 0.5); ctx.lineTo(w - 8, cy + 0.5); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx + 0.5, 36); ctx.lineTo(cx + 0.5, h - 8); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(w - 4, cy + 0.5); ctx.lineTo(w - 14, cy - 4.5); ctx.lineTo(w - 14, cy + 5.5); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(cx + 0.5, 30); ctx.lineTo(cx - 4.5, 40); ctx.lineTo(cx + 5.5, 40); ctx.fill();
+      ctx.font = "bold 11px monospace";
+      ctx.fillStyle = "#7c8db5";
+      ctx.textAlign = "right"; ctx.fillText("+X", w - 8, cy - 9);
+      ctx.textAlign = "left"; ctx.fillText("+Y (screen down)", cx + 8, h - 10);
+
+      // Tick marks + labels every 100px
+      ctx.font = "10px monospace";
+      ctx.fillStyle = "#5b6b8c";
+      ctx.strokeStyle = "#3b4f7a";
+      for (let v = -400; v <= 400; v += 50) {
+        if (v === 0) continue;
+        const major = v % 100 === 0;
+        const px = cx + v;
+        ctx.beginPath(); ctx.moveTo(px + 0.5, cy - (major ? 5 : 3)); ctx.lineTo(px + 0.5, cy + (major ? 5 : 3)); ctx.stroke();
+        if (major) { ctx.textAlign = "center"; ctx.fillText(String(v), px, cy + 17); }
+      }
+      for (let v = -250; v <= 250; v += 50) {
+        if (v === 0) continue;
+        const major = v % 100 === 0;
+        const py = cy + v;
+        ctx.beginPath(); ctx.moveTo(cx - (major ? 5 : 3), py + 0.5); ctx.lineTo(cx + (major ? 5 : 3), py + 0.5); ctx.stroke();
+        if (major) { ctx.textAlign = "right"; ctx.fillText(String(v), cx - 8, py + 3); }
+      }
+      // Origin marker
+      ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fillStyle = "#7c8db5"; ctx.fill();
+      ctx.textAlign = "right"; ctx.fillText("0", cx - 6, cy + 14);
+
+      // ---- Simulated entities (each with its own confirmed-SD-backup color) ----
+      const showLabels = document.getElementById("chkLabels").checked;
+      const showTrails = document.getElementById("chkTrails").checked;
+      for (const ent of entities.values()) {
+        if (ent.id === PLAYER_ID) continue;
+        ent.rx += (ent.x - ent.rx) * 0.3;
+        ent.ry += (ent.y - ent.ry) * 0.3;
+        const col = colorOf(ent.id);
+        const px = cx + ent.rx, py = cy + ent.ry;
+        const isHover = hoveredId === ent.id;
+
+        if (showTrails && ent.trail.length) {
+          ctx.save();
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.5;
+          ctx.globalAlpha = 0.35;
+          ctx.beginPath();
+          ctx.moveTo(cx + ent.trail[0].x, cy + ent.trail[0].y);
+          for (let i = 1; i < ent.trail.length; i++) ctx.lineTo(cx + ent.trail[i].x, cy + ent.trail[i].y);
+          ctx.lineTo(px, py);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // In-flight target: thin dashed ring in entity color (not yet ACKed)
+        if (ent.tx !== ent.x || ent.ty !== ent.y) {
+          ctx.save();
+          ctx.strokeStyle = col;
+          ctx.globalAlpha = 0.55;
+          ctx.setLineDash([2, 3]);
+          ctx.beginPath(); ctx.arc(cx + ent.tx, cy + ent.ty, 8, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+        }
+
+        // Confirmed position (moves only after Primary + SD ACK)
+        ctx.save();
+        ctx.shadowColor = col;
+        ctx.shadowBlur = isHover ? 22 : 12;
+        ctx.fillStyle = col;
+        ctx.beginPath(); ctx.arc(px, py, isHover ? 9 : 7, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(255,255,255,0.75)";
+        ctx.stroke();
+        ctx.restore();
+
+        if (showLabels || isHover) {
+          ctx.font = "9px monospace";
+          ctx.textAlign = "center";
+          const label = ent.id;
+          const tw = ctx.measureText(label).width + 8;
+          ctx.fillStyle = "rgba(7,10,16,0.82)";
+          ctx.fillRect(px - tw / 2, py - 22, tw, 12);
+          ctx.fillStyle = col;
+          ctx.fillText(label, px, py - 13);
+        }
+      }
 
       // Draw replicated trail
       for (let i = 0; i < trail.length; i++) {
@@ -924,8 +1460,12 @@
       requestAnimationFrame(renderLoop);
     }
 
-    discoverFromGenesis();
+    discoverFromGenesis().then(pollAllEntities);
+    bindSwarmControls();
     setInterval(pollClusterState, 1200);
+    // Full entity refresh; slower while the swarm runs (write ACKs already update entities)
+    setInterval(() => { if (!swarm.running || Math.random() < 0.34) pollAllEntities(); }, 700);
+    setInterval(updateSwarmStats, 250);
     requestAnimationFrame(renderLoop);
   </script>
 </body>
