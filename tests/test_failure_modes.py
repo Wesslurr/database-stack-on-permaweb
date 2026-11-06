@@ -77,6 +77,12 @@ def main():
         "action": "Ack", "batch_id": bid, "tick": int(accepted.get("tick_to")) + 100,
         "state_root": accepted.get("target_root"), "role": "forged_sd"})
     checker.check(code == 409, "Ack with a wrong tick is 409", str(code))
+    code, body, _ = client._push(client.primary_url, "primary", {
+        "action": "Ack", "batch_id": bid, "tick": accepted.get("tick_to"),
+        "state_root": accepted.get("target_root"), "role": "forged_sd", "epoch": 999})
+    checker.check(code == 409 and body.get("status") == "epoch_mismatch",
+                  "Ack from a foreign epoch is 409 epoch_mismatch",
+                  "%s %s" % (code, body.get("status")))
     checker.check(client.read_all_points().get("tick") == before.get("tick"),
                   "forged Acks changed nothing")
 

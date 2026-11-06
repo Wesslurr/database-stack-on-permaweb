@@ -330,7 +330,7 @@
   <header>
     <div class="title-group">
       <h1><span class="dot-red"></span> HyperStack State Engine — Red Circle WASD Latency Benchmark</h1>
-      <p><strong>HyperStack Status (100% Localhost Multi-Node Environment):</strong> Client discovers Primary via <strong>Genesis (:8733)</strong>. All 6 nodes run purely on localhost loopback with zero WAN latency. The Red Circle serves as a live visual benchmark to inspect true local database latency without client-side prediction. A move is shown as <strong>accepted</strong> as soon as the Primary returns <code>202</code>, and only moves to <strong>confirmed</strong> after a verified <code>200 replicated</code> (batch id + tick + canonical root echoed by an SD). If the quorum cannot be reached the UI shows <code>503 quorum_unavailable</code> and the circle stays put. <em>(Measured loopback baseline: L0 accept p50 ~198 ms, L1 confirmed p50 ~580 ms — see README; the 16.6 ms figure is the simulation tick budget, not the commit round trip.)</em></p>
+      <p><strong>HyperStack Status (100% Localhost Multi-Node Environment):</strong> Client discovers Primary via <strong>Genesis (:8733)</strong>. All 6 nodes run purely on localhost loopback with zero WAN latency. The Red Circle serves as a live visual benchmark to inspect true local database latency without client-side prediction. A move is shown as <strong>accepted</strong> as soon as the Primary returns <code>202</code>, and only moves to <strong>confirmed</strong> after a verified <code>200 replicated</code> (batch id + tick + canonical root echoed by an SD). If the quorum cannot be reached the UI shows <code>503 quorum_unavailable</code> and the circle stays put. <em>(Measured loopback baseline: L0 accept p50 ~207 ms, L1 confirmed p50 ~620 ms — see README; the 16.6 ms figure is the simulation tick budget, not the commit round trip.)</em></p>
     </div>
     <div class="badge-row">
       <div class="badge" id="genesisBadge">Genesis (:8733): <strong>Connecting...</strong></div>
@@ -411,7 +411,7 @@
           <code>Write-Point</code> path as <code>player_red</code> (Primary RAM → SD1/SD2 replication), signed with that entity's own owner.
           If an entity still has a write in flight, its newest target replaces the pending one ("coalesced") — so <strong>Achieved</strong>
           shows the real throughput the Primary sustains, not just what was requested.
-          <br><strong>Measured locally:</strong> L1 confirmed p50 &asymp; 580 ms (L0 accept p50 &asymp; 198 ms). With 2 writes
+          <br><strong>Measured locally:</strong> L1 confirmed p50 &asymp; 620 ms (L0 accept p50 &asymp; 207 ms). With 2 writes
           in flight the cluster confirms roughly 3–4 writes/s in total; more in flight only increases latency. With 35
           entities, each entity can really update about every ~10 s. Shorter intervals still work, but extra targets get
           coalesced. <code>player_red</code> shares the same queue, so WASD gets slower while the swarm runs.
@@ -426,7 +426,7 @@
         <div class="metric">
           <div class="label">Local Write + Quorum RTT</div>
           <div class="val green" id="hudRtt">— ms</div>
-          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;">L1: accepted &rarr; verified 200 (p50 ~580 ms loopback)</div>
+          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;">L1: accepted &rarr; verified 200 (p50 ~620 ms loopback)</div>
         </div>
         <div class="metric">
           <div class="label">Confirmed SD Tick</div>

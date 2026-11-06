@@ -1,9 +1,9 @@
 {
   "cluster": {
     "computed_slot_size": {
-      "primary": 516320,
-      "sd1": 334522,
-      "sd2": 334522
+      "primary": 521343,
+      "sd1": 333681,
+      "sd2": 333681
     },
     "lmdb_mb": {
       "arbit": 1.0,
@@ -14,34 +14,34 @@
     },
     "roots_equal": true,
     "rss_mb": {
-      "genesis": 131.9,
-      "primary": 419.0,
-      "sd1": 175.5,
-      "sd2": 172.9
+      "genesis": 132.2,
+      "primary": 420.2,
+      "sd1": 176.6,
+      "sd2": 177.2
     },
     "state": {
       "primary": {
         "entities": 140,
         "http": 200,
-        "state_root": "0x0984ff689ca35cbc62e08db3910a0935afce2f6f3aad44a47a564cb554b738a4",
-        "tick": 278
+        "state_root": "0xe7e5afdf6bafd44ba42f1ccd9dca0be4f10af36a13695f101e34a3beb194e98a",
+        "tick": 280
       },
       "sd1": {
         "entities": 140,
         "http": 200,
-        "state_root": "0x0984ff689ca35cbc62e08db3910a0935afce2f6f3aad44a47a564cb554b738a4",
-        "tick": 278
+        "state_root": "0xe7e5afdf6bafd44ba42f1ccd9dca0be4f10af36a13695f101e34a3beb194e98a",
+        "tick": 280
       },
       "sd2": {
         "entities": 140,
         "http": 200,
-        "state_root": "0x0984ff689ca35cbc62e08db3910a0935afce2f6f3aad44a47a564cb554b738a4",
-        "tick": 278
+        "state_root": "0xe7e5afdf6bafd44ba42f1ccd9dca0be4f10af36a13695f101e34a3beb194e98a",
+        "tick": 280
       }
     }
   },
-  "generated_at": "2026-11-06T15:48:35+0700",
-  "git_commit": "64c9bf5",
+  "generated_at": "2026-11-06T15:59:56+0700",
+  "git_commit": "3030ad4",
   "notes": [
     "keep-alive single connection per node; loopback only",
     "write_202 measures L0 accept, write_confirm measures L1 (poll Batch-Status)",
@@ -50,92 +50,92 @@
   ],
   "paths": {
     "advance": {
-      "max_ms": 579.582,
-      "min_ms": 67.695,
+      "max_ms": 264.227,
+      "min_ms": 94.598,
       "n": 40,
-      "p50_ms": 205.76,
-      "p90_ms": 268.71,
-      "p99_ms": 579.582,
+      "p50_ms": 203.486,
+      "p90_ms": 227.565,
+      "p99_ms": 264.227,
       "status_codes": [
         202
       ]
     },
     "cold_hydrate": {
-      "max_ms": 161.721,
-      "min_ms": 145.657,
+      "max_ms": 163.457,
+      "min_ms": 147.342,
       "n": 20,
-      "p50_ms": 155.764,
-      "p90_ms": 160.197,
-      "p99_ms": 161.721,
+      "p50_ms": 152.864,
+      "p90_ms": 158.554,
+      "p99_ms": 163.457,
       "status_codes": [
         200
       ]
     },
     "now": {
-      "max_ms": 14.035,
-      "min_ms": 11.283,
+      "max_ms": 13.114,
+      "min_ms": 11.043,
       "n": 150,
-      "p50_ms": 12.095,
-      "p90_ms": 12.753,
-      "p99_ms": 13.766,
+      "p50_ms": 11.986,
+      "p90_ms": 12.39,
+      "p99_ms": 12.62,
       "status_codes": [
         200
       ]
     },
     "read_push": {
-      "max_ms": 158.051,
-      "min_ms": 79.197,
+      "max_ms": 197.823,
+      "min_ms": 79.024,
       "n": 60,
-      "p50_ms": 81.244,
-      "p90_ms": 82.735,
-      "p99_ms": 126.958,
+      "p50_ms": 80.319,
+      "p90_ms": 81.886,
+      "p99_ms": 82.247,
       "response_bytes_p50": 11355,
       "status_codes": [
         200
       ]
     },
     "relay_call_sd": {
-      "max_ms": 260.17,
-      "min_ms": 148.055,
+      "max_ms": 164.789,
+      "min_ms": 146.482,
       "n": 60,
-      "p50_ms": 154.565,
-      "p90_ms": 161.164,
-      "p99_ms": 168.268,
+      "p50_ms": 151.291,
+      "p90_ms": 155.243,
+      "p99_ms": 158.479,
       "response_bytes_p50": 8312,
       "status_codes": [
         200
       ]
     },
     "sd_direct": {
-      "max_ms": 90.635,
-      "min_ms": 73.941,
+      "max_ms": 94.11,
+      "min_ms": 74.619,
       "n": 60,
-      "p50_ms": 79.751,
-      "p90_ms": 83.842,
-      "p99_ms": 86.064,
+      "p50_ms": 79.953,
+      "p90_ms": 84.896,
+      "p99_ms": 89.059,
       "response_bytes_p50": 11089,
       "status_codes": [
         200
       ]
     },
     "write_202": {
-      "max_ms": 671.989,
-      "min_ms": 110.452,
+      "max_ms": 480.388,
+      "min_ms": 112.711,
       "n": 60,
-      "p50_ms": 197.754,
-      "p90_ms": 252.161,
-      "p99_ms": 312.986,
+      "p50_ms": 207.311,
+      "p90_ms": 256.012,
+      "p99_ms": 379.267,
       "status_codes": [
         202
       ]
     },
     "write_confirm": {
-      "max_ms": 779.385,
-      "min_ms": 529.493,
+      "max_ms": 702.824,
+      "min_ms": 523.088,
       "n": 40,
-      "p50_ms": 580.048,
-      "p90_ms": 711.702,
-      "p99_ms": 779.385,
+      "p50_ms": 620.38,
+      "p90_ms": 662.957,
+      "p99_ms": 702.824,
       "status_codes": [
         200
       ]

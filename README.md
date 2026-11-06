@@ -7,18 +7,18 @@
 [![Permaweb](https://img.shields.io/badge/Arweave-Permaweb-black?logo=arweave)](https://arweave.org/)
 [![AO Compute](https://img.shields.io/badge/AO-Compute-blue)](https://ao.g8way.io/)
 [![HyperBEAM](https://img.shields.io/badge/HyperBEAM-Erlang%20OTP%2026-red)](https://github.com/permaweb/hyperbeam)
-[![Tests](https://img.shields.io/badge/Live%20Cluster%20Tests-65%2F65%20Passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/Live%20Cluster%20Tests-66%2F66%20Passing-brightgreen)](tests/)
 
 > [!IMPORTANT]
 > ### 🚧 Project Status & Local Latency Transparency Notice
 > **HyperStack** is an experimental multi-tier state engine and distributed replication stack built directly on **HyperBEAM, AO Compute, and Arweave L1**.
 >
 > - **100% Localhost Multi-Node Architecture:** Everything in this repository currently runs **completely locally** on a single host machine across isolated localhost ports (`:1984`, `:8733`, `:8734`, `:8735`, `:8736`, `:8737`, `:8080`). There is **zero wide-area network (WAN) or public internet overhead** involved in these tests—all measurements represent raw local loopback and inter-process communication.
-> - **Under Active Construction:** This codebase represents an architectural foundation currently under active construction and beta testing. The multi-tier pipeline, dual-replica LMDB disk persistence, quorum ACK verification and Arweave L1 settlement are exercised by a live-cluster suite (30 contract checks + 35 failure-injection checks), not by self-reported assertions.
+> - **Under Active Construction:** This codebase represents an architectural foundation currently under active construction and beta testing. The multi-tier pipeline, dual-replica LMDB disk persistence, quorum ACK verification and Arweave L1 settlement are exercised by a live-cluster suite (30 contract checks + 36 failure-injection checks), not by self-reported assertions.
 > - **ACK contract (non-negotiable):** an HTTP `200` with `ack: "replicated"` is returned **only after a real SD response was verified** (echoed `batch_id`, tick and canonical root). A `202` means only *accepted into Primary RAM*. If the quorum cannot be reached the Primary returns `503 quorum_unavailable` and `Tick` / `StateRoot` stay unchanged.
-> - **Measured local latency (loopback, keep-alive, 2026-11-06):** L0 accept (`202`) **p50 198 ms / p90 252 ms**; L1 confirmed (`200`) **p50 580 ms / p90 712 ms / p99 779 ms**; `/now` read **p50 12 ms**; `/push` snapshot read **p50 81 ms**; one `relay/call` to an SD **p50 155 ms**. These are the honest numbers from `tools/bench_baseline.json`; nothing is predicted or faked.
-> - **Why the 60 Hz tick target is not met:** the simulation tick budget (`16.6 ms`) is a pure-RAM quantity, while an honest replicated ACK must pay at least one network round trip **plus** the Lua/relay cost inside HyperBEAM. Each `relay/cast` inside `luerl` costs ~40–60 ms, so the L1 commit chain (write → SD apply+ack → Primary verification) is bounded by process dispatch, not by the tick loop. The ROADMAP SLO table is revised from measurement, not from hope.
-> - **Slot size target not met:** the Primary's computed slot is **~516 KB** with 140 entities (target `≤ 8 KB`). Sharding removed the O(N) full-state re-hash from the commit path, but the slot still carries the process state. This is tracked as an open gap, not hidden.
+> - **Measured local latency (loopback, keep-alive, 2026-11-06):** L0 accept (`202`) **p50 207 ms / p90 256 ms / p99 379 ms**; L1 confirmed (`200`) **p50 620 ms / p90 663 ms / p99 703 ms**; `/now` read **p50 12 ms**; `/push` snapshot read **p50 80 ms**; one `relay/call` to an SD **p50 151 ms**. These are the honest numbers from `tools/bench_baseline.json`; nothing is predicted or faked.
+> - **Why the 60 Hz tick target is not met:** the simulation tick budget (`16.6 ms`) is a pure-RAM quantity, while an honest replicated ACK must pay at least one network round trip **plus** the Lua/relay cost inside HyperBEAM. Each `relay/cast` inside `luerl` costs tens of milliseconds (~70 ms in the measured path), so the L1 commit chain (write → SD apply+ack → Primary verification) is bounded by process dispatch, not by the tick loop. The ROADMAP SLO table is revised from measurement, not from hope.
+> - **Slot size target not met:** the Primary's computed slot is **~521 KB** with 140 entities (target `≤ 8 KB`). Sharding removed the O(N) full-state re-hash from the commit path, but the slot still carries the process state. This is tracked as an open gap, not hidden.
 > - **Interactive Visual Latency Proving Ground (The Red Circle Test):** To expose this local latency transparently without artificial figures or client-side prediction, the repo provides an interactive WASD web client (`http://localhost:8080/`). The Red Circle moves strictly after the verified backend confirmation, and the UI shows separate **accepted** and **confirmed** badges.
 
 **HyperStack** is designed for high-frequency interactive applications (such as real-time multiplayer games, streaming IoT coordinates, and low-latency order books) operating natively on the **AO Compute & HyperBEAM** architecture with decentralized settlement on **Arweave L1**.
@@ -147,7 +147,7 @@ Verifies the ACK contract end to end: `202 accepted` never claims replication, `
 python3 tests/test_e2e_2d_points.py
 ```
 
-### Failure-injection test (35 checks, destructive)
+### Failure-injection test (36 checks, destructive)
 Kills and restarts replicas with tmux: quorum failure → `503` with unchanged tick/root, forged Acks → `409`, retry of the same `batch_id` → exactly one apply, failover SD1 → SD2, rejoining replica catches up from the delta log, out-of-order commits are buffered and stale ones rejected.
 ```bash
 python3 tests/test_failure_modes.py --yes
@@ -185,16 +185,16 @@ From `tools/bench_baseline.json` (`BENCH_N=150`, keep-alive, single local host):
 
 | Path | p50 | p90 | p99 | Notes |
 | :--- | ---: | ---: | ---: | :--- |
-| `/now` read | 12 ms | 13 ms | 14 ms | no new slot |
-| `write_202` (L0 accept) | 198 ms | 252 ms | 313 ms | one `relay/cast` + Lua compute |
-| `write_confirm` (L1 replicated) | 580 ms | 712 ms | 779 ms | write + SD apply/Ack + Primary verification |
-| `advance` (batch close) | 206 ms | 269 ms | 580 ms | |
-| `read_push` (snapshot) | 81 ms | 83 ms | 127 ms | creates a slot |
-| `relay_call_sd` (Primary → SD1) | 155 ms | 161 ms | 168 ms | measured through `Probe-SD` |
-| `sd_direct` (direct SD1 call) | 80 ms | 84 ms | 86 ms | network/process floor |
-| `cold_hydrate` (full state from SD1) | 156 ms | 160 ms | 162 ms | recovery proxy |
+| `/now` read | 12.0 ms | 12.4 ms | 12.6 ms | no new slot |
+| `write_202` (L0 accept) | 207 ms | 256 ms | 379 ms | one `relay/cast` + Lua compute |
+| `write_confirm` (L1 replicated) | 620 ms | 663 ms | 703 ms | write + SD apply/Ack + Primary verification |
+| `advance` (batch close) | 203 ms | 228 ms | 264 ms | |
+| `read_push` (snapshot) | 80 ms | 82 ms | 82 ms | creates a slot |
+| `relay_call_sd` (Primary → SD1) | 151 ms | 155 ms | 158 ms | measured through `Probe-SD` |
+| `sd_direct` (direct SD1 call) | 80 ms | 85 ms | 89 ms | network/process floor |
+| `cold_hydrate` (full state from SD1) | 153 ms | 159 ms | 163 ms | recovery proxy |
 
-Cluster at measurement time: 140 entities, Primary RSS **419 MB**, SD RSS ~174 MB, LMDB ~27 MB per SD, computed slot **516 KB** (Primary) / 334 KB (SD), roots equal on all three nodes.
+Cluster at measurement time: 140 entities, Primary RSS **420 MB**, SD RSS ~177 MB, LMDB ~27 MB per SD, computed slot **521 KB** (Primary) / 334 KB (SD), roots equal on all three nodes.
 
 The L1 number is the honest cost of the contract: `202` + one SD round trip + verification. Cutting it requires transport/device changes (or an L2-style batched settlement), not a smaller number in the README.
 

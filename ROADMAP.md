@@ -47,13 +47,13 @@ memisahkannya, dan tetap menjaga: **ack ke client hanya dikirim setelah replikas
 | F0 baseline | selesai (kecuali soak & cache size) | `tools/bench_baseline.json`, README diperbarui |
 | F1 ingress/batching | fungsional, target latency tidak tercapai | 202 = 198 ms p50 (target 5 ms) |
 | F2 quorum jujur | selesai & diuji | 503 + state utuh, failover SD2, dedup, tanpa `sd_ack` palsu |
-| F3 delta + shard | root kanonik selesai; slot belum kecil | 32 shard incremental; slot 516 KB (target 8 KB) |
+| F3 delta + shard | root kanonik selesai; slot belum kecil | 32 shard incremental; slot 521 KB (target 8 KB) |
 | F4 recovery | selesai (kecuali tombstone/soak) | hydrate 156 ms, root identik |
 | F5 verify-don't-trust | sebagian | payload guard + owner-spoof 403; signature per-item & `force-signed` SD belum |
-| F6 tes jujur | sebagian | 30/30 + 35/35 live checks; mutation test terbukti merah; soak belum |
+| F6 tes jujur | sebagian | 30/30 + 36/36 live checks; mutation test terbukti merah; soak belum |
 
 Tes live terakhir: `python3 tests/test_e2e_2d_points.py` → **30/30**;
-`python3 tests/test_failure_modes.py --yes` → **35/35**.
+`python3 tests/test_failure_modes.py --yes` → **36/36**.
 
 ---
 
@@ -66,15 +66,15 @@ Tes live terakhir: `python3 tests/test_e2e_2d_points.py` → **30/30**;
 | Metrik | Target awal (hipotesis) | Terukur 2026-11-06 | Status |
 |--------|-------------------------|--------------------|--------|
 | Sim tick | 60 Hz (2 tick/batch) | 2 tick/batch diterapkan | tick loop bukan bottleneck |
-| Batch commit | 30 Hz (window ~33 ms) | `advance` p50 **206 ms** (~4,9 batch/s) | belum tercapai |
-| ACK L0 (202) | ≤ 5 ms p50 | **198 ms p50 / 252 p90 / 313 p99** | belum; 1 `relay/cast` + compute Lua |
-| ACK L1 (200) | ≤ 35 ms p50, ≤ 70 ms p99 | **580 ms p50 / 712 p90 / 779 p99** | belum; floor kontrak (202 + 1 RTT SD + verifikasi) |
+| Batch commit | 30 Hz (window ~33 ms) | `advance` p50 **203 ms** (~4,9 batch/s) | belum tercapai |
+| ACK L0 (202) | ≤ 5 ms p50 | **207 ms p50 / 256 p90 / 379 p99** | belum; 1 `relay/cast` + compute Lua |
+| ACK L1 (200) | ≤ 35 ms p50, ≤ 70 ms p99 | **620 ms p50 / 663 p90 / 703 p99** | belum; floor kontrak (202 + 1 RTT SD + verifikasi) |
 | Throughput | 1.000 input/s, 30 batch/s | belum diukur (bench masih sekuensial) | belum |
-| Ukuran slot | ≤ 8 KB, konstan | **516 KB** primary, 334 KB SD | belum; slot masih membawa state O(N) |
-| RAM/node | ≤ 250 MB, flat 1 jam | **419 MB** primary, ~174 MB SD | belum; soak belum dijalankan |
+| Ukuran slot | ≤ 8 KB, konstan | **521 KB** primary, 334 KB SD | belum; slot masih membawa state O(N) |
+| RAM/node | ≤ 250 MB, flat 1 jam | **420 MB** primary, ~177 MB SD | belum; soak belum dijalankan |
 | Disk growth | ≤ 5 MB/menit @ 30 Hz | ~27 MB LMDB per SD setelah bench | belum; soak belum dijalankan |
 | Divergensi state root | 0, root identik 3 node | **0 setelah konvergensi** (repair-driven, bukan instan) | tercapai |
-| Recovery | ≤ 2 s, root identik | `cold_hydrate` **156 ms p50**; root identik | tercapai |
+| Recovery | ≤ 2 s, root identik | `cold_hydrate` **153 ms p50**; root identik | tercapai |
 | Kejujuran ack | `503` saat quorum gagal | **503 + `Tick`/`StateRoot` tidak berubah** (verified) | tercapai |
 
 Catatan penting: "Divergensi 0" berarti **konvergen** setelah hot standby menerima
@@ -184,7 +184,7 @@ window dipangkas. Kontrak protokol di §4 tetap — hanya angka yang berubah.
 **Gate F0:**
 
 - [x] `bench_baseline.json` tersimpan di repo
-- [x] Biaya `relay/call` 1 SD terukur (`relay_call_sd` p50 **155 ms**) — menentukan SLO bagian 2
+- [x] Biaya `relay/call` 1 SD terukur (`relay_call_sd` p50 **151 ms**) — menentukan SLO bagian 2
 - [x] README berisi angka hasil nyata, bukan target
 - [ ] Cache size per node tercatat di JSON **(belum; baru RSS + LMDB + slot)**
 
