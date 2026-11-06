@@ -310,8 +310,8 @@ window dipangkas. Kontrak protokol di §4 tetap — hanya angka yang berubah.
 - [x] `http_max_body` disamakan semua node (65 KB)
 - [ ] `MaxIdLength`, `MaxEntities` disinkronkan ke Genesis
       **(MaxEntities dari Genesis; `MaxIdLength` masih default 128 di Lua)**
-- [ ] Epoch masuk perhitungan quorum set (mencegah split-brain saat epoch berganti)
-      **(epoch dikirim di `Commit`, belum diverifikasi di `Ack`)**
+- [x] Epoch masuk perhitungan quorum set: `Ack` membawa `epoch`, dan Primary
+      menolak (`409 epoch_mismatch`) Ack dari epoch yang berbeda
 
 **Gate F5:**
 

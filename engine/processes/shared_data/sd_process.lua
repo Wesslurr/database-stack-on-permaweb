@@ -427,8 +427,9 @@ local function cast_ack(topo, batch_id, tick, root, sd_signer, node_role)
             ["relay-path"] = topo.primary_url .. "/~node-process@1.0/" .. topo.primary_process .. "/push",
             ["relay-method"] = "POST",
             ["relay-body"] = string.format(
-                '{"action":"Ack","batch_id":"%s","tick":%d,"state_root":"%s","sd_signer":"%s","role":"%s"}',
-                json_safe(batch_id), tick, json_safe(root), json_safe(sd_signer), json_safe(node_role)
+                '{"action":"Ack","batch_id":"%s","tick":%d,"state_root":"%s","sd_signer":"%s","role":"%s","epoch":%d}',
+                json_safe(batch_id), tick, json_safe(root), json_safe(sd_signer), json_safe(node_role),
+                tonumber(CurrentEpoch) or 1
             ),
             ["content-type"] = "application/json",
             ["cache-control"] = "no-store"

@@ -944,6 +944,17 @@ local function handle_ack(msg, suffix)
             claimed_tick and int_str(claimed_tick) or "null", p.tick_to, Tick, StateRoot
         )
     end
+    -- Epoch fencing: an Ack from a different epoch is not part of this quorum
+    -- set, so it can never complete a batch (split-brain guard). Older replicas
+    -- that omit the field are still accepted; the real SD always sends it.
+    local claimed_epoch = tonumber(msg.epoch or (msg.query and msg.query.epoch))
+    local expected_epoch = Topology and tonumber(Topology.epoch) or nil
+    if claimed_epoch ~= nil and expected_epoch ~= nil and claimed_epoch ~= expected_epoch then
+        return 409, string.format(
+            '{"status":"epoch_mismatch","batch_id":"%s","claimed_epoch":%d,"expected_epoch":%d,"tick":%d,"state_root":"%s"}',
+            json_safe(batch_id), claimed_epoch, expected_epoch, Tick, StateRoot
+        )
+    end
 
     acknowledge_batch(p, role)
     PendingBatches[batch_id] = nil
