@@ -1027,7 +1027,7 @@
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
         cache: "no-store",
-        body: JSON.stringify({ action: "Write-Point", id, x, y, client_signer: owner })
+        body: JSON.stringify({ action: "Write-Point", id, x, y, client_signer: owner, flush: true })
       });
       const body = unwrapBody(await res.json());
       return { http: res.status, body };

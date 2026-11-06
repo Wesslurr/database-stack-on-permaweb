@@ -165,6 +165,12 @@ Measures 8 paths with keep-alive connections and writes `tools/bench_baseline.js
 python3 tools/bench_engine.py
 ```
 
+### Mutation test (does the suite actually guard anything?)
+Breaks the Primary's ACK root/tick verification on purpose, rebuilds the cluster, and **requires the failure-injection suite to fail**. The original file is restored and the cluster rebuilt in a trap, whatever happens.
+```bash
+./tests/mutation_ack.sh
+```
+
 ### Gameplay & relog helpers
 ```bash
 python3 tools/simulate_gameplay.py

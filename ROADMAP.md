@@ -50,7 +50,7 @@ memisahkannya, dan tetap menjaga: **ack ke client hanya dikirim setelah replikas
 | F3 delta + shard | root kanonik selesai; slot belum kecil | 32 shard incremental; slot 516 KB (target 8 KB) |
 | F4 recovery | selesai (kecuali tombstone/soak) | hydrate 156 ms, root identik |
 | F5 verify-don't-trust | sebagian | payload guard + owner-spoof 403; signature per-item & `force-signed` SD belum |
-| F6 tes jujur | sebagian | 30/30 + 35/35 live checks; mutation test & soak belum |
+| F6 tes jujur | sebagian | 30/30 + 35/35 live checks; mutation test terbukti merah; soak belum |
 
 Tes live terakhir: `python3 tests/test_e2e_2d_points.py` → **30/30**;
 `python3 tests/test_failure_modes.py --yes` → **35/35**.
@@ -201,8 +201,9 @@ window dipangkas. Kontrak protokol di §4 tetap — hanya angka yang berubah.
 - [x] Cap ticks/batch = 6 (cegah spiral of death; `compute` memblokir proses)
 - [x] Idempotency: retry dengan input sama memakai `batch_id` yang sama
       (**implementasi in-process `SeenInputs`, bukan device `dedup@1.0`**)
-- [ ] UI: polling via `/now` (bukan `/push`) **(belum; UI masih `/push`)**
-- [ ] UI: badge terpisah `accepted` (202) vs `confirmed` (200) **(belum)**
+- [x] UI: polling status via `/now` (slot-free); tabel entitas di-seed sekali, lalu
+      di-update dari ACK tulis (bukan polling `/push`)
+- [x] UI: badge terpisah `accepted` (202) vs `confirmed` (200), plus `503`
 
 **Gate F1:**
 
@@ -337,12 +338,13 @@ window dipangkas. Kontrak protokol di §4 tetap — hanya angka yang berubah.
 - [ ] Replay 1.000 batch → root sama (determinisme) — belum
 - [ ] Soak 1 jam → memori & disk bounded — belum
 - [x] Cold start → state 100% pulih (root identik)
-- [ ] **Mutation test:** rusak `is_quorum` secara sengaja → suite harus **merah**
+- [x] **Mutation test:** rusak verifikasi ACK secara sengaja → suite failure-injection
+      harus **merah** (`tests/mutation_ack.sh`; terbukti merah pada 2026-11-06)
 
 **Gate F6:**
 
-- [ ] Semua tes di atas ada & hijau
-- [ ] Mutation test terintegrasi: satu invariant rusak → suite merah, tidak bisa dilangkahi
+- [ ] Semua tes di atas ada & hijau (masih kurang: delay injection, replay 1.000 batch, soak 1 jam)
+- [x] Mutation test terintegrasi: satu invariant rusak → suite merah, tidak bisa dilangkahi
 
 ---
 

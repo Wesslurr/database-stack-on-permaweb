@@ -567,6 +567,14 @@ local function make_batch_id(seq_from, seq_to, tick_from, digest)
     return string.format("b%d-%d-%d-%s", tick_from, seq_from, seq_to, string.sub(digest, 3, 18))
 end
 
+-- A batch gets its id when the queue opens, not when it closes, so the first
+-- `202 accepted` already carries the id the client can poll while the window
+-- is still filling. `start_batch` reuses it (OpenBatchId).
+local function make_open_batch_id(seq)
+    local digest = sha256_hex("open|" .. int_str(Tick) .. "|" .. int_str(seq) .. "|" .. int_str(RequestClock))
+    return string.format("b%d-%d-%s", Tick, seq, string.sub(digest, 3, 18))
+end
+
 -- Build the delta map (last write wins per entity) from the open queue.
 local function build_delta(queue, tick_to)
     local delta, order = {}, {}
@@ -1148,7 +1156,7 @@ function compute(process, message, opts)
                     if msg.batch_id then
                         OpenBatchId = tostring(msg.batch_id)
                     else
-                        OpenBatchId = nil
+                        OpenBatchId = make_open_batch_id(seq)
                     end
                 end
                 table.insert(Queue, {
