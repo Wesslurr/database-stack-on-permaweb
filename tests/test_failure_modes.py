@@ -1,261 +1,168 @@
 #!/usr/bin/env python3
-"""
-=============================================================================
-HyperStack Security & Failure Modes Verification Suite
-=============================================================================
-Verifies protections against critical vulnerabilities identified in code review:
-- C1: Quorum validation (atomic commit vs rollback)
-- C2: Arbit consensus poisoning defense (excessive tick leaps rejected)
-- C2b: Arbit sequence monotonicity enforcement
-- C3: Genesis unauthorized node registration defense (SSRF & hijack guard)
-- C3b: Genesis URL format validation (injection defense)
-- H1: SD out-of-order write rejection (stale tick rejected)
-- H7: Primary coordinate validation (NaN, Infinity, bounds [-1000, 1000])
-- H7b: Primary entity ID format validation
-=============================================================================
-"""
+"""Failure-injection test for the honest ACK contract.
 
-import sys
-import os
+DESTRUCTIVE: this test kills and restarts replicas with tmux.
+
+    python3 tests/test_failure_modes.py --yes
+"""
 import json
-import urllib.request
-import urllib.error
+import sys
+import time
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from tools.client import StateEngineClient
-
-GREEN = "\033[92m"
-RED = "\033[91m"
-BOLD = "\033[1m"
-CYAN = "\033[96m"
-RESET = "\033[0m"
-
-TOTAL_TESTS = 0
-PASSED_TESTS = 0
-
-
-def assert_test(cond: bool, label: str):
-    global TOTAL_TESTS, PASSED_TESTS
-    TOTAL_TESTS += 1
-    if cond:
-        PASSED_TESTS += 1
-        print(f"  {GREEN}[PASS]{RESET} {label}")
-    else:
-        print(f"  {RED}[FAIL]{RESET} {label}")
-        raise AssertionError(f"Test failed: {label}")
-
-
-def post_process_json(url: str, payload: dict) -> dict:
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json", "Accept": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        res_raw = resp.read().decode("utf-8")
-        parsed = json.loads(res_raw)
-        if isinstance(parsed, dict) and parsed.get("ao-result") == "body" and isinstance(parsed.get("body"), str):
-            return json.loads(parsed["body"])
-        return parsed
+from _harness import (
+    Checker,
+    Contract,
+    PORTS,
+    RED,
+    RESET,
+    StateEngineClient,
+    kill_node,
+    require_cluster,
+    start_node,
+)
 
 
 def main():
-    print(f"\n{BOLD}{CYAN}======================================================================{RESET}")
-    print(f"{BOLD}{CYAN}      HYPERSTACK SECURITY & FAILURE MODES TEST SUITE                  {RESET}")
-    print(f"{BOLD}{CYAN}======================================================================{RESET}\n")
+    if "--yes" not in sys.argv:
+        print("%sThis test kills and restarts hb-sd-1 / hb-sd-2.%s" % (RED, RESET))
+        print("Re-run with: python3 tests/test_failure_modes.py --yes")
+        return 2
 
+    require_cluster()
+    checker = Checker("test_failure_modes")
     client = StateEngineClient()
-    primary_url = client.discover_primary()
+    contract = Contract(client, checker)
+    client.discover_primary()
+    stamp = int(time.time() * 1000) % 10_000_000
 
-    # -------------------------------------------------------------------------
-    # TEST 1: Primary Coordinate Bounds & NaN Guards (H7)
-    # -------------------------------------------------------------------------
-    print(f"{BOLD}--- [Test 1] Primary Coordinate Bounds & NaN Protection (H7) ---{RESET}")
-    # NaN
-    push_url = f"{primary_url}/~node-process@1.0/primary/push/output~message@1.0/body"
-    res_nan = post_process_json(push_url, {"action": "Write-Point", "id": "pt_nan", "x": "NaN", "y": 10.0})
-    assert_test(res_nan.get("status") == "error_invalid_coordinates", "NaN coordinate rejected with error_invalid_coordinates")
+    # Make sure the cluster is healthy before breaking it.
+    base = client.write_point_confirmed("fm_base_%d" % stamp, 1.0, 1.0, ts=stamp, client_signer="tester")
+    checker.check(base.get("http_status") == 200, "baseline write is replicated", str(base)[:300])
+    contract.assert_roots_equal("baseline roots agree")
 
-    # Out of bounds (+99999)
-    res_oob = post_process_json(push_url, {"action": "Write-Point", "id": "pt_oob", "x": 99999.0, "y": 0.0})
-    assert_test(res_oob.get("status") == "error_invalid_coordinates", "Out-of-bounds (+99999) rejected with error_invalid_coordinates")
-
-    # -------------------------------------------------------------------------
-    # TEST 2: Primary Entity ID Format Validation (H7b)
-    # -------------------------------------------------------------------------
-    print(f"\n{BOLD}--- [Test 2] Primary Entity ID Format Validation (H7b) ---{RESET}")
-    # Newlines in ID (injection attempt)
-    res_inject = post_process_json(push_url, {"action": "Write-Point", "id": "pt_bad\ninjection", "x": 10.0, "y": 20.0})
-    assert_test(res_inject.get("status") == "error_invalid_entity_id", "Entity ID with newlines rejected with error_invalid_entity_id")
-
-    # -------------------------------------------------------------------------
-    # TEST 3: Genesis Unauthorized Node Registration (C3)
-    # -------------------------------------------------------------------------
-    print(f"\n{BOLD}--- [Test 3] Genesis Unauthorized Registration Guard (C3) ---{RESET}")
-    genesis_push = "http://127.0.0.1:8733/~node-process@1.0/genesis/push/output~message@1.0/body"
-    res_unauth = post_process_json(genesis_push, {
-        "action": "Register-Node",
-        "role": "primary",
-        "url": "http://127.0.0.1:9999",
-        "caller_signer": "attacker_fake_key"
-    })
-    assert_test(res_unauth.get("status") == "error_unauthorized", "Unauthorized Register-Node rejected with error_unauthorized")
-
-    # -------------------------------------------------------------------------
-    # TEST 4: Genesis URL Injection / SSRF Guard (C3b)
-    # -------------------------------------------------------------------------
-    print(f"\n{BOLD}--- [Test 4] Genesis Malformed / Injection URL Guard (C3b) ---{RESET}")
-    res_bad_url = post_process_json(genesis_push, {
-        "action": "Register-Node",
-        "role": "primary",
-        "url": "http://127.0.0.1:8734\",bad_json:true",
-        "admin_key": "hyperstack_admin_genesis_key"
-    })
-    assert_test(res_bad_url.get("status") == "error_invalid_url", "Malformed URL with injection syntax rejected with error_invalid_url")
-    # Restore Genesis active topology output
-    post_process_json(genesis_push, {"action": "Get-Topology"})
-
-    # -------------------------------------------------------------------------
-    # TEST 5: Shared Data Out-of-Order / Stale Tick Rejection (H1)
-    # -------------------------------------------------------------------------
-    print(f"\n{BOLD}--- [Test 5] Shared Data Stale Tick Guard (H1) ---{RESET}")
-    sd1_push = "http://127.0.0.1:8735/~node-process@1.0/sd1/push/output~message@1.0/body"
-    sd1_now = post_process_json(sd1_push, {"action": "Get-Replica-State"})
-    base_tick = int(sd1_now.get("last_tick") or 0)
-    target_tick = base_tick + 10
-    stale_tick = target_tick - 5
-    entity_id = f"pt_order_{base_tick}"
-
-    # First, write a valid point at target_tick
-    res_sd_ok = post_process_json(sd1_push, {"action": "Replicate", "id": entity_id, "x": 1.0, "y": 2.0, "tick": target_tick})
-    assert_test(res_sd_ok.get("status") == "replicated", f"Valid replication update accepted at tick {target_tick}")
-
-    # Second, send a stale out-of-order write for the same entity at stale_tick
-    res_sd_stale = post_process_json(sd1_push, {"action": "Replicate", "id": entity_id, "x": 9.0, "y": 9.0, "tick": stale_tick})
-    assert_test(res_sd_stale.get("status") == "stale_tick_ignored", f"Stale tick ({stale_tick} <= {target_tick}) ignored with stale_tick_ignored")
-
-    # Verify existing entity at target_tick was NOT overwritten
-    res_read = post_process_json(sd1_push, {"action": "Read-Point", "id": entity_id})
-    assert_test(res_read.get("point", {}).get("tick") == target_tick, f"ReplicaStore retained tick {target_tick}, stale tick did not overwrite")
-    # Restore SD1 active replica state output
-    post_process_json(sd1_push, {"action": "Get-Replica-State"})
-
-    # -------------------------------------------------------------------------
-    # TEST 6: Arbit Consensus Excessive Tick Leap Guard (C2)
-    # -------------------------------------------------------------------------
-    print(f"\n{BOLD}--- [Test 6] Arbit Excessive Tick Leap Poisoning Guard (C2) ---{RESET}")
-    arbit_push = "http://127.0.0.1:8737/~node-process@1.0/arbit/push/output~message@1.0/body"
-    # Attempt to poison ledger with tick 99999999
-    res_leap = post_process_json(arbit_push, {
-        "action": "Commit-Checkpoint",
-        "last_tick": 99999999,
-        "point_count": 100,
-        "diff_seq": 1000
-    })
-    assert_test(res_leap.get("status") == "error_excessive_tick_leap", "Excessive tick leap rejected with error_excessive_tick_leap")
-
-    # -------------------------------------------------------------------------
-    # TEST 7: Arbit Diff Sequence Monotonicity Guard (C2b)
-    # -------------------------------------------------------------------------
-    print(f"\n{BOLD}--- [Test 7] Arbit Diff Sequence Regression Guard (C2b) ---{RESET}")
-    arbit_now = post_process_json(arbit_push, {"action": "Get-Official-State"})
-    arbit_tick = int(arbit_now.get("official_tick") or 0)
-    arbit_seq = int(arbit_now.get("diff_seq") or 0)
-    next_tick = arbit_tick + 5
-    next_seq = arbit_seq + 5
-
-    # Legitimate checkpoint
-    res_valid_chk = post_process_json(arbit_push, {
-        "action": "Commit-Checkpoint",
-        "last_tick": next_tick,
-        "point_count": 6,
-        "diff_seq": next_seq
-    })
-    assert_test(res_valid_chk.get("status") == "committed", f"Legitimate checkpoint accepted at tick {next_tick}, diff_seq {next_seq}")
-
-    # Regression attempt (diff_seq < next_seq)
-    res_regress = post_process_json(arbit_push, {
-        "action": "Commit-Checkpoint",
-        "last_tick": next_tick + 1,
-        "point_count": 6,
-        "diff_seq": next_seq - 1
-    })
-    assert_test(res_regress.get("status") == "error_diff_seq_regression", f"Diff sequence regression ({next_seq - 1} < {next_seq}) rejected with error_diff_seq_regression")
-    # Restore Arbit active consensus state output
-    post_process_json(arbit_push, {"action": "Get-Official-State"})
-
-    # -------------------------------------------------------------------------
-    # TEST 8: Quorum Verification & Signer Propagation (C1, C4)
-    # -------------------------------------------------------------------------
-    print(f"\n{BOLD}--- [Test 8] Primary Majority Quorum & Atomic Write Verification (C1) ---{RESET}")
-    res_write = client.write_point("pt_quorum_test", 50.0, 50.0)
-    assert_test(res_write["status"] == "ok", "Client write succeeds with active SD quorum")
-    assert_test(res_write["sd_ack"] is True, "sd_ack is True indicating verified replication")
-    assert_test(len(res_write["sd_acked_nodes"]) >= 1, f"At least 1 SD replica confirmed (got {res_write['sd_acked_nodes']})")
-    assert_test(res_write["sd_persistence"] == "ram_latest+lmdb_disk", "Persistence verified as ram_latest+lmdb_disk")
-
-    # -------------------------------------------------------------------------
-    # TEST 9: Client Entity Ownership Enforcement
-    # -------------------------------------------------------------------------
-    print(f"\n{BOLD}--- [Test 9] Client Entity Ownership Protection ---{RESET}")
-    res_alice = client.write_point("pt_owned_01", 10.0, 20.0, client_signer="alice_signer_key")
-    assert_test(res_alice["status"] == "ok", "Alice successfully creates and owns pt_owned_01")
-    assert_test(res_alice["point"].get("owner") == "alice_signer_key", "Entity owner recorded as alice_signer_key")
-
-    push_primary = f"{primary_url}/~node-process@1.0/primary/push/output~message@1.0/body"
-    res_bob = post_process_json(push_primary, {
-        "action": "Write-Point",
-        "id": "pt_owned_01",
-        "x": 99.0,
-        "y": 99.0,
-        "client_signer": "bob_unauthorized_key"
-    })
-    assert_test(res_bob.get("status") == "error_unauthorized_owner", "Unauthorized client write rejected with error_unauthorized_owner")
-
-    res_anon = post_process_json(push_primary, {
-        "action": "Write-Point",
-        "id": "pt_owned_01",
-        "x": 88.0,
-        "y": 88.0
-    })
-    assert_test(res_anon.get("status") == "error_unauthorized_owner", "Anonymous write to owned entity rejected with error_unauthorized_owner")
-
-    res_alice_update = client.write_point("pt_owned_01", 15.0, 25.0, client_signer="alice_signer_key")
-    assert_test(res_alice_update["status"] == "ok", "Alice successfully updates her owned point")
-
-    # -------------------------------------------------------------------------
-    # TEST 10: Cryptographic SHA-256 State Roots (FIPS 180-4 Standard)
-    # -------------------------------------------------------------------------
-    print(f"\n{BOLD}--- [Test 10] FIPS 180-4 SHA-256 Cryptographic State Roots ---{RESET}")
-    sealed_res = None
-    for i in range(15):
-        w = client.write_point(f"pt_sha_test_{i}", float(i), float(i))
-        if w.get("micro_epoch_sealed") is True:
-            sealed_res = w
+    print("\n[1] Both replicas down: 503, state untouched, no false 200")
+    checker.check(kill_node("sd1"), "sd1 stopped")
+    checker.check(kill_node("sd2"), "sd2 stopped")
+    before = contract.state()
+    accepted = client.write_point("fm_dead_%d" % stamp, 2.0, 2.0, ts=stamp + 1, client_signer="tester")
+    checker.check(accepted["http_status"] == 202, "write is accepted while quorum is down",
+                  str(accepted["http_status"]))
+    checker.check(accepted["ack"] == "accepted", "accepted is not claimed as replicated")
+    bid = accepted["batch_id"]
+    final = None
+    for _ in range(40):
+        final = client.batch_status(bid)
+        if final.get("http_status") == 503:
             break
+        time.sleep(0.05)
+    checker.check(final and final.get("http_status") == 503,
+                  "unresolved batch reports 503 quorum_unavailable", str(final)[:300])
+    checker.check(final.get("error") == "quorum_unavailable", "503 names the failure honestly")
+    after = contract.state()
+    checker.check(after.get("tick") == before.get("tick"), "tick did not move on quorum failure",
+                  "%s -> %s" % (before.get("tick"), after.get("tick")))
+    checker.check(after.get("state_root") == before.get("state_root"),
+                  "root did not move on quorum failure")
+    checker.check(client.read_point("fm_dead_%d" % stamp).get("status") == "not_found",
+                  "the failed write was never applied")
 
-    assert_test(sealed_res is not None, "Micro-epoch seal triggered at tick multiple of 10")
-    me_root = sealed_res.get("micro_epoch_root", "")
-    assert_test(len(me_root) == 66 and me_root.startswith("0x"), f"Primary Micro-Epoch State Root is authentic 256-bit SHA-256 ({me_root[:18]})")
+    print("\n[2] A forged Ack is rejected (no 200 without root+tick verification)")
+    forged_root = "0x" + "00" * 32
+    code, body, _ = client._push(client.primary_url, "primary", {
+        "action": "Ack", "batch_id": bid, "tick": accepted.get("tick_to"),
+        "state_root": forged_root, "role": "forged_sd"})
+    checker.check(code == 409 and body.get("status") == "ack_mismatch",
+                  "Ack with a wrong root is 409 ack_mismatch", "%s %s" % (code, body.get("status")))
+    code, body, _ = client._push(client.primary_url, "primary", {
+        "action": "Ack", "batch_id": bid, "tick": int(accepted.get("tick_to")) + 100,
+        "state_root": accepted.get("target_root"), "role": "forged_sd"})
+    checker.check(code == 409, "Ack with a wrong tick is 409", str(code))
+    checker.check(client.read_all_points().get("tick") == before.get("tick"),
+                  "forged Acks changed nothing")
 
-    sd1_push = "http://127.0.0.1:8735/~node-process@1.0/sd1/push/output~message@1.0/body"
-    sd1_res = post_process_json(sd1_push, {"action": "Get-Replica-State"})
-    sd1_root = sd1_res.get("state_root", "")
-    assert_test(len(sd1_root) == 66 and sd1_root.startswith("0x"), f"Shared Data Replica State Root is authentic 256-bit SHA-256 ({sd1_root[:18]})")
+    print("\n[3] Replicas return: the SAME batch is retried and commits once")
+    checker.check(start_node("sd1"), "sd1 restarted")
+    checker.check(start_node("sd2"), "sd2 restarted")
+    retry = client.write_point("fm_dead_%d" % stamp, 2.0, 2.0, ts=stamp + 1, client_signer="tester")
+    checker.check(retry["http_status"] == 202, "retry is accepted", str(retry["http_status"]))
+    checker.check(retry["batch_id"] == bid, "retry reuses the original batch_id",
+                  str(retry["batch_id"]))
+    confirmed = client.wait_for_batch(bid, timeout=30)
+    checker.check(confirmed.get("http_status") == 200, "retried batch is replicated",
+                  str(confirmed)[:300])
+    checker.check(confirmed.get("ack") == "replicated", "confirmed ack is replicated")
+    checker.check(client.read_point("fm_dead_%d" % stamp).get("status") == "ok", "the retried write is applied")
+    contract.assert_roots_equal("all three nodes agree after recovery")
 
-    arbit_push = "http://127.0.0.1:8737/~node-process@1.0/arbit/push/output~message@1.0/body"
-    arbit_res = post_process_json(arbit_push, {"action": "Get-Official-State"})
-    arbit_root = arbit_res.get("state_root", "")
-    assert_test(len(arbit_root) == 66 and arbit_root.startswith("0x"), f"Arbit Official State Root is authentic 256-bit SHA-256 ({arbit_root[:18]})")
+    print("\n[4] Failover: sd1 alone down still reaches 200 via sd2")
+    before = contract.state()
+    checker.check(kill_node("sd1"), "sd1 stopped again")
+    failover = client.write_point("fm_failover_%d" % stamp, 3.0, 3.0, ts=stamp + 2, client_signer="tester")
+    checker.check(failover["http_status"] == 202, "write accepted with sd1 down")
+    confirmed = client.wait_for_batch(failover["batch_id"], timeout=30)
+    checker.check(confirmed.get("http_status") == 200,
+                  "sd2 alone confirms the batch", str(confirmed)[:300])
+    checker.check(confirmed.get("tick", 0) > before.get("tick"), "tick advanced")
+    checker.check("sd2" in (confirmed.get("replicas") or []), "the ack names sd2",
+                  str(confirmed.get("replicas")))
 
-    print(f"\n{GREEN}{BOLD}======================================================================{RESET}")
-    print(f"{GREEN}{BOLD}  ALL {PASSED_TESTS}/{TOTAL_TESTS} SECURITY & FAILURE MODE TESTS PASSED!{RESET}")
-    print(f"{GREEN}{BOLD}======================================================================{RESET}\n")
+    print("\n[5] sd1 rejoins and catches up from the delta log")
+    checker.check(start_node("sd1"), "sd1 restarted")
+    deadline = time.time() + 60
+    equal = False
+    while time.time() < deadline:
+        roots = contract.roots()
+        if len(set(roots.values())) == 1 and None not in roots.values():
+            equal = True
+            break
+        time.sleep(2)
+    checker.check(equal, "roots converge after the replica rejoins", str(contract.roots()))
+
+    print("\n[6] Out-of-order and stale commits at the replica")
+    code, body = contract_state_sd(client, "sd1")
+    last = body.get("last_tick")
+    root = body.get("state_root")
+    code, body, _ = client.request(
+        "POST",
+        "http://127.0.0.1:%d/~node-process@1.0/sd1/push/output~message@1.0" % PORTS["sd1"],
+        {"action": "Commit", "batch_id": "fm-future", "tick_from": last + 1000,
+         "tick_to": last + 1002, "state_root": root, "delta": []})
+    checker.check(code == 202 and body.get("status") == "deferred",
+                  "future commit is buffered (202 deferred), not dropped",
+                  "%s %s" % (code, body.get("status")))
+    code, body = contract_state_sd(client, "sd1")
+    checker.check(body.get("last_tick") == last, "buffering a future commit does not apply it")
+    code, body, _ = client.request(
+        "POST",
+        "http://127.0.0.1:%d/~node-process@1.0/sd1/push/output~message@1.0" % PORTS["sd1"],
+        {"action": "Commit", "batch_id": "fm-stale", "tick_from": max(0, last - 5),
+         "tick_to": max(0, last - 3), "state_root": root, "delta": []})
+    checker.check(code == 409 and body.get("status") == "error_tick_mismatch",
+                  "stale commit is rejected (409 tick mismatch)",
+                  "%s %s" % (code, body.get("status")))
+
+    print("\n[7] A duplicate confirmed write is applied exactly once")
+    before = contract.state()
+    dup1 = client.write_point("fm_dup_%d" % stamp, 7.0, 7.0, ts=stamp + 3, client_signer="tester")
+    ok1 = client.wait_for_batch(dup1["batch_id"], timeout=30)
+    dup2 = client.write_point("fm_dup_%d" % stamp, 7.0, 7.0, ts=stamp + 3, client_signer="tester")
+    ok2 = client.wait_for_batch(dup2["batch_id"], timeout=30)
+    checker.check(dup1["batch_id"] == dup2["batch_id"], "duplicate maps to one batch_id")
+    checker.check(ok1.get("tick") == ok2.get("tick"), "duplicate does not advance the tick")
+    after = contract.state()
+    checker.check(after.get("tick") == ok1.get("tick"), "state settled on the single apply",
+                  "%s vs %s" % (after.get("tick"), ok1.get("tick")))
+
+    return 0 if checker.summary() else 1
+
+
+def contract_state_sd(client, proc):
+    code, body, _ = client.request(
+        "POST",
+        "http://127.0.0.1:%d/~node-process@1.0/%s/push/output~message@1.0" % (PORTS[proc], proc),
+        {"action": "Hydrate"})
+    return code, body
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

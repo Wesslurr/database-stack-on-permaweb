@@ -127,9 +127,9 @@ def main():
         stores = [node_store]
         # Micro-Epoch alignment: Primary stays fast in RAM; replicas snapshot every 10 ticks
         snapshot_slots = 1000 if is_primary else 10
-        # Primary is a bounded RAM tier: reject oversized requests at the HTTP
-        # layer. Other tiers keep a more permissive ceiling for checkpoints.
-        http_max_body = 65536 if is_primary else 1048576
+        # One bounded request envelope for every node (roadmap T10): an
+        # oversized body must be rejected identically on Primary and replicas.
+        http_max_body = 65536
 
         if not is_primary:
             os.makedirs(os.path.join(DATA_DIR, node["name"], "lmdb"), exist_ok=True)

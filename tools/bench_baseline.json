@@ -1,0 +1,145 @@
+{
+  "cluster": {
+    "computed_slot_size": {
+      "primary": 516320,
+      "sd1": 334522,
+      "sd2": 334522
+    },
+    "lmdb_mb": {
+      "arbit": 1.0,
+      "genesis": 1.0,
+      "primary": 1.0,
+      "sd1": 27.0,
+      "sd2": 27.0
+    },
+    "roots_equal": true,
+    "rss_mb": {
+      "genesis": 131.9,
+      "primary": 419.0,
+      "sd1": 175.5,
+      "sd2": 172.9
+    },
+    "state": {
+      "primary": {
+        "entities": 140,
+        "http": 200,
+        "state_root": "0x0984ff689ca35cbc62e08db3910a0935afce2f6f3aad44a47a564cb554b738a4",
+        "tick": 278
+      },
+      "sd1": {
+        "entities": 140,
+        "http": 200,
+        "state_root": "0x0984ff689ca35cbc62e08db3910a0935afce2f6f3aad44a47a564cb554b738a4",
+        "tick": 278
+      },
+      "sd2": {
+        "entities": 140,
+        "http": 200,
+        "state_root": "0x0984ff689ca35cbc62e08db3910a0935afce2f6f3aad44a47a564cb554b738a4",
+        "tick": 278
+      }
+    }
+  },
+  "generated_at": "2026-11-06T15:48:35+0700",
+  "git_commit": "64c9bf5",
+  "notes": [
+    "keep-alive single connection per node; loopback only",
+    "write_202 measures L0 accept, write_confirm measures L1 (poll Batch-Status)",
+    "cold_hydrate is a full-state transfer proxy for cold start, not a process restart",
+    "slot size comes from the Erlang debug log (computed_slot_size)"
+  ],
+  "paths": {
+    "advance": {
+      "max_ms": 579.582,
+      "min_ms": 67.695,
+      "n": 40,
+      "p50_ms": 205.76,
+      "p90_ms": 268.71,
+      "p99_ms": 579.582,
+      "status_codes": [
+        202
+      ]
+    },
+    "cold_hydrate": {
+      "max_ms": 161.721,
+      "min_ms": 145.657,
+      "n": 20,
+      "p50_ms": 155.764,
+      "p90_ms": 160.197,
+      "p99_ms": 161.721,
+      "status_codes": [
+        200
+      ]
+    },
+    "now": {
+      "max_ms": 14.035,
+      "min_ms": 11.283,
+      "n": 150,
+      "p50_ms": 12.095,
+      "p90_ms": 12.753,
+      "p99_ms": 13.766,
+      "status_codes": [
+        200
+      ]
+    },
+    "read_push": {
+      "max_ms": 158.051,
+      "min_ms": 79.197,
+      "n": 60,
+      "p50_ms": 81.244,
+      "p90_ms": 82.735,
+      "p99_ms": 126.958,
+      "response_bytes_p50": 11355,
+      "status_codes": [
+        200
+      ]
+    },
+    "relay_call_sd": {
+      "max_ms": 260.17,
+      "min_ms": 148.055,
+      "n": 60,
+      "p50_ms": 154.565,
+      "p90_ms": 161.164,
+      "p99_ms": 168.268,
+      "response_bytes_p50": 8312,
+      "status_codes": [
+        200
+      ]
+    },
+    "sd_direct": {
+      "max_ms": 90.635,
+      "min_ms": 73.941,
+      "n": 60,
+      "p50_ms": 79.751,
+      "p90_ms": 83.842,
+      "p99_ms": 86.064,
+      "response_bytes_p50": 11089,
+      "status_codes": [
+        200
+      ]
+    },
+    "write_202": {
+      "max_ms": 671.989,
+      "min_ms": 110.452,
+      "n": 60,
+      "p50_ms": 197.754,
+      "p90_ms": 252.161,
+      "p99_ms": 312.986,
+      "status_codes": [
+        202
+      ]
+    },
+    "write_confirm": {
+      "max_ms": 779.385,
+      "min_ms": 529.493,
+      "n": 40,
+      "p50_ms": 580.048,
+      "p90_ms": 711.702,
+      "p99_ms": 779.385,
+      "status_codes": [
+        200
+      ]
+    }
+  },
+  "samples_per_path": 150
+}

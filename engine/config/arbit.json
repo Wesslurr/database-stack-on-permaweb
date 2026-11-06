@@ -20,7 +20,7 @@
   "process_snapshot_slots": 10,
   "process-snapshot-time": false,
   "process_snapshot_time": false,
-  "http_max_body": 1048576,
+  "http_max_body": 65536,
   "cache-control": [
     "no-store"
   ],
