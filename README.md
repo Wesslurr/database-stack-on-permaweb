@@ -209,18 +209,21 @@ The L1 number is the honest cost of the contract: `202` + one SD round trip + ve
 │   └── processes/           # Native Lua processes for Primary, Shared Data, and Arbit
 ├── HyperBEAM/               # Upstream HyperBEAM Erlang runtime and AO devices
 ├── tests/
-│   ├── _harness.py                 # live-cluster harness + contract invariants
-│   ├── test_e2e_2d_points.py       # 30-check ACK contract E2E test
-│   └── test_failure_modes.py       # 35-check failure injection (--yes)
+│   ├── _harness.py          # live-cluster harness + contract invariants
+│   ├── test_e2e_2d_points.py# 30-check ACK contract E2E test
+│   ├── test_failure_modes.py# 36-check failure injection (--yes)
+│   └── mutation_ack.sh      # breaks ACK verification; suite must go red
 ├── tools/
+│   ├── apply_engine.sh      # Rebuild configs/embed Lua and restart nodes (FRESH=1 wipes stores)
+│   ├── bench_engine.py      # 8-path honest baseline -> tools/bench_baseline.json
 │   ├── build_configs.py     # Deterministic node config builder
-│   ├── client.py            # Headless Python client for the state engine
+│   ├── client.py            # Headless Python client for the honest ACK contract
 │   ├── cluster_up.sh        # Cluster launcher (Docker + Tmux)
 │   ├── cluster_down.sh      # Cluster teardown
 │   ├── simulate_gameplay.py # Automated WASD gameplay simulator
 │   ├── test_relog_flow.py   # Client relog and state recovery test
 │   └── game_client/
-│       ├── index.html       # Interactive Red Circle WASD web client & Backstage Inspector
+│       ├── index.html       # Interactive WASD client (accepted vs confirmed badges)
 │       └── serve.py         # HTTP server with live node telemetry endpoint (/metrics)
 ├── idea.md                  # Comprehensive architectural specification and design blueprint
 └── README.md                # Project documentation and quick start guide
