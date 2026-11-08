@@ -52,7 +52,7 @@ echo ""
 echo "=== [2.5/4] Precompiling HyperBEAM once (avoids shared _build races) ==="
 (
     cd "$HB_SRC"
-    rebar3 compile >/dev/null
+    rebar3 compile
 )
 echo "  [OK] HyperBEAM compiled."
 
@@ -71,11 +71,7 @@ for NODE_SPEC in "${NODES[@]}"; do
     IFS=":" read -r SESSION_NAME PORT CONFIG_PATH <<< "$NODE_SPEC"
     
     # Start tmux session running HyperBEAM node
-    # Single scheduler + single async thread keeps the tiny local cluster's
-    # memory footprint low and removes cross-scheduler contention. The `aobf`
-    # allocator is tuned for many small, short-lived allocations (per-tick
-    # message maps/buffers), which is the dominant pattern in this engine.
-    CMD="export PATH=\"/home/weslur/.local/bin:/home/weslur/.cargo/bin:\$PATH\" && export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME"
+    CMD="export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME"
     tmux new-session -d -s "$SESSION_NAME" "bash -c '$CMD'"
     echo "  [STARTED] Node '$SESSION_NAME' on port $PORT (config: $(basename "$CONFIG_PATH"))"
     # Brief pause to let node initialize its VM
