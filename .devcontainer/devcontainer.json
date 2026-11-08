@@ -1,0 +1,47 @@
+{
+  "name": "HyperStack Real-Time State Engine",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "enableDockerBuildKit": true
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.11"
+    }
+  },
+  "forwardPorts": [8080, 1984, 8733, 8734, 8735, 8736, 8737],
+  "portsAttributes": {
+    "8080": {
+      "label": "Interactive Red Circle Client & Inspector",
+      "onAutoForward": "openPreview"
+    },
+    "1984": {
+      "label": "ArLocal (Arweave L1 Permaweb Gateway)"
+    },
+    "8733": {
+      "label": "hb-genesis (Port 8733)"
+    },
+    "8734": {
+      "label": "hb-primary (Port 8734)"
+    },
+    "8735": {
+      "label": "hb-sd-1 (Port 8735)"
+    },
+    "8736": {
+      "label": "hb-sd-2 (Port 8736)"
+    },
+    "8737": {
+      "label": "hb-arbit (Port 8737)"
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "erlang-ls.erlang-ls",
+        "ms-python.python"
+      ]
+    }
+  }
+}

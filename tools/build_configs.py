@@ -28,7 +28,7 @@ import os
 import re
 from urllib.parse import urlparse
 
-PROJECT_ROOT = "/home/weslur/database"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CONFIG_DIR = os.path.join(PROJECT_ROOT, "engine", "config")
 DATA_DIR = os.path.join(PROJECT_ROOT, "engine", "data")
 PROCESSES_DIR = os.path.join(PROJECT_ROOT, "engine", "processes")

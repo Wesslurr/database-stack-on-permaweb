@@ -19,6 +19,11 @@ GEMINI.md
 graphify-out/
 /archive/
 
+# Internal Roadmap & planning
+ROADMAP.md
+roadmap.md
+*roadmap*
+
 # Windows WSL Zone Identifiers
 *:Zone.Identifier
 

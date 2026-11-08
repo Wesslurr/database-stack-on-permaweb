@@ -2,9 +2,12 @@
 set -euo pipefail
 
 # Project root directory
-PROJECT_ROOT="/home/weslur/database"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HB_SRC="$PROJECT_ROOT/HyperBEAM"
-export PATH="/home/weslur/erlang/27.0/bin:/home/weslur/.local/bin:/home/weslur/.cargo/bin:$PATH"
+[ -d "$HOME/erlang/27.0/bin" ] && export PATH="$HOME/erlang/27.0/bin:$PATH"
+[ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"
+[ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
 
 echo "=== [1/4] Ensuring clean state before launch ==="
 "$PROJECT_ROOT/tools/cluster_down.sh" >/dev/null 2>&1 || true

@@ -10,6 +10,9 @@ PASSED=0
 FAILED=0
 TOTAL=0
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 assert_eq() {
     local label="$1"
     local actual="$2"
@@ -120,7 +123,7 @@ assert_eq "All $NUM_NODES HyperBEAM nodes have distinct cryptographic identities
 
 # Verify isolated data directories exist on disk
 for NODE_DIR in genesis primary sd1 sd2 arbit; do
-    DIR_PATH="/home/weslur/database/engine/data/$NODE_DIR"
+    DIR_PATH="$PROJECT_ROOT/engine/data/$NODE_DIR"
     WALLET_FILE="$DIR_PATH/wallet.json"
     TOTAL=$((TOTAL + 1))
     if [ -f "$WALLET_FILE" ]; then

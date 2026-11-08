@@ -3,9 +3,12 @@
 # ArLocal is left untouched. Use after editing engine/processes/*.lua.
 set -uo pipefail
 
-PROJECT_ROOT="/home/weslur/database"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HB_SRC="$PROJECT_ROOT/HyperBEAM"
-export PATH="/home/weslur/erlang/27.0/bin:/home/weslur/.local/bin:/home/weslur/.cargo/bin:$PATH"
+[ -d "$HOME/erlang/27.0/bin" ] && export PATH="$HOME/erlang/27.0/bin:$PATH"
+[ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"
+[ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
 
 python3 "$PROJECT_ROOT/tools/build_configs.py" >/dev/null || exit 1
 
