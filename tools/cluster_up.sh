@@ -15,6 +15,17 @@ sleep 1
 
 echo ""
 echo "=== [2/4] Starting ArLocal (Arweave L1) in Docker ==="
+if ! docker image inspect ao-localnet-arlocal:latest >/dev/null 2>&1; then
+    echo "  [Auto-Build] Image ao-localnet-arlocal:latest not found locally."
+    echo "  Building lightweight ArLocal Docker image on the fly..."
+    cat << 'EOF' | docker build -t ao-localnet-arlocal:latest -
+FROM node:18-alpine
+RUN npm install -g arlocal
+EXPOSE 1984
+ENTRYPOINT ["npx", "arlocal", "1984"]
+EOF
+    echo "  [OK] ArLocal Docker image successfully built."
+fi
 docker run -d --rm --name arlocal -p 1984:1984 ao-localnet-arlocal:latest >/dev/null
 echo "  [OK] ArLocal container started on port 1984."
 
