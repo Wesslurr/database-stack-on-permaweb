@@ -25,6 +25,12 @@ fi
 
 # 2. Launch cluster
 echo "=== [2/3] Launching Multi-Node HyperBEAM Cluster ==="
+for F in HyperBEAM/_build/default/lib/cowlib/src/cow_capsule.erl HyperBEAM/_build/default/lib/gun/src/gun.erl; do
+    if [ -f "$F" ] && ! grep -q "feature(maybe_expr" "$F"; then
+        sed -i '1s/^/-feature(maybe_expr, enable).\n/' "$F"
+    fi
+done
+rm -f HyperBEAM/_build/default/lib/cowlib/ebin/cow_capsule.beam HyperBEAM/_build/default/lib/gun/ebin/gun.beam
 ./tools/cluster_up.sh
 
 # 3. Serve game client

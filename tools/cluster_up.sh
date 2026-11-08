@@ -50,6 +50,18 @@ fi
 
 echo ""
 echo "=== [2.5/4] Precompiling HyperBEAM once (avoids shared _build races) ==="
+# In Erlang/OTP 26, maybe expressions (EEP-49) in cowlib & gun require enabling the feature
+if ! grep -q "maybe_expr" "$HB_SRC/rebar.config" 2>/dev/null; then
+    sed -i 's/{override, gun, \[{deps, \[cowlib\]}\]}/{override, gun, [{deps, [cowlib]}]},\n    {add, cowlib, [{erl_opts, [{feature, maybe_expr, enable}]}]},\n    {add, gun, [{erl_opts, [{feature, maybe_expr, enable}]}]}/' "$HB_SRC/rebar.config"
+fi
+
+for F in "$HB_SRC/_build/default/lib/cowlib/src/cow_capsule.erl" "$HB_SRC/_build/default/lib/gun/src/gun.erl"; do
+    if [ -f "$F" ] && ! grep -q "feature(maybe_expr" "$F"; then
+        sed -i '1s/^/-feature(maybe_expr, enable).\n/' "$F"
+    fi
+done
+rm -f "$HB_SRC/_build/default/lib/cowlib/ebin/cow_capsule.beam" "$HB_SRC/_build/default/lib/gun/ebin/gun.beam"
+
 (
     cd "$HB_SRC"
     rebar3 compile
