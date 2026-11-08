@@ -731,7 +731,7 @@
         if (!p) return;
         seen.add(p.id);
         if (p.id === PLAYER_ID) {
-          if (!isWriting && Number(p.tick || 0) >= (confirmedPos.tick || 0)) {
+          if (Number(p.tick || 0) >= (confirmedPos.tick || 0)) {
             confirmedPos = { x: Number(p.x), y: Number(p.y), tick: Number(p.tick || 0) };
             lastVerifiedPos = { ...confirmedPos };
             if (headPos.tick <= confirmedPos.tick) {
@@ -812,8 +812,10 @@
     let lastNow = { tick: 0, headTick: 0, lag: 0, compacted: 0, root: "—", ack: "none" };
     const pendingSwarmBatches = [];
     const pendingPlayerWrites = [];
+    let isPollingNow = false;
     async function pollNow() {
-      if (!discoveredPrimaryUrl) return;
+      if (!discoveredPrimaryUrl || isPollingNow) return;
+      isPollingNow = true;
       try {
         const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/now/results~message@1.0/output/body`, {
           headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
@@ -906,13 +908,13 @@
         if (Array.isArray(data.points)) {
           for (const raw of data.points) {
             const p = normalizePointEntry(raw);
-            if (p && p.id === PLAYER_ID && p.tick >= (lastVerifiedPos.tick || 0)) {
+            if (p && p.id === PLAYER_ID && Number(p.tick || 0) >= (confirmedPos.tick || 0)) {
               lastVerifiedPos = { x: Number(p.x), y: Number(p.y), tick: Number(p.tick || repTick) };
-              if (!isWriting && confirmedPos.tick < lastVerifiedPos.tick) {
-                confirmedPos = { ...lastVerifiedPos };
-                headPos = { ...lastVerifiedPos };
-                document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
-              }
+              confirmedPos = { ...lastVerifiedPos };
+              const elHud = document.getElementById("hudCoords");
+              if (elHud) elHud.textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+              const elTick = document.getElementById("hudTick");
+              if (elTick) elTick.textContent = `#${confirmedPos.tick} (Head: #${Math.max(confirmedPos.tick, headPos.tick)})`;
               break;
             }
           }
@@ -932,6 +934,9 @@
           nowBadge.innerHTML = `Watermark: <strong>Head #${headTick} / Rep #${repTick} (Lag ${lag}) &middot; ${String(lastNow.root).slice(0, 10)}&hellip;</strong>`;
         }
       } catch (_) {}
+      finally {
+        isPollingNow = false;
+      }
     }
 
     // ================= Dynamic Elastic Swarm & Multi-Worker Architecture =================
@@ -1764,7 +1769,7 @@
         })
       });
       const raw = await res.json().catch(() => ({}));
-      const http = Number(raw.status || res.status || 200);
+      const http = (typeof raw.status === "number" ? raw.status : res.status) || 200;
       const body = unwrapBody(raw);
       return { http, body };
     }
@@ -1956,8 +1961,11 @@
       }
     }
 
+    let isPollingCluster = false;
     // Backstage Inspector: polls Primary Worker 1 (:8734), SD1_1 (:8735), SD2_1 (:8736), and Arbit (:8737)
     async function pollClusterState() {
+      if (isPollingCluster) return;
+      isPollingCluster = true;
       pollTelemetryMetrics();
       try {
         const [pRes, sd1Res, sd2Res, arbitRes] = await Promise.allSettled([
@@ -2124,6 +2132,8 @@
         if (statusEl) {
           statusEl.textContent = `Inspector sync warning: ${e.message}`;
         }
+      } finally {
+        isPollingCluster = false;
       }
     }
 

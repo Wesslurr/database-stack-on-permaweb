@@ -3,7 +3,7 @@ set -euo pipefail
 
 echo "=== Stopping HyperBEAM Cluster ==="
 
-TMUX_SESSIONS=("hb-genesis" "hb-primary" "hb-sd-1" "hb-sd-2" "hb-arbit")
+TMUX_SESSIONS=("hb-genesis" "hb-primary" "hb-sd-1" "hb-sd-2" "hb-arbit" "hb-ui")
 
 for SESSION in "${TMUX_SESSIONS[@]}"; do
     if tmux has-session -t "$SESSION" 2>/dev/null; then
@@ -13,6 +13,11 @@ for SESSION in "${TMUX_SESSIONS[@]}"; do
         echo "  Tmux session not running: $SESSION"
     fi
 done
+
+echo ""
+echo "=== Stopping Game Client UI (8080) ==="
+fuser -k 8080/tcp >/dev/null 2>&1 || true
+pkill -f "tools/game_client/serve.py" >/dev/null 2>&1 || true
 
 echo ""
 echo "=== Stopping ArLocal (Docker) ==="

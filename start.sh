@@ -62,4 +62,7 @@ echo "  🎮 Interactive Client & Backstage Inspector Ready!     "
 echo "  👉 Local / Codespace Port: 8080                         "
 echo "=========================================================="
 echo ""
+fuser -k 8080/tcp >/dev/null 2>&1 || true
+pkill -f "tools/game_client/serve.py" >/dev/null 2>&1 || true
+sleep 0.5
 python3 tools/game_client/serve.py

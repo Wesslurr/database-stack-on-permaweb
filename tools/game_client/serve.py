@@ -107,7 +107,7 @@ def collect_node_metrics():
 
 def proxy_request(handler, port, path, method="GET", body=None, headers=None):
     try:
-        conn = http.client.HTTPConnection("127.0.0.1", int(port), timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", int(port), timeout=30)
         req_headers = {}
         if headers:
             for k, v in headers.items():
@@ -133,6 +133,7 @@ def proxy_request(handler, port, path, method="GET", body=None, headers=None):
             pass
         conn.close()
     except Exception as e:
+        print(f"[Proxy-Error] {method} port={port} path={path}: {e}", flush=True)
         err_msg = json.dumps({"error": str(e), "target_port": port}).encode("utf-8")
         try:
             handler.send_response(502)

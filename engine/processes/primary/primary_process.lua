@@ -828,7 +828,7 @@ local function acknowledge_batch(p, role)
     local lag = math.max(0, (HeadTick or Tick) - Tick)
     local n_ent = count_entities()
     local points_ext = ""
-    if p and p.include_points then
+    if n_ent <= 250 or (p and p.include_points) then
         sync_head_points()
         points_ext = string.format(',"points":%s,"head_points":%s', encode_points(Points), encode_points(HeadPoints))
     end
@@ -1198,7 +1198,7 @@ local function handle_ack(msg, suffix)
     local lag = math.max(0, (HeadTick or Tick) - Tick)
     local n_ent = count_entities()
     local points_ext = ""
-    if p and p.include_points then
+    if n_ent <= 250 or (p and p.include_points) then
         sync_head_points()
         points_ext = string.format(',"points":%s,"head_points":%s', encode_points(Points), encode_points(HeadPoints))
     end
