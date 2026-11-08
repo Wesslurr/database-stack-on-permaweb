@@ -126,8 +126,15 @@ def main():
         # - SD1 / SD2 / Arbit / Genesis: Pure LMDB Disk (`hb_store_lmdb` ONLY — 80% disk, minimal RAM)
         node_store = volatile_store if is_primary else lmdb_store
         stores = [node_store]
-        # Micro-Epoch alignment: Primary stays fast in RAM; replicas snapshot every slot on LMDB disk
-        snapshot_slots = 1000 if is_primary else 1
+        # Aligned snapshot intervals: Primary stays fast in RAM; replicas snapshot periodically on LMDB disk
+        if is_primary:
+            snapshot_slots = 1000
+        elif role in ("sd1", "sd2"):
+            snapshot_slots = 20  # Aligned with SdSnapshotSlots in genesis
+        elif role == "arbit":
+            snapshot_slots = 50  # Aligned with Arbit checkpoints
+        else:
+            snapshot_slots = 100
         # One bounded request envelope for every node (roadmap T10): an
         # oversized body must be rejected identically on Primary and replicas.
         http_max_body = 65536

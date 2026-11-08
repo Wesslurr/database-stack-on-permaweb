@@ -11,6 +11,8 @@ import json
 import os
 import socketserver
 import subprocess
+import threading
+import time
 import urllib.request
 
 PORT = 8080
@@ -25,6 +27,54 @@ NODES = [
     {"name": "sd2", "sname": "hb-sd-2", "port": 8736},
     {"name": "arbit", "sname": "hb-arbit", "port": 8737},
 ]
+
+CACHED_DOCKER_METRICS = {
+    "container": "arlocal",
+    "port": 1984,
+    "rss_mb": 0.0,
+    "mem_str": "—",
+    "cpu_pct": 0.0,
+    "status": "online"
+}
+
+
+def docker_stats_worker():
+    global CACHED_DOCKER_METRICS
+    while True:
+        try:
+            doc_out = subprocess.check_output(
+                ["docker", "stats", "--no-stream", "--format", "{{.Name}}:{{.MemUsage}}:{{.CPUPerc}}", "arlocal"],
+                text=True, timeout=5
+            ).strip()
+            parts = doc_out.split(":")
+            if len(parts) >= 3:
+                mem_raw = parts[1].split("/")[0].strip()
+                rss_val = 0.0
+                if "MiB" in mem_raw:
+                    rss_val = round(float(mem_raw.replace("MiB", "").strip()), 1)
+                elif "GiB" in mem_raw:
+                    rss_val = round(float(mem_raw.replace("GiB", "").strip()) * 1024, 1)
+                elif "KiB" in mem_raw:
+                    rss_val = round(float(mem_raw.replace("KiB", "").strip()) / 1024, 1)
+                cpu_val = round(float(parts[2].replace("%", "").strip()), 1)
+                CACHED_DOCKER_METRICS = {
+                    "container": "arlocal",
+                    "port": 1984,
+                    "rss_mb": rss_val,
+                    "mem_str": mem_raw,
+                    "cpu_pct": cpu_val,
+                    "status": "online"
+                }
+        except Exception:
+            CACHED_DOCKER_METRICS = {
+                "container": "arlocal",
+                "port": 1984,
+                "rss_mb": 0.0,
+                "mem_str": "—",
+                "cpu_pct": 0.0,
+                "status": "offline"
+            }
+        time.sleep(5)
 
 
 def collect_node_metrics():
@@ -67,41 +117,8 @@ def collect_node_metrics():
             "lmdb_kb": lmdb_kb,
             "pure_ram": not os.path.exists(mdb_file),
         }
-    # ArLocal (Docker Container) Metrics
-    try:
-        doc_out = subprocess.check_output(
-            ["docker", "stats", "--no-stream", "--format", "{{.Name}}:{{.MemUsage}}:{{.CPUPerc}}", "arlocal"],
-            text=True, timeout=2
-        ).strip()
-        parts = doc_out.split(":")
-        if len(parts) >= 3:
-            mem_raw = parts[1].split("/")[0].strip()
-            rss_val = 0.0
-            if "MiB" in mem_raw:
-                rss_val = round(float(mem_raw.replace("MiB", "").strip()), 1)
-            elif "GiB" in mem_raw:
-                rss_val = round(float(mem_raw.replace("GiB", "").strip()) * 1024, 1)
-            elif "KiB" in mem_raw:
-                rss_val = round(float(mem_raw.replace("KiB", "").strip()) / 1024, 1)
-            cpu_val = round(float(parts[2].replace("%", "").strip()), 1)
-            metrics["arlocal"] = {
-                "container": "arlocal",
-                "port": 1984,
-                "rss_mb": rss_val,
-                "mem_str": mem_raw,
-                "cpu_pct": cpu_val,
-                "status": "online"
-            }
-    except Exception:
-        metrics["arlocal"] = {
-            "container": "arlocal",
-            "port": 1984,
-            "rss_mb": 0.0,
-            "mem_str": "—",
-            "cpu_pct": 0.0,
-            "status": "offline"
-        }
-
+    # ArLocal (Docker Container) Metrics - Served instantly from background worker
+    metrics["arlocal"] = dict(CACHED_DOCKER_METRICS)
     return metrics
 
 
@@ -243,6 +260,7 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         pass
 
 if __name__ == "__main__":
+    threading.Thread(target=docker_stats_worker, daemon=True).start()
     with ThreadedTCPServer(("0.0.0.0", PORT), Handler) as httpd:
         print(f"[HyperStack-UI] Serving Red Circle WASD Client + Telemetry at http://127.0.0.1:{PORT}")
         httpd.serve_forever()
