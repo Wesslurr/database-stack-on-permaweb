@@ -779,31 +779,13 @@
         if (allPoints.length > 0) {
           applyPointsList(allPoints, true);
         } else {
-          // Robust fallback to SD1 Snapshot (authoritative LMDB disk) across worker shards
-          const sdUrl = discoveredSd1Url || clusterUrl(8735);
-          const sdPromises = [];
-          for (let i = 1; i <= workersToFetch; i++) {
-            sdPromises.push(
-              fetch(`${sdUrl}/~node-process@1.0/sd1_${i}/push/output/body`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
-                cache: "no-store",
-                body: JSON.stringify({ action: "Snapshot" })
-              }).then(r => r.ok ? r.json() : null).catch(() => null)
-            );
-          }
-          const sdResults = await Promise.all(sdPromises);
-          let allSdPoints = [];
-          sdResults.forEach(raw => {
-            if (!raw) return;
-            const b = unwrapBody(raw);
-            if (b && Array.isArray(b.points)) {
-              allSdPoints = allSdPoints.concat(b.points);
+          // Robust fallback to SD Snapshots across both SD1 and duplicate node SD2
+          try {
+            const snapData = await fetchAuthoritativeSnapshotsFromReplicas();
+            if (snapData && snapData.points && snapData.points.length > 0) {
+              applyPointsList(snapData.points, true);
             }
-          });
-          if (allSdPoints.length > 0) {
-            applyPointsList(allSdPoints, true);
-          }
+          } catch (_) {}
         }
       } catch (_) {}
     }
@@ -1408,6 +1390,131 @@
       }
     }
 
+    // Robustly query all available replicas (SD1 and SD2 duplicate node) across active workers
+    // to find the authoritative point with the HIGHEST confirmed tick.
+    async function fetchAuthoritativePointFromReplicas(id) {
+      const targets = [];
+      const sd1 = discoveredSd1Url || clusterUrl(8735);
+      const sd2 = discoveredSd2Url || clusterUrl(8736);
+      const workersToFetch = Math.max(1, dynamicActiveWorkers);
+
+      // Add SD1 (primary replica)
+      targets.push({ url: sd1, role: "sd1", name: "sd1" });
+      for (let i = 1; i <= workersToFetch; i++) {
+        targets.push({ url: sd1, role: `sd1_${i}`, name: "sd1" });
+      }
+
+      // Add SD2 (duplicate / replica node)
+      targets.push({ url: sd2, role: "sd2", name: "sd2" });
+      for (let i = 1; i <= workersToFetch; i++) {
+        targets.push({ url: sd2, role: `sd2_${i}`, name: "sd2" });
+      }
+
+      const promises = targets.map(t =>
+        fetch(`${t.url}/~node-process@1.0/${t.role}/push/output/body`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+          cache: "no-store",
+          body: JSON.stringify({ action: "Read-Point", id })
+        })
+        .then(r => r.ok ? r.json() : null)
+        .then(raw => {
+          if (!raw) return null;
+          const b = unwrapBody(raw);
+          if (b && b.status === "ok" && b.point) {
+            return {
+              point: normalizePointEntry(b.point),
+              tick: Number(b.point.tick || b.last_tick || 0),
+              last_tick: Number(b.last_tick || 0),
+              state_root: b.state_root || "",
+              replica_name: t.name,
+              process_name: t.role
+            };
+          }
+          return null;
+        })
+        .catch(() => null)
+      );
+
+      const results = await Promise.all(promises);
+      let best = null;
+      results.forEach(res => {
+        if (!res) return;
+        if (!best || res.tick > best.tick) {
+          best = res;
+        }
+      });
+      return best;
+    }
+
+    // Query snapshots across both SD1 and SD2 (duplicate node) and merge points by highest tick
+    async function fetchAuthoritativeSnapshotsFromReplicas() {
+      const targets = [];
+      const sd1 = discoveredSd1Url || clusterUrl(8735);
+      const sd2 = discoveredSd2Url || clusterUrl(8736);
+      const workersToFetch = Math.max(1, dynamicActiveWorkers);
+
+      for (let i = 1; i <= workersToFetch; i++) {
+        targets.push({ url: sd1, role: `sd1_${i}`, name: "sd1" });
+        targets.push({ url: sd2, role: `sd2_${i}`, name: "sd2" });
+      }
+
+      const promises = targets.map(t =>
+        fetch(`${t.url}/~node-process@1.0/${t.role}/push/output/body`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+          cache: "no-store",
+          body: JSON.stringify({ action: "Snapshot" })
+        })
+        .then(r => r.ok ? r.json() : null)
+        .then(raw => {
+          if (!raw) return null;
+          const b = unwrapBody(raw);
+          if (b && Array.isArray(b.points)) {
+            return {
+              points: b.points,
+              last_tick: Number(b.last_tick || 0),
+              state_root: b.state_root || "",
+              name: t.name
+            };
+          }
+          return null;
+        })
+        .catch(() => null)
+      );
+
+      const results = await Promise.all(promises);
+      const entityMap = new Map();
+      let maxTick = 0;
+      let latestRoot = "";
+      const respondingReplicas = new Set();
+
+      results.forEach(res => {
+        if (!res) return;
+        respondingReplicas.add(res.name);
+        if (res.last_tick > maxTick) {
+          maxTick = res.last_tick;
+          latestRoot = res.state_root || latestRoot;
+        }
+        res.points.forEach(rawPt => {
+          const pt = Array.isArray(rawPt) ? normalizePointEntry(rawPt) : rawPt;
+          if (!pt || !pt.id) return;
+          const ptTick = Number(pt.tick || 0);
+          const existing = entityMap.get(pt.id);
+          if (!existing || ptTick > Number(existing.tick || 0)) {
+            entityMap.set(pt.id, pt);
+          }
+        });
+      });
+
+      return {
+        points: Array.from(entityMap.values()),
+        tick: maxTick,
+        state_root: latestRoot,
+        replicas: Array.from(respondingReplicas)
+      };
+    }
+
     // Step 1: Discover Primary and SD replicas from Genesis Process (:8733)
     async function discoverFromGenesis() {
       try {
@@ -1434,31 +1541,19 @@
 
         // Query database specifically for existing player coordinates on relog/refresh
         let existingPoint = null;
-        // 1. Direct targeted Read-Point on SD1 worker replica (LMDB disk source of truth for player_red)
+        let confirmedReplica = "sd";
+
+        // 1. Direct targeted Read-Point across BOTH SD1 and duplicate node SD2 (picks newest tick)
         try {
-          const sdRead = await fetch(`${discoveredSd1Url}/~node-process@1.0/sd1_1/push/output/body`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Accept": "application/json",
-              ...NO_CACHE_HEADERS
-            },
-            cache: "no-store",
-            body: JSON.stringify({
-              action: "Read-Point",
-              id: PLAYER_ID
-            })
-          });
-          if (sdRead.ok) {
-            const parsedSd = unwrapBody(await sdRead.json());
-            if (parsedSd && parsedSd.status === "ok" && parsedSd.point) {
-              existingPoint = parsedSd.point;
-            }
+          const bestCandidate = await fetchAuthoritativePointFromReplicas(PLAYER_ID);
+          if (bestCandidate && bestCandidate.point) {
+            existingPoint = bestCandidate.point;
+            confirmedReplica = bestCandidate.replica_name || "sd";
           }
         } catch (_ignore) {}
 
         // 2. Fallback check Primary_1 RAM Read-Point
-        if (!existingPoint) {
+        if (!existingPoint && discoveredPrimaryUrl) {
           try {
             const readRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/push/output/body`, {
               method: "POST",
@@ -1477,21 +1572,22 @@
               const parsed = unwrapBody(await readRes.json());
               if (parsed && parsed.status === "ok" && parsed.point) {
                 existingPoint = parsed.point;
+                confirmedReplica = "primary_ram";
               }
             }
           } catch (_ignore) {}
         }
 
-        // 3. Fallback scan sd1_1 state output body
+        // 3. Fallback scan snapshots across both SD1 and SD2
         if (!existingPoint) {
           try {
-            const sdData = await fetchProcessBody(discoveredSd1Url, "sd1_1");
-            if (sdData && Array.isArray(sdData.points)) {
-              existingPoint = sdData.points.find(p => (Array.isArray(p) ? p[0] : p.id) === PLAYER_ID);
-              if (existingPoint && Array.isArray(existingPoint)) existingPoint = normalizePointEntry(existingPoint);
-            } else if (sdData && Array.isArray(sdData.recent_diffs)) {
-              const d = sdData.recent_diffs.slice().reverse().find(p => p.id === PLAYER_ID);
-              if (d) existingPoint = d;
+            const snapData = await fetchAuthoritativeSnapshotsFromReplicas();
+            if (snapData && Array.isArray(snapData.points)) {
+              const found = snapData.points.find(p => (Array.isArray(p) ? p[0] : p.id) === PLAYER_ID);
+              if (found) {
+                existingPoint = normalizePointEntry(found);
+                confirmedReplica = (snapData.replicas && snapData.replicas[0]) || "sd";
+              }
             }
           } catch (_ignore) {}
         }
@@ -1540,89 +1636,33 @@
       }
     }
 
-    // Rollback authoritative state strictly from SD (LMDB disk replica) to the latest confirmed tick
+    // Rollback authoritative state strictly from SD (LMDB disk replica: SD1 & duplicate node SD2) to the latest confirmed tick
     async function rollbackFromSD(reason = "Manual / Quorum Failure") {
       const statusEl = document.getElementById("syncStatusMsg");
       if (statusEl) statusEl.textContent = "Rolling back from SD...";
       try {
-        const sdUrl = discoveredSd1Url || clusterUrl(8735);
-        appendLog(`[Rollback] Requesting authoritative state from SD1 (<code>${sdUrl}</code>)...`);
+        appendLog(`[Rollback] Requesting authoritative state across SD1 & duplicate node SD2...`);
 
-        let sdPoint = null;
-        let sdTick = 0;
-        let sdRoot = "";
+        // 1. Fetch player point across both SD1 and SD2 (picks the highest confirmed tick)
+        const bestPlayer = await fetchAuthoritativePointFromReplicas(PLAYER_ID);
+        let sdPoint = bestPlayer ? bestPlayer.point : null;
+        let sdTick = bestPlayer ? bestPlayer.tick : 0;
+        let sdRoot = bestPlayer ? bestPlayer.state_root : "";
+        let confirmedReplica = bestPlayer ? bestPlayer.replica_name : "sd1";
 
-        // 1. Fetch player_red point from sd1_1 (authoritative LMDB disk)
-        try {
-          const res = await fetch(`${sdUrl}/~node-process@1.0/sd1_1/push/output/body`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
-            cache: "no-store",
-            body: JSON.stringify({ action: "Read-Point", id: PLAYER_ID })
-          });
-          if (res.ok) {
-            const parsed = unwrapBody(await res.json());
-            if (parsed && parsed.status === "ok" && parsed.point) {
-              sdPoint = parsed.point;
-              sdTick = Number(parsed.last_tick || parsed.point.tick || 0);
-              sdRoot = parsed.state_root || "";
-            }
-          }
-        } catch (err) {
-          console.warn("sd1_1 Read-Point failed:", err);
+        // 2. Fetch all snapshots across both SD1 and SD2 to restore full arena
+        const snapData = await fetchAuthoritativeSnapshotsFromReplicas();
+        let allSdPoints = snapData.points || [];
+        if (snapData.tick > sdTick) {
+          sdTick = snapData.tick;
+          sdRoot = snapData.state_root || sdRoot;
+        }
+        if (!sdPoint && allSdPoints.length > 0) {
+          const found = allSdPoints.find(p => p.id === PLAYER_ID);
+          if (found) sdPoint = found;
         }
 
-        // 2. Fetch sd1_1 /now to get the true committed disk tick and root if not yet known
-        if (!sdTick || !sdRoot) {
-          try {
-            const nowRes = await fetch(`${sdUrl}/~node-process@1.0/sd1_1/now/results~message@1.0/output/body`, {
-              headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
-              cache: "no-store"
-            });
-            if (nowRes.ok) {
-              const nowData = unwrapBody(await nowRes.json());
-              if (nowData) {
-                sdTick = Number(nowData.last_tick || nowData.tick || sdTick);
-                sdRoot = nowData.state_root || sdRoot;
-              }
-            }
-          } catch (_) {}
-        }
-
-        // 3. Fetch snapshots across all active SD replicas for complete state
-        let allSdPoints = [];
-        try {
-          const workersToFetch = Math.max(1, dynamicActiveWorkers);
-          const snapPromises = [];
-          for (let i = 1; i <= workersToFetch; i++) {
-            snapPromises.push(
-              fetch(`${sdUrl}/~node-process@1.0/sd1_${i}/push/output/body`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
-                cache: "no-store",
-                body: JSON.stringify({ action: "Snapshot" })
-              }).then(r => r.ok ? r.json() : null).catch(() => null)
-            );
-          }
-          const snapResults = await Promise.all(snapPromises);
-          snapResults.forEach(raw => {
-            if (!raw) return;
-            const b = unwrapBody(raw);
-            if (b && Array.isArray(b.points)) {
-              allSdPoints = allSdPoints.concat(b.points);
-              if (!sdPoint) {
-                const found = b.points.find(p => (Array.isArray(p) ? p[0] : p.id) === PLAYER_ID);
-                if (found) sdPoint = normalizePointEntry(found);
-              }
-              if (!sdTick && b.last_tick) sdTick = Number(b.last_tick);
-              if (!sdRoot && b.state_root) sdRoot = b.state_root;
-            }
-          });
-        } catch (err) {
-          console.warn("SD Snapshot failed:", err);
-        }
-
-        // 4. Fallback to primary_1 only if SD1 completely unreachable
+        // 3. Fallback to Primary RAM only if both SD1 and SD2 are completely unreachable
         if (!sdPoint && discoveredPrimaryUrl) {
           try {
             const pRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/push/output/body`, {
@@ -1637,6 +1677,7 @@
                 sdPoint = pData.point;
                 sdTick = Number(pData.tick || sdPoint.tick || 0);
                 sdRoot = pData.state_root || "";
+                confirmedReplica = "primary_ram";
               }
             }
           } catch (_) {}
@@ -1675,21 +1716,21 @@
         // Update HUD
         document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
         const elHeadCoords = document.getElementById("hudHeadCoords");
-        if (elHeadCoords) elHeadCoords.textContent = `Rolled back to SD LMDB disk [#${confirmedPos.tick}]`;
+        if (elHeadCoords) elHeadCoords.textContent = `Rolled back to ${confirmedReplica.toUpperCase()} LMDB disk [#${confirmedPos.tick}]`;
         document.getElementById("hudTick").textContent = `#${confirmedPos.tick} (Head: #${confirmedPos.tick})`;
         const elEpoch = document.getElementById("hudEpoch");
-        if (elEpoch) elEpoch.innerHTML = `<span>Lag: 0 ticks &middot; Authoritative SD State</span>`;
-        document.getElementById("hudSdNodes").textContent = "sd1 (LMDB disk verified)";
+        if (elEpoch) elEpoch.innerHTML = `<span>Lag: 0 ticks &middot; Authoritative ${confirmedReplica.toUpperCase()} State</span>`;
+        document.getElementById("hudSdNodes").textContent = `${confirmedReplica} (LMDB disk verified)`;
         const elSdSub = document.getElementById("hudSdSub");
         if (elSdSub) elSdSub.textContent = `Rolled back to latest disk tick #${confirmedPos.tick}`;
-        setGateBadge("unavailable", { replicas: ["sd1"] });
+        setGateBadge("unavailable", { replicas: [confirmedReplica] });
 
         appendLog(
-          `<span class="err">⚡ [Rollback to SD]:</span> Authoritative state restored directly from SD1 LMDB disk: ` +
+          `<span class="err">⚡ [Rollback to SD]:</span> Authoritative state restored directly from ${confirmedReplica.toUpperCase()} LMDB disk: ` +
           `<strong>(${confirmedPos.x}, ${confirmedPos.y})</strong> @ tick <strong>#${confirmedPos.tick}</strong> ` +
           `(root: <code>${String(sdRoot || "—").slice(0, 14)}…</code>) [Reason: ${reason}]`
         );
-        if (statusEl) statusEl.textContent = `Rolled back to tick #${confirmedPos.tick}`;
+        if (statusEl) statusEl.textContent = `Rolled back to tick #${confirmedPos.tick} (${confirmedReplica})`;
       } catch (err) {
         appendLog(`<span class="err">Rollback Error:</span> ${err.message}`);
         if (statusEl) statusEl.textContent = `Rollback error: ${err.message}`;

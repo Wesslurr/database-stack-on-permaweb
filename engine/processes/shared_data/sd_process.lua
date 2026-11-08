@@ -563,6 +563,10 @@ function compute(process, message, opts)
         LastRelayedBySigner = incoming_signer
     end
 
+    -- Drain contiguous pending batches so reads, snapshots, and hydrations
+    -- always see the freshest tick confirmed on this replica.
+    drain_pending(sd_signer, topo, node_role)
+
     local msg_epoch = tonumber(msg.epoch or (msg.query and msg.query.epoch))
     if msg_epoch then
         if msg_epoch < CurrentEpoch then

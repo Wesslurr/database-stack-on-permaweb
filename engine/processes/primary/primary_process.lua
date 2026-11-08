@@ -521,6 +521,29 @@ local function hydrate_from(target)
     return true
 end
 
+-- Pull the authoritative state from whichever replica (SD1 or duplicate SD2)
+-- reports the HIGHEST confirmed tick. Returns true if hydration succeeded.
+local function hydrate_from_latest_replica()
+    if not (Topology and Topology.sd_targets and #Topology.sd_targets > 0) then return false end
+    local best_target = nil
+    local highest_tick = -1
+    for _, target in ipairs(Topology.sd_targets) do
+        local raw = relay_call(sd_endpoint(target, "push"), "POST", '{"action":"Hydrate"}')
+        if raw then
+            local tick_str = string.match(raw, '"last_tick"%s*:%s*(%d+)')
+            local t = tonumber(tick_str) or 0
+            if t > highest_tick then
+                highest_tick = t
+                best_target = target
+            end
+        end
+    end
+    if best_target then
+        return hydrate_from(best_target)
+    end
+    return hydrate_from(Topology.sd_targets[1])
+end
+
 local function ensure_topology(process, msg)
     GenesisUrl = GenesisUrl or process["genesis-url"] or (msg and msg["genesis-url"])
     if not NodeSigner then
@@ -564,10 +587,11 @@ local function ensure_topology(process, msg)
         end
     end
 
-    -- Cold start: recover the authoritative state from SD1 before accepting input.
+    -- Cold start: recover the authoritative state from whichever replica (SD1 or duplicate SD2)
+    -- reports the highest confirmed tick before accepting input.
     if not Hydrated and Topology and Topology.sd_targets and #Topology.sd_targets > 0 and Tick == 0 then
         Hydrated = true
-        hydrate_from(Topology.sd_targets[1])
+        hydrate_from_latest_replica()
     end
     return Topology
 end
@@ -1564,18 +1588,34 @@ function compute(process, message, opts)
             end
             target = target or Topology.sd_targets[1]
         end
-        if peer_tick and peer_tick > Tick and target and hydrate_from(target) then
-            PendingBatches = {}
-            Queue = {}
-            OpenBatchId = nil
-            BatchOpenedTs = nil
-            recompute_head()
-            http_status = 200
-            res = string.format(
-                '{"status":"resynced","ack":"replicated","batch_id":"%s","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":0,"state_root":"%s","from":"%s"%s}',
-                json_safe(msg.batch_id or ""), Tick, Tick, Tick, StateRoot,
-                json_safe(peer_signer or ""), status_suffix()
-            )
+        if peer_tick and peer_tick > Tick then
+            local hydrated = false
+            if target then
+                hydrated = hydrate_from(target)
+            end
+            if not hydrated then
+                hydrated = hydrate_from_latest_replica()
+            end
+            if hydrated then
+                PendingBatches = {}
+                Queue = {}
+                OpenBatchId = nil
+                BatchOpenedTs = nil
+                recompute_head()
+                http_status = 200
+                res = string.format(
+                    '{"status":"resynced","ack":"replicated","batch_id":"%s","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":0,"state_root":"%s","from":"%s"%s}',
+                    json_safe(msg.batch_id or ""), Tick, Tick, Tick, StateRoot,
+                    json_safe(peer_signer or ""), status_suffix()
+                )
+            else
+                http_status = 409
+                res = string.format(
+                    '{"status":"stale","ack":"none","batch_id":"%s","reason":"%s","tick":%d,"state_root":"%s"%s}',
+                    json_safe(msg.batch_id or ""), json_safe(msg.reason or "replica_ahead"),
+                    Tick, StateRoot, status_suffix()
+                )
+            end
         else
             http_status = 409
             res = string.format(
