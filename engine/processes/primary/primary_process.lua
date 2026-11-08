@@ -37,17 +37,17 @@ SeenInputOrder = SeenInputOrder or {}
 -- for. Synchronous cross-node calls are never made from this process: a dead
 -- peer must never be able to turn an ACK into a false claim.
 PendingBatches = PendingBatches or {}       -- batch_id -> in-flight batch
-MaxPendingBatches = MaxPendingBatches or 32
+MaxPendingBatches = MaxPendingBatches or 64
 -- Confirmed batches that not every replica has acknowledged yet. They are
 -- re-cast (rate limited) so a replica that was offline can replay the deltas.
 RepairBatches = RepairBatches or {}
-MaxRepairBatches = MaxRepairBatches or 32
+MaxRepairBatches = MaxRepairBatches or 256
 RepairInterval = RepairInterval or 4
 -- The Lua sandbox is deterministic (`os.time` is unavailable), so the batch
 -- clock is the primary's own request counter. Expiry only affects what a
 -- status request reports: state still moves only on a verified Ack.
 RequestClock = RequestClock or 0
-AckDeadlineRequests = AckDeadlineRequests or 16
+AckDeadlineRequests = AckDeadlineRequests or 512
 QuorumAcks = QuorumAcks or 1                -- verified replicas needed to commit
 
 MaxBatchInputs = MaxBatchInputs or 256
@@ -56,7 +56,7 @@ BatchWindowMs = BatchWindowMs or 33
 TicksPerBatch = TicksPerBatch or 2
 MaxTicksPerBatch = MaxTicksPerBatch or 60
 MaxQueue = MaxQueue or 4096
-MaxLagInputs = MaxLagInputs or 256
+MaxLagInputs = MaxLagInputs or 2048
 MaxCommittedHistory = MaxCommittedHistory or 256
 MaxSeenInputs = MaxSeenInputs or 4096
 
@@ -1006,7 +1006,20 @@ local function pump_repair()
         end
         if missing == 0 then
             RepairBatches[i] = false
-        elseif not sent and rec.attempts < 64
+        elseif not sent and rec.attempts >= 8 then
+            -- Multiple repair attempts failed: replica has a gap! Push full Sync-State immediately!
+            for _, t in ipairs(Topology.sd_targets) do
+                if not rec.acked[t.role or t.process] then
+                    local payload = string.format(
+                        '{"action":"Sync-State","last_tick":%d,"state_root":"%s","points":%s}',
+                        Tick, StateRoot, encode_points(Points)
+                    )
+                    relay_cast(sd_endpoint(t, "push"), payload)
+                    rec.acked[t.role or t.process] = true
+                end
+            end
+            sent = true
+        elseif not sent and rec.attempts < 8
             and (RequestClock - rec.cast_at) >= RepairInterval then
             -- One repair round per request at most, and only to the replicas
             -- that have not confirmed: a cast costs real CPU inside luerl.
@@ -1131,14 +1144,13 @@ local function start_batch(process, suffix)
         if oldest_id then PendingBatches[oldest_id] = nil end
     end
 
-    -- Cast the first replica on the write path (the client latency path), and
-    -- the remaining replicas on the next request: a relay/cast costs real CPU
-    -- inside luerl, so paying for both here would double the 202 latency.
-    batch.cast_stage = 0
+    -- Cast to all configured replicas in parallel on the commit path.
+    -- relay_cast is asynchronous (spawned), so broadcasting to SD1 and SD2
+    -- incurs zero blocking wait and ensures both replicas advance identically.
+    batch.cast_stage = (Topology and Topology.sd_targets and #Topology.sd_targets) or 1
     batch.next_cast = RequestClock + 2
     if Topology and Topology.sd_targets and #Topology.sd_targets > 0 then
-        cast_commit_to(batch, { Topology.sd_targets[1] })
-        batch.cast_stage = 1
+        cast_commit_to(batch, Topology.sd_targets)
     end
 
     Queue = {}
@@ -1294,7 +1306,7 @@ local function circuit_breaker_tripped(in_flight, msg, now_ts)
     if msg and msg.circuit_breaker == true then return true end
     if #Queue < MaxLagInputs then return false end
     if now_ts and in_flight.created_ts and now_ts > 1000000000000 and in_flight.created_ts > 1000000000000 then
-        if (now_ts - in_flight.created_ts) < 2000 then
+        if (now_ts - in_flight.created_ts) < 5000 then
             return false
         end
     end
@@ -1616,6 +1628,18 @@ function compute(process, message, opts)
                     Tick, StateRoot, status_suffix()
                 )
             end
+        elseif peer_tick and peer_tick < Tick and target then
+            -- Replica is behind Primary: heal it immediately with full Sync-State!
+            local payload = string.format(
+                '{"action":"Sync-State","last_tick":%d,"state_root":"%s","points":%s}',
+                Tick, StateRoot, encode_points(Points)
+            )
+            relay_cast(sd_endpoint(target, "push"), payload)
+            http_status = 200
+            res = string.format(
+                '{"status":"healing_replica","target":"%s","tick":%d,"peer_tick":%d}',
+                json_safe(target.role or target.process or ""), Tick, peer_tick
+            )
         else
             http_status = 409
             res = string.format(

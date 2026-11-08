@@ -794,6 +794,7 @@
     let lastNow = { tick: 0, headTick: 0, lag: 0, compacted: 0, root: "—", ack: "none" };
     const pendingSwarmBatches = [];
     const pendingPlayerWrites = [];
+    const workerReplicatedTicks = {};
     let isPollingNow = false;
     async function pollNow() {
       if (!discoveredPrimaryUrl || isPollingNow) return;
@@ -860,12 +861,13 @@
           pendingPlayerWrites.push(...remainingPlayer);
         }
 
-        // Zero-overhead centralized L1 Quorum confirmation for all swarm batches (zero extra sockets!)
+        // Zero-overhead centralized L1 Quorum confirmation for all swarm batches across SMP workers
         if (pendingSwarmBatches.length > 0) {
           const nowPerf = performance.now();
           const remaining = [];
           for (const item of pendingSwarmBatches) {
-            if (repTick >= item.targetTick) {
+            const wRepTick = Math.max(item.wName === "primary_1" ? repTick : 0, workerReplicatedTicks[item.wName] || 0);
+            if (wRepTick >= item.targetTick) {
               const l1Rtt = Math.round(nowPerf - item.t0);
               const elL1 = document.getElementById("telL1Rtt"); if (elL1) elL1.textContent = `${l1Rtt} ms`;
               const elRep = document.getElementById("telReplicas"); if (elRep) elRep.textContent = (data.replicas || ["sd1", "sd2"]).join("+") + " [LMDB]";
@@ -1137,6 +1139,11 @@
           swarm.rttSum += rtt; swarm.rttN++;
           setGateBadge(http === 200 ? "confirmed" : "accepted", body, Math.round(rtt));
 
+          const repConfirmed = Number(body.confirmed_tick ?? (http === 200 ? appliedTick : body.tick ?? 0));
+          if (repConfirmed > 0) {
+            workerReplicatedTicks[wName] = Math.max(workerReplicatedTicks[wName] || 0, repConfirmed);
+          }
+
           if (http === 200) {
             // Immediate L1 Quorum Confirmed (HTTP 200)
             const elL1 = document.getElementById("telL1Rtt"); if (elL1) elL1.textContent = `${Math.round(rtt)} ms`;
@@ -1396,7 +1403,7 @@
       const targets = [];
       const sd1 = discoveredSd1Url || clusterUrl(8735);
       const sd2 = discoveredSd2Url || clusterUrl(8736);
-      const workersToFetch = Math.max(1, dynamicActiveWorkers);
+      const workersToFetch = Math.max(4, dynamicActiveWorkers);
 
       // Add SD1 (primary replica)
       targets.push({ url: sd1, role: "sd1", name: "sd1" });
@@ -1452,7 +1459,11 @@
       const targets = [];
       const sd1 = discoveredSd1Url || clusterUrl(8735);
       const sd2 = discoveredSd2Url || clusterUrl(8736);
-      const workersToFetch = Math.max(1, dynamicActiveWorkers);
+      const workersToFetch = Math.max(4, dynamicActiveWorkers);
+
+      // Add base replicas
+      targets.push({ url: sd1, role: "sd1", name: "sd1" });
+      targets.push({ url: sd2, role: "sd2", name: "sd2" });
 
       for (let i = 1; i <= workersToFetch; i++) {
         targets.push({ url: sd1, role: `sd1_${i}`, name: "sd1" });
@@ -1687,7 +1698,7 @@
         isWriting = false;
         queuedMove = null;
 
-        if (sdPoint) {
+        if (sdPoint && (Number(sdPoint.tick || 0) > 0 || lastVerifiedPos.tick === 0)) {
           const ptick = Number(sdPoint.tick || sdTick || 0);
           confirmedPos = { x: Number(sdPoint.x), y: Number(sdPoint.y), tick: ptick };
           lastVerifiedPos = { ...confirmedPos };
@@ -1696,6 +1707,12 @@
           renderPos = { x: confirmedPos.x, y: confirmedPos.y };
           trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
           try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
+        } else if (lastVerifiedPos && (lastVerifiedPos.tick > 0 || lastVerifiedPos.x !== 0 || lastVerifiedPos.y !== 0)) {
+          // Preserve valid confirmed position! Never destructively wipe to (0, 0)
+          confirmedPos = { ...lastVerifiedPos };
+          headPos = { ...confirmedPos };
+          targetPos = { x: confirmedPos.x, y: confirmedPos.y };
+          renderPos = { x: confirmedPos.x, y: confirmedPos.y };
         }
 
         if (allSdPoints.length > 0) {
@@ -1844,13 +1861,13 @@
         }
         if (http === 503) {
           setGateBadge("unavailable", body);
-          await rollbackFromSD(`Circuit Breaker (503): quorum unavailable (${(body && body.reason) || "max_lag"})`);
+          appendLog(`<span class="err">Server backpressure (503):</span> Quorum busy or in-flight buffer full. Retrying write...`);
           return;
         }
         if (http !== 202 && http !== 200) throw new Error(`Push HTTP ${http}`);
 
         const l0Rtt = Math.round(performance.now() - t0);
-        const headTick = Number(body.head_tick || body.tick_to || body.tick || nextTargetTick);
+        const headTick = Number(body.head_tick != null ? body.head_tick : (body.tick_to != null ? body.tick_to : (body.tick != null ? body.tick : nextTargetTick)));
         const repTick = Number(body.confirmed_tick ?? body.tick ?? lastVerifiedPos.tick);
         const lag = Math.max(0, headTick - repTick);
 

@@ -613,6 +613,8 @@ function compute(process, message, opts)
             )
         elseif tick_from > LastTick then
             -- Out-of-order (async hot backup): buffer, do not drop.
+            local pending_keys = 0
+            for _ in pairs(PendingBatches) do pending_keys = pending_keys + 1 end
             if #order > 0 and not PendingBatches[batch_id] then
                 if count_replicas() + #order > MaxEntities then
                     http_status = 409
@@ -620,16 +622,17 @@ function compute(process, message, opts)
                         '{"status":"error_entity_limit","batch_id":"%s","sd_signer":"%s","last_tick":%d}',
                         json_safe(batch_id), json_safe(sd_signer), LastTick
                     )
+                elseif pending_keys < MaxPendingBatches then
+                    PendingBatches[batch_id] = {
+                        tick_from = tick_from, tick_to = tick_to,
+                        delta = delta, order = order,
+                    }
                 else
-                    local pending_keys = 0
-                    for _ in pairs(PendingBatches) do pending_keys = pending_keys + 1 end
-                    if pending_keys < MaxPendingBatches then
-                        PendingBatches[batch_id] = {
-                            tick_from = tick_from, tick_to = tick_to,
-                            delta = delta, order = order,
-                        }
-                    end
+                    cast_reject(topo, batch_id, "replica_behind", sd_signer, node_role)
                 end
+            end
+            if (tick_from - LastTick) > 8 then
+                cast_reject(topo, batch_id, "replica_behind", sd_signer, node_role)
             end
             http_status = 202
             res = string.format(
