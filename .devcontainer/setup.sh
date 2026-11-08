@@ -15,9 +15,9 @@ sudo apt-get update
 wait_for_apt
 sudo apt-get install -y software-properties-common curl git tmux build-essential cmake libtool autoconf automake jq
 
-# Add RabbitMQ modern Erlang 26 PPA for Ubuntu 22.04
+# Add RabbitMQ modern Erlang PPA for Ubuntu 22.04 (provides Erlang 27)
 wait_for_apt
-sudo add-apt-repository -y ppa:rabbitmq/rabbitmq-erlang-26
+sudo add-apt-repository -y ppa:rabbitmq/rabbitmq-erlang
 wait_for_apt
 sudo apt-get update
 wait_for_apt
