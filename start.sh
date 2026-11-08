@@ -25,6 +25,9 @@ fi
 
 # 2. Launch cluster
 echo "=== [2/3] Launching Multi-Node HyperBEAM Cluster ==="
+if [ -f "HyperBEAM/rebar.config" ] && ! grep -q "feature, maybe_expr" "HyperBEAM/rebar.config" 2>/dev/null; then
+    sed -i 's/{erl_opts, \[/{erl_opts, [\n    {feature, maybe_expr, enable},/' "HyperBEAM/rebar.config"
+fi
 for F in HyperBEAM/_build/default/lib/cowlib/src/cow_capsule.erl HyperBEAM/_build/default/lib/gun/src/gun.erl; do
     if [ -f "$F" ] && ! grep -q "feature(maybe_expr" "$F"; then
         sed -i '1s/^/-feature(maybe_expr, enable).\n/' "$F"
