@@ -66,6 +66,16 @@ for F in HyperBEAM/_build/default/lib/cowlib/src/cow_capsule.erl HyperBEAM/_buil
     fi
 done
 
+# Sync custom engine devices & patches into HyperBEAM preloaded tree
+if [ -d "engine/devices/hyperstack" ]; then
+    echo "=== [Codespace Setup] Syncing custom devices (hyperstack@1.0) into HyperBEAM ==="
+    mkdir -p HyperBEAM/src/preloaded/hyperstack
+    cp -rf engine/devices/hyperstack/* HyperBEAM/src/preloaded/hyperstack/
+fi
+if [ -f "engine/devices/patches/dev_lua_lib.patch" ]; then
+    (cd HyperBEAM && patch -p1 -N --dry-run < ../engine/devices/patches/dev_lua_lib.patch >/dev/null 2>&1 && patch -p1 -N < ../engine/devices/patches/dev_lua_lib.patch || true)
+fi
+
 # Build configs
 echo "=== [Codespace Setup] Building node configurations ==="
 python3 tools/build_configs.py || true

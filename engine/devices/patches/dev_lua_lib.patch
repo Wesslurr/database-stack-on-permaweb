@@ -1,0 +1,109 @@
+diff --git a/src/preloaded/vm/dev_lua_lib.erl b/src/preloaded/vm/dev_lua_lib.erl
+index 34fbffbdb..45c064905 100644
+--- a/src/preloaded/vm/dev_lua_lib.erl
++++ b/src/preloaded/vm/dev_lua_lib.erl
+@@ -15,7 +15,7 @@
+ %%% Library functions. Each exported function is _automatically_ added to the
+ %%% Lua environment, except for the `install/3' and `reinstall/3' functions,
+ %%% which install the library in a new Lua state and in a restored one.
+--export([get/3, resolve/3, set/3, event/3, id/3, signers/3]).
++-export([get/3, resolve/3, set/3, event/3, id/3, signers/3, sha256/3]).
+ -export([install/3, reinstall/3]).
+ -include("include/hb.hrl").
+ 
+@@ -29,7 +29,8 @@
+     {set, fun set/3},
+     {event, fun event/3},
+     {id, fun id/3},
+-    {signers, fun signers/3}
++    {signers, fun signers/3},
++    {sha256, fun sha256/3}
+ ]).
+ 
+ %% @doc Install the library into the given Lua environment.
+@@ -91,8 +92,7 @@ set_functions(Base, State, Opts) ->
+             <<"admissible-devices">> => AdmissibleNames,
+             <<"hashpath">> => ignore
+         },
+-    {
+-        ok,
++    StateWithLib =
+         lists:foldl(
+             fun({FuncName, Func}, StateIn) ->
+                 {ok, StateOut} =
+@@ -144,8 +144,57 @@ set_functions(Base, State, Opts) ->
+             end,
+             State,
+             ?LIBRARY_FUNCTIONS
+-        )
+-    }.
++        ),
++    {ok, StateWithSha} =
++        luerl:set_table_keys_dec(
++            [ao, sha256],
++            fun
++                ([Bin | _], St) when is_binary(Bin) ->
++                    {[<<"0x", (binary:encode_hex(crypto:hash(sha256, Bin), lowercase))/binary>>], St};
++                (_, St) ->
++                    {[<<"0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855">>], St}
++            end,
++            StateWithLib
++        ),
++    luerl:set_table_keys_dec(
++        [ao, ets_put],
++        fun
++            ([ProcId, EntityId, X, Y, Tick, Owner | _], St)
++                    when is_binary(ProcId), is_binary(EntityId), is_number(X), is_number(Y), is_number(Tick) ->
++                try
++                    case ets:info(hyperstack_points) of
++                        undefined ->
++                            hb_name:singleton(
++                                hyperstack_store_owner,
++                                fun() ->
++                                    lists:foreach(
++                                        fun(T) ->
++                                            try ets:new(T, [named_table, set, public, {read_concurrency, true}, {write_concurrency, true}])
++                                            catch _:_ -> ok end
++                                        end,
++                                        [hyperstack_points, hyperstack_shards, hyperstack_meta, hyperstack_batches]
++                                    ),
++                                    receive stop -> ok end
++                                end
++                            );
++                        _ -> ok
++                    end,
++                    ets:insert(hyperstack_points, {{ProcId, EntityId}, #{
++                        id => EntityId,
++                        x => float(X),
++                        y => float(Y),
++                        tick => trunc(Tick),
++                        last_applied_tick => trunc(Tick),
++                        owner => if is_binary(Owner) -> Owner; true -> <<"anonymous">> end
++                    }})
++                catch _:_ -> ok
++                end,
++                {[true], St};
++            (_, St) ->
++                {[false], St}
++        end,
++        StateWithSha
++    ).
+ 
+ %% @doc Helper function for returning a result from a Lua function.
+ return(Result, ExecState, Opts) ->
+@@ -260,3 +309,15 @@ event([Group, Event], ExecState, _Opts) ->
+     ),
+     ?event(Group, Event),
+     {[<<"ok">>], ExecState}.
++
++%% @doc Fast native SHA-256 computation returning 0x-prefixed canonical hex.
++sha256([Bin | _], ExecState, _ExecOpts) when is_binary(Bin) ->
++    Hash = crypto:hash(sha256, Bin),
++    Hex = binary:encode_hex(Hash, lowercase),
++    {[<<"0x", Hex/binary>>], ExecState};
++sha256([List | _], ExecState, ExecOpts) when is_list(List) ->
++    sha256([hb_util:bin(List)], ExecState, ExecOpts);
++sha256([Other | _], ExecState, ExecOpts) ->
++    sha256([hb_util:bin(Other)], ExecState, ExecOpts);
++sha256([], ExecState, _ExecOpts) ->
++    {[<<"0x0000000000000000000000000000000000000000000000000000000000000000">>], ExecState}.

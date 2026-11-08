@@ -73,6 +73,16 @@ for F in "$HB_SRC/_build/default/lib/cowlib/src/cow_capsule.erl" "$HB_SRC/_build
 done
 rm -f "$HB_SRC/_build/default/lib/cowlib/ebin/cow_capsule.beam" "$HB_SRC/_build/default/lib/gun/ebin/gun.beam"
 
+# Sync custom engine devices & patches into HyperBEAM preloaded tree
+if [ -d "$PROJECT_ROOT/engine/devices/hyperstack" ]; then
+    echo "  Syncing custom engine devices (hyperstack@1.0) into HyperBEAM..."
+    mkdir -p "$HB_SRC/src/preloaded/hyperstack"
+    cp -rf "$PROJECT_ROOT/engine/devices/hyperstack/"* "$HB_SRC/src/preloaded/hyperstack/"
+fi
+if [ -f "$PROJECT_ROOT/engine/devices/patches/dev_lua_lib.patch" ]; then
+    (cd "$HB_SRC" && patch -p1 -N --dry-run < "$PROJECT_ROOT/engine/devices/patches/dev_lua_lib.patch" >/dev/null 2>&1 && patch -p1 -N < "$PROJECT_ROOT/engine/devices/patches/dev_lua_lib.patch" || true)
+fi
+
 (
     cd "$HB_SRC"
     rebar3 compile
