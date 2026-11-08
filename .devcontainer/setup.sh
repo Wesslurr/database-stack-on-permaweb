@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+wait_for_apt() {
+    while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        echo "  [Wait] Background apt/dpkg lock is active, waiting 2s..."
+        sleep 2
+    done
+}
 
 echo "=== [Codespace Setup] Installing Erlang/OTP 26, Rebar3, C/C++ Build Tools ==="
+wait_for_apt
 sudo apt-get update
+wait_for_apt
 sudo apt-get install -y software-properties-common curl git tmux build-essential cmake libtool autoconf automake jq
 
 # Add RabbitMQ modern Erlang 26 PPA for Ubuntu 22.04
+wait_for_apt
 sudo add-apt-repository -y ppa:rabbitmq/rabbitmq-erlang-26
+wait_for_apt
 sudo apt-get update
+wait_for_apt
 sudo apt-get install -y erlang-base erlang-dev erlang-parsetools erlang-eunit erlang-asn1 erlang-crypto erlang-public-key erlang-ssl erlang-syntax-tools erlang-tools erlang-inets erlang-edoc erlang-xmerl
 
 # Install Rebar3
