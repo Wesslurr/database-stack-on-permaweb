@@ -576,8 +576,28 @@
   </div>
 
   <script>
-    const HOST = (window.location.hostname === "localhost" || !window.location.hostname) ? "127.0.0.1" : window.location.hostname;
-    const GENESIS_URL = `http://${HOST}:8733`;
+    const IS_REMOTE = window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1";
+    const HOST = IS_REMOTE ? window.location.hostname : "127.0.0.1";
+
+    function clusterUrl(port, path = "") {
+      const cleanPath = path ? (path.startsWith("/") ? path : "/" + path) : "";
+      if (IS_REMOTE) {
+        return `/proxy/${port}${cleanPath}`;
+      }
+      return `http://127.0.0.1:${port}${cleanPath}`;
+    }
+
+    function resolveClusterTarget(rawUrl, fallbackPort) {
+      if (!rawUrl) return clusterUrl(fallbackPort);
+      if (IS_REMOTE) {
+        const m = String(rawUrl).match(/:(\d+)/);
+        const port = m ? m[1] : fallbackPort;
+        return `/proxy/${port}`;
+      }
+      return String(rawUrl).replace("127.0.0.1", HOST);
+    }
+
+    const GENESIS_URL = clusterUrl(8733);
     const PLAYER_ID = "player_red";
     const STEP = 20;
     const BOUNDS_X = 430;
@@ -760,7 +780,7 @@
           applyPointsList(allPoints, true);
         } else {
           // Robust fallback to SD1 Snapshot (authoritative LMDB disk) across worker shards
-          const sdUrl = discoveredSd1Url || `http://${HOST}:8735`;
+          const sdUrl = discoveredSd1Url || clusterUrl(8735);
           const sdPromises = [];
           for (let i = 1; i <= workersToFetch; i++) {
             sdPromises.push(
@@ -1388,13 +1408,13 @@
       try {
         const data = await fetchProcessBody(GENESIS_URL, "genesis");
         const rawPrimary = data.primary_url || (data.primary && data.primary.url) || "http://127.0.0.1:8734";
-        discoveredPrimaryUrl = rawPrimary.replace("127.0.0.1", HOST);
+        discoveredPrimaryUrl = resolveClusterTarget(rawPrimary, 8734);
         const rawSd1 = data.sd1_url || "http://127.0.0.1:8735";
-        discoveredSd1Url = rawSd1.replace("127.0.0.1", HOST);
+        discoveredSd1Url = resolveClusterTarget(rawSd1, 8735);
         const rawSd2 = data.sd2_url || "http://127.0.0.1:8736";
-        discoveredSd2Url = rawSd2.replace("127.0.0.1", HOST);
+        discoveredSd2Url = resolveClusterTarget(rawSd2, 8736);
         const rawArbit = data.arbit_url || "http://127.0.0.1:8737";
-        discoveredArbitUrl = rawArbit.replace("127.0.0.1", HOST);
+        discoveredArbitUrl = resolveClusterTarget(rawArbit, 8737);
         discoveredEpoch = data.epoch || 1;
 
         const gBadge = document.getElementById("genesisBadge");
@@ -1520,7 +1540,7 @@
       const statusEl = document.getElementById("syncStatusMsg");
       if (statusEl) statusEl.textContent = "Rolling back from SD...";
       try {
-        const sdUrl = discoveredSd1Url || `http://${HOST}:8735`;
+        const sdUrl = discoveredSd1Url || clusterUrl(8735);
         appendLog(`[Rollback] Requesting authoritative state from SD1 (<code>${sdUrl}</code>)...`);
 
         let sdPoint = null;
@@ -1941,10 +1961,10 @@
       pollTelemetryMetrics();
       try {
         const [pRes, sd1Res, sd2Res, arbitRes] = await Promise.allSettled([
-          fetchProcessBody(`http://${HOST}:8734`, "primary_1"),
-          fetchProcessBody(`http://${HOST}:8735`, "sd1_1"),
-          fetchProcessBody(`http://${HOST}:8736`, "sd2_1"),
-          fetchProcessBody(`http://${HOST}:8737`, "arbit")
+          fetchProcessBody(clusterUrl(8734), "primary_1"),
+          fetchProcessBody(clusterUrl(8735), "sd1_1"),
+          fetchProcessBody(clusterUrl(8736), "sd2_1"),
+          fetchProcessBody(clusterUrl(8737), "arbit")
         ]);
 
         const pState = pRes.status === "fulfilled" ? pRes.value : null;
@@ -2052,7 +2072,7 @@
           if (proxyRes.ok) l1Info = await proxyRes.json();
         } catch (_) {
           try {
-            const l1Res = await fetch(`http://${HOST}:1984/info`, {
+            const l1Res = await fetch(clusterUrl(1984, "/info"), {
               headers: { "Accept": "application/json" },
               cache: "no-store"
             });
