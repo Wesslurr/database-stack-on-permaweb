@@ -46,6 +46,7 @@ for F in HyperBEAM/_build/default/lib/cowlib/src/cow_capsule.erl HyperBEAM/_buil
     fi
 done
 rm -f HyperBEAM/_build/default/lib/cowlib/ebin/cow_capsule.beam HyperBEAM/_build/default/lib/gun/ebin/gun.beam
+python3 tools/build_configs.py
 ./tools/cluster_up.sh
 
 # 3. Serve game client

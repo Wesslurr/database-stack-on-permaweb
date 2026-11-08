@@ -51,9 +51,12 @@ for NODE_SPEC in "${NODES[@]}"; do
 done
 sleep 1
 
+python3 "$PROJECT_ROOT/tools/build_configs.py"
+epmd -daemon >/dev/null 2>&1 || true
+
 for NODE_SPEC in "${NODES[@]}"; do
     IFS=":" read -r SESSION_NAME PORT CONFIG_PATH <<< "$NODE_SPEC"
-    CMD="export PATH=\"/home/weslur/erlang/27.0/bin:/home/weslur/.local/bin:/home/weslur/.cargo/bin:\$PATH\" && export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME"
+    CMD="export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME"
     tmux new-session -d -s "$SESSION_NAME" "bash -c '$CMD'"
     sleep 2
 done

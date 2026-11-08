@@ -80,6 +80,14 @@ rm -f "$HB_SRC/_build/default/lib/cowlib/ebin/cow_capsule.beam" "$HB_SRC/_build/
 echo "  [OK] HyperBEAM compiled."
 
 echo ""
+echo "=== [2.8/4] Generating node configurations for current environment ==="
+python3 "$PROJECT_ROOT/tools/build_configs.py"
+mkdir -p "$PROJECT_ROOT/logs"
+
+# Ensure epmd is running for distributed node naming
+epmd -daemon >/dev/null 2>&1 || true
+
+echo ""
 echo "=== [3/4] Starting 5 Independent HyperBEAM Worker Nodes in Tmux ==="
 
 NODES=(
@@ -93,8 +101,8 @@ NODES=(
 for NODE_SPEC in "${NODES[@]}"; do
     IFS=":" read -r SESSION_NAME PORT CONFIG_PATH <<< "$NODE_SPEC"
     
-    # Start tmux session running HyperBEAM node
-    CMD="export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME"
+    # Start tmux session running HyperBEAM node with log persistence
+    CMD="export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME 2>&1 | tee \"$PROJECT_ROOT/logs/${SESSION_NAME}.log\""
     tmux new-session -d -s "$SESSION_NAME" "bash -c '$CMD'"
     echo "  [STARTED] Node '$SESSION_NAME' on port $PORT (config: $(basename "$CONFIG_PATH"))"
     # Brief pause to let node initialize its VM
@@ -123,6 +131,11 @@ for NODE_SPEC in "${NODES[@]}"; do
     if [ "$NODE_OK" = false ]; then
         echo "[FAILED]"
         ALL_READY=false
+        if [ -f "$PROJECT_ROOT/logs/${SESSION_NAME}.log" ]; then
+            echo "    --- Last 5 lines of $SESSION_NAME log: ---"
+            tail -n 5 "$PROJECT_ROOT/logs/${SESSION_NAME}.log" | sed 's/^/    /'
+            echo "    ------------------------------------------"
+        fi
     fi
 done
 
