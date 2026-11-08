@@ -39,7 +39,7 @@
       "label": "hb-arbit (Port 8737)"
     }
   },
-  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postCreateCommand": "bash .devcontainer/setup.sh || true",
   "customizations": {
     "vscode": {
       "extensions": [

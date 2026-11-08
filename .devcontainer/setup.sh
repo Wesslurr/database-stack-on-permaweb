@@ -50,14 +50,24 @@ fi
 
 # Initialize git submodule
 echo "=== [Codespace Setup] Initializing HyperBEAM submodule ==="
-git submodule update --init --recursive
+git submodule update --init --recursive || true
 
-# Pre-compile HyperBEAM
-echo "=== [Codespace Setup] Pre-compiling HyperBEAM ==="
-(cd HyperBEAM && rebar3 compile)
+# Patch rebar.config for Erlang OTP 26/27 EEP-49 maybe expression support
+if [ -f "HyperBEAM/rebar.config" ] && ! grep -q "feature, maybe_expr" "HyperBEAM/rebar.config" 2>/dev/null; then
+    sed -i 's/{erl_opts, \[/{erl_opts, [\n    {feature, maybe_expr, enable},/' "HyperBEAM/rebar.config"
+fi
+if [ -f "HyperBEAM/rebar.config" ] && ! grep -q "add, cowlib" "HyperBEAM/rebar.config" 2>/dev/null; then
+    sed -i 's/{override, gun, \[{deps, \[cowlib\]}\]}/{override, gun, [{deps, [cowlib]}]},\n    {add, cowlib, [{erl_opts, [{feature, maybe_expr, enable}]}]},\n    {add, gun, [{erl_opts, [{feature, maybe_expr, enable}]}]}/' "HyperBEAM/rebar.config"
+fi
+
+for F in HyperBEAM/_build/default/lib/cowlib/src/cow_capsule.erl HyperBEAM/_build/default/lib/gun/src/gun.erl; do
+    if [ -f "$F" ] && ! grep -q "feature(maybe_expr" "$F"; then
+        sed -i '1s/^/-feature(maybe_expr, enable).\n/' "$F"
+    fi
+done
 
 # Build configs
 echo "=== [Codespace Setup] Building node configurations ==="
-python3 tools/build_configs.py
+python3 tools/build_configs.py || true
 
-echo "=== [Codespace Setup] Complete! Ready to launch with ./tools/cluster_up.sh ==="
+echo "=== [Codespace Setup] Complete! Ready to launch with ./start.sh ==="

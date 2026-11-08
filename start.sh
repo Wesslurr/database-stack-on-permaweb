@@ -13,6 +13,18 @@ echo "      🚀 HyperStack Real-Time Engine Auto-Launcher        "
 echo "=========================================================="
 
 # 1. Dependency check
+if ! command -v apt-get &>/dev/null && [ ! -f /usr/bin/apt-get ]; then
+    echo "=========================================================="
+    echo "⚠️  Codespace sedang berjalan dalam RECOVERY MODE"
+    echo "    (Container build sebelumnya gagal pada commit lama)."
+    echo ""
+    echo "👉  Cara keluar dari Recovery Mode & restore Ubuntu penuh:"
+    echo "    1. Tekan Ctrl+Shift+P (atau F1)"
+    echo "    2. Ketik dan pilih: 'Codespaces: Rebuild Container'"
+    echo "=========================================================="
+    exit 1
+fi
+
 OTP_VER=$(erl -noshell -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().' 2>/dev/null || echo "0")
 if [ "$OTP_VER" = "0" ] || [ "$OTP_VER" -lt 26 ] || ! command -v rebar3 &>/dev/null; then
     echo "=== [1/3] Erlang OTP release ($OTP_VER) is older than 26. Upgrading to modern Erlang... ==="
