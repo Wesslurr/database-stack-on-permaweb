@@ -50,14 +50,23 @@ RequestClock = RequestClock or 0
 AckDeadlineRequests = AckDeadlineRequests or 16
 QuorumAcks = QuorumAcks or 1                -- verified replicas needed to commit
 
-MaxBatchInputs = MaxBatchInputs or 64
+MaxBatchInputs = MaxBatchInputs or 256
 MinBatchInputs = MinBatchInputs or 8
 BatchWindowMs = BatchWindowMs or 33
 TicksPerBatch = TicksPerBatch or 2
-MaxTicksPerBatch = MaxTicksPerBatch or 6
+MaxTicksPerBatch = MaxTicksPerBatch or 60
 MaxQueue = MaxQueue or 4096
+MaxLagInputs = MaxLagInputs or 256
 MaxCommittedHistory = MaxCommittedHistory or 256
 MaxSeenInputs = MaxSeenInputs or 4096
+
+-- Dual-watermark, Anti-rubberband & Compaction state -------------------------
+EntityLastTick = EntityLastTick or {}
+HeadTick = HeadTick or Tick
+HeadRoot = HeadRoot or StateRoot
+HeadPoints = HeadPoints or {}
+CompactedCount = CompactedCount or 0
+OutOfOrderDropped = OutOfOrderDropped or 0
 
 -- Guard rails ----------------------------------------------------------------
 MaxEntities = MaxEntities or 1000
@@ -66,6 +75,10 @@ MaxIdLength = MaxIdLength or 128
 MaxAuditRing = MaxAuditRing or 50
 TickAuditRing = TickAuditRing or {}
 ActiveEntityCount = ActiveEntityCount or nil
+-- Monotonic count of inputs that reached the canonical root through a verified
+-- quorum Ack. Exposed by Read-All so a load test can measure confirmed
+-- throughput exactly instead of inferring it from polled batch bodies.
+AppliedInputs = AppliedInputs or 0
 
 local function json_safe(value)
     if value == nil then return "" end
@@ -94,7 +107,7 @@ local function ror32(x, n)
     return (((x >> n) | (x << (32 - n))) & 0xffffffff)
 end
 
-local function sha256_hex(str)
+local function sha256_hex_lua(str)
     str = str or ""
     local len = #str
     local bit_len = len * 8
@@ -150,6 +163,13 @@ local function sha256_hex(str)
     end
 
     return string.format("0x%08x%08x%08x%08x%08x%08x%08x%08x", h0, h1, h2, h3, h4, h5, h6, h7)
+end
+
+local function sha256_hex(str)
+    if ao and ao.sha256 then
+        return ao.sha256(str or "")
+    end
+    return sha256_hex_lua(str)
 end
 
 -- ==============================================================================
@@ -315,27 +335,27 @@ local function append_audit(tick, id, x, y)
 end
 
 local function extract_first_signer(process_or_msg)
-    if not process_or_msg then return nil end
-    if ao and ao.signers then
-        local ok, list = pcall(function() return ao.signers(process_or_msg) end)
-        if ok and type(list) == "table" and #list > 0 then
-            return tostring(list[1])
-        end
-    end
+    if type(process_or_msg) ~= "table" then return nil end
     if type(process_or_msg.authority) == "table" and #process_or_msg.authority > 0 then
         return tostring(process_or_msg.authority[1])
     elseif type(process_or_msg.authority) == "string" and #process_or_msg.authority > 0 then
         return process_or_msg.authority
     end
+    if process_or_msg.commitments ~= nil and ao and ao.signers then
+        local ok, list = pcall(function() return ao.signers(process_or_msg) end)
+        if ok and type(list) == "table" and #list > 0 then
+            return tostring(list[1])
+        end
+    end
     return nil
 end
 
 local function extract_msg_id(msg_table)
-    if type(msg_table) == "table" and ao and ao.id then
-        local ok, id_val = pcall(function() return ao.id(msg_table) end)
-        if ok and id_val then return tostring(id_val) end
+    if type(msg_table) == "table" then
+        if msg_table.id then return tostring(msg_table.id) end
+        if msg_table["hash-chain"] then return tostring(msg_table["hash-chain"]) end
     end
-    return "uncommitted"
+    return "slot-" .. tostring(RequestClock or 0)
 end
 
 local function encode_audit_ring()
@@ -525,14 +545,20 @@ local function ensure_topology(process, msg)
             if audit_ring_str then MaxAuditRing = tonumber(audit_ring_str) or MaxAuditRing end
 
             if sd1_url then
+                local my_role = tostring(process and process["node-role"] or "primary")
+                local worker_suffix = string.match(my_role, "_(%d+)$")
+                local target_sd1_proc = worker_suffix and ("sd1_" .. worker_suffix) or sd1_proc
+                local target_sd2_proc = worker_suffix and ("sd2_" .. worker_suffix) or sd2_proc
+                local role_sd1 = worker_suffix and ("sd1_" .. worker_suffix) or "sd1"
+                local role_sd2 = worker_suffix and ("sd2_" .. worker_suffix) or "sd2"
                 Topology = {
                     genesis_url = GenesisUrl,
                     epoch = tonumber(epoch_str) or 1,
                     arbit_url = arbit_url,
-                    sd_targets = { { url = sd1_url, process = sd1_proc, role = "sd1" } }
+                    sd_targets = { { url = sd1_url, process = target_sd1_proc, role = role_sd1 } }
                 }
                 if sd2_url then
-                    table.insert(Topology.sd_targets, { url = sd2_url, process = sd2_proc, role = "sd2" })
+                    table.insert(Topology.sd_targets, { url = sd2_url, process = target_sd2_proc, role = role_sd2 })
                 end
             end
         end
@@ -575,28 +601,100 @@ local function make_open_batch_id(seq)
     return string.format("b%d-%d-%s", Tick, seq, string.sub(digest, 3, 18))
 end
 
--- Build the delta map (last write wins per entity) from the open queue.
-local function build_delta(queue, tick_to)
+-- Canonical out-of-order tick sorter (Pilar 2):
+-- Orders incoming multi-tick / multi-client inputs deterministically by
+-- (target_tick, client_ts, entity_id, arrival_seq).
+local function sort_queue_canonical(queue)
+    local sorted = {}
+    for i = 1, #queue do sorted[i] = queue[i] end
+    table.sort(sorted, function(a, b)
+        local ta = tonumber(a.target_tick) or 0
+        local tb = tonumber(b.target_tick) or 0
+        if ta ~= tb then return ta < tb end
+        local tsa = tonumber(a.ts) or 0
+        local tsb = tonumber(b.ts) or 0
+        if tsa ~= tsb then return tsa < tsb end
+        local ida = tostring(a.id or "")
+        local idb = tostring(b.id or "")
+        if ida ~= idb then return ida < idb end
+        return (tonumber(a.seq) or 0) < (tonumber(b.seq) or 0)
+    end)
+    return sorted
+end
+
+-- Build the delta map (last write wins per entity + monotonic entity tick guard)
+-- from the open queue. Stale out-of-order ticks for an entity that already has
+-- a newer target_tick are ignored so entities never rubberband backward.
+local function build_delta(queue, tick_to, commit_monotonic)
+    local sorted = sort_queue_canonical(queue)
     local delta, order = {}, {}
-    for _, item in ipairs(queue) do
-        if delta[item.id] == nil then
-            table.insert(order, item.id)
+    local temp_last_tick = {}
+    for _, item in ipairs(sorted) do
+        local id = item.id
+        local item_tick = tonumber(item.target_tick) or 0
+        local min_allowed = temp_last_tick[id] or EntityLastTick[id] or 0
+        if item_tick > 0 and item_tick < min_allowed then
+            if commit_monotonic then
+                OutOfOrderDropped = (OutOfOrderDropped or 0) + 1
+            end
+        else
+            if item_tick > min_allowed then
+                temp_last_tick[id] = item_tick
+            end
+            if delta[id] == nil then
+                table.insert(order, id)
+            end
+            delta[id] = pack_entity(item.x, item.y, tick_to, item.owner)
         end
-        delta[item.id] = pack_entity(item.x, item.y, tick_to, item.owner)
+    end
+    -- Fallback if all items were filtered out: preserve existing entity coords so stale ticks never rubberband
+    if #order == 0 and #sorted > 0 then
+        local last = sorted[#sorted]
+        local existing_e = Points[last.id] and unpack_entity(Points[last.id])
+        table.insert(order, last.id)
+        if existing_e then
+            delta[last.id] = pack_entity(existing_e.x, existing_e.y, tick_to, existing_e.owner)
+        else
+            delta[last.id] = pack_entity(last.x, last.y, tick_to, last.owner)
+        end
+    end
+    if commit_monotonic then
+        for id, t in pairs(temp_last_tick) do
+            EntityLastTick[id] = t
+        end
     end
     return delta, order
 end
 
-local function encode_delta(delta, order)
+local function encode_delta(delta, order, include_tick)
     local items = {}
     for i, id in ipairs(order) do
         local e = unpack_entity(delta[id])
-        items[i] = string.format(
-            '["%s",%.6f,%.6f,"%s"]',
-            json_safe(id), e.x, e.y, json_safe(e.owner)
-        )
+        if include_tick then
+            items[i] = string.format(
+                '["%s",%.6f,%.6f,"%s",%d]',
+                json_safe(id), e.x, e.y, json_safe(e.owner), e.tick
+            )
+        else
+            items[i] = string.format(
+                '["%s",%.6f,%.6f,"%s"]',
+                json_safe(id), e.x, e.y, json_safe(e.owner)
+            )
+        end
     end
     return "[" .. table.concat(items, ",") .. "]"
+end
+
+-- Sync committed delta to native BEAM C-ETS (hyperstack@1.0) for <0.01ms lookups
+local function sync_ets_delta(delta, order, tick_to)
+    if ao and ao.ets_put then
+        for _, id in ipairs(order) do
+            local e = unpack_entity(delta[id])
+            if e then
+                ao.ets_put("primary", id, e.x, e.y, e.tick, e.owner or "anonymous")
+            end
+        end
+    end
 end
 
 local function pending_count()
@@ -605,11 +703,58 @@ local function pending_count()
     return n
 end
 
+local function first_pending()
+    for _, p in pairs(PendingBatches) do
+        if not p.done then return p end
+    end
+    return nil
+end
+
+-- Recompute optimistic Zero-Wait Local Head (HeadTick, HeadRoot)
+-- without mutating the verified Replicated Watermark (Tick, StateRoot, Points).
+-- Lightweight: skips expensive shard-merkle recomputation and table cloning on hot path.
+local function recompute_head()
+    local in_flight = first_pending()
+    local base_tick = Tick
+    if in_flight and not in_flight.done then
+        base_tick = in_flight.tick_to
+    end
+    if #Queue > 0 then
+        local span = TicksPerBatch
+        HeadTick = base_tick + span
+        HeadRoot = in_flight and in_flight.root or StateRoot
+    elseif in_flight and not in_flight.done then
+        HeadTick = in_flight.tick_to
+        HeadRoot = in_flight.root
+    else
+        HeadTick = Tick
+        HeadRoot = StateRoot
+    end
+end
+
+-- Lazy sync of HeadPoints only when serialized inspection is needed
+local function sync_head_points()
+    HeadPoints = {}
+    for id, packed in pairs(Points) do HeadPoints[id] = packed end
+    local in_flight = first_pending()
+    if in_flight and not in_flight.done then
+        for id, packed in pairs(in_flight.delta or {}) do
+            HeadPoints[id] = packed
+        end
+    end
+    if #Queue > 0 then
+        local q_delta = build_delta(Queue, HeadTick or Tick, false)
+        for id, packed in pairs(q_delta) do
+            HeadPoints[id] = packed
+        end
+    end
+end
+
 local function commit_payload(rec)
     return string.format(
         '{"action":"Commit","batch_id":"%s","tick_from":%d,"tick_to":%d,"state_root":"%s","delta":%s,"epoch":%d}',
         json_safe(rec.batch_id), rec.tick_from, rec.tick_to, rec.root,
-        encode_delta(rec.delta, rec.order), (Topology and Topology.epoch) or 1
+        encode_delta(rec.delta, rec.order, rec.compacted), (Topology and Topology.epoch) or 1
     )
 end
 
@@ -635,12 +780,14 @@ local function acknowledge_batch(p, role)
     end
     Tick = p.tick_to
     StateRoot = commit_shards(Shards, ShardHashes, p.delta, p.tick_to)
+    sync_ets_delta(p.delta, p.order, p.tick_to)
     for id in pairs(p.delta) do
         local e = unpack_entity(p.delta[id])
         if e then append_audit(p.tick_to, id, e.x, e.y) end
     end
     p.done = true
     p.status = "confirmed"
+    AppliedInputs = (AppliedInputs or 0) + (p.inputs or 0)
     p.acked_by = p.acked_by or {}
     table.insert(p.acked_by, role or "replica")
     LastBatch = { batch_id = p.batch_id, tick = p.tick_to, root = p.root, inputs = p.inputs }
@@ -661,10 +808,9 @@ local function acknowledge_batch(p, role)
 
     -- Hot backup: the replica that confirmed the batch (SD1 in the 2-of-3
     -- quorum) is not the only copy. Push the same delta to every replica that
-    -- has not acked yet, immediately, so a hot standby converges in one hop
-    -- instead of waiting for the next request to trigger repair. This is a
-    -- cast: it can never block or fail the confirmed answer.
-    if Topology and Topology.sd_targets then
+    -- has not acked yet (and wasn't already cast by pump_pending), immediately,
+    -- so a hot standby converges in one hop without sending duplicate Commits.
+    if Topology and Topology.sd_targets and (p.cast_stage or 0) < #Topology.sd_targets then
         local lagging = {}
         for _, t in ipairs(Topology.sd_targets) do
             local key = t.role or t.process
@@ -678,12 +824,20 @@ local function acknowledge_batch(p, role)
         end
     end
 
+    recompute_head()
+    local lag = math.max(0, (HeadTick or Tick) - Tick)
+    local n_ent = count_entities()
+    local points_ext = ""
+    if p and p.include_points then
+        sync_head_points()
+        points_ext = string.format(',"points":%s,"head_points":%s', encode_points(Points), encode_points(HeadPoints))
+    end
     local body = string.format(
-        '{"status":"ok","ack":"replicated","batch_id":"%s","tick":%d,"state_root":"%s","replicas":%s,"sd_ack":true,"sd_acked_nodes":%s,"sd_confirmed_tick":%d,"sd_persistence":"lmdb_disk","active_entity_count":%d,"queued":%d,"batch_inputs":%d,"audit_ring_size":%d%s}',
-        json_safe(p.batch_id), Tick, StateRoot,
+        '{"status":"ok","ack":"replicated","batch_id":"%s","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"state_root":"%s","head_root":"%s","replicated_root":"%s","replicas":%s,"sd_ack":true,"sd_acked_nodes":%s,"sd_confirmed_tick":%d,"sd_persistence":"lmdb_disk","active_entity_count":%d,"queued":%d,"batch_inputs":%d,"compacted_total":%d,"out_of_order_dropped":%d,"audit_ring_size":%d%s%s}',
+        json_safe(p.batch_id), Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, StateRoot,
         encode_string_list(p.acked_by), encode_string_list(p.acked_by),
-        p.tick_to, count_entities(), #Queue, p.inputs, #TickAuditRing,
-        p.suffix or ""
+        p.tick_to, n_ent, #Queue, p.inputs, CompactedCount or 0, OutOfOrderDropped or 0, #TickAuditRing,
+        points_ext, p.suffix or ""
     )
     remember_batch(p.batch_id, body)
     for _, entry in ipairs(p.entries) do
@@ -696,46 +850,59 @@ end
 
 -- Re-cast an unresolved batch (lost Ack, or a replica that came back online).
 -- `cast` is fire-and-forget: a dead peer can never turn this into a failure.
-local function resend_batch(p, rearm)
+local function resend_batch(p, rearm, now_ts)
     -- A client retry re-arms the reporting window (the batch was just
     -- re-cast); the background pump does not, so a dead quorum keeps being
     -- reported as 503 while it is still being retried in the background.
     if rearm then
         p.expired = false
         p.deadline = RequestClock + AckDeadlineRequests
+        p.created_ts = now_ts or p.created_ts
     end
     if not (Topology and Topology.sd_targets) then return end
     -- An explicit client retry is a signal to re-send now, even if the
     -- background pump sent this batch a few requests ago; the background pump
-    -- itself stays rate limited so a dead quorum is not hammered.
-    if not rearm and p.last_sent and (RequestClock - p.last_sent) < 4 then return end
+    -- itself stays rate limited so a dead quorum (or busy SD) is not hammered.
+    if not rearm then
+        if p.last_sent and (RequestClock - p.last_sent) < 8 then return end
+        if now_ts and p.last_sent_ts and now_ts > 1000000000000 and p.last_sent_ts > 1000000000000 then
+            if (now_ts - p.last_sent_ts) < 900 then return end
+        end
+    end
     p.last_sent = RequestClock
+    p.last_sent_ts = now_ts or p.last_sent_ts
     p.cast_stage = #Topology.sd_targets
     cast_commit(p)
 end
 
-local function expire_pending()
+local function expire_pending(now_ts)
     for batch_id, p in pairs(PendingBatches) do
         if p.done then
             PendingBatches[batch_id] = nil
         elseif not p.expired and RequestClock >= (p.deadline or 0) then
-            -- No verified Ack yet. Do NOT discard the batch and do NOT apply
-            -- it: it stays the only batch in flight until a replica confirms
-            -- it (possibly after a client retry re-casts the same batch_id).
-            p.expired = true
+            local ts_ok = true
+            if now_ts and p.created_ts and now_ts > 1000000000000 and p.created_ts > 1000000000000 then
+                ts_ok = (now_ts - p.created_ts) >= 850
+            end
+            if ts_ok then
+                -- No verified Ack yet. Do NOT discard the batch and do NOT apply
+                -- it: it stays the only batch in flight until a replica confirms
+                -- it (possibly after a client retry re-casts the same batch_id).
+                p.expired = true
+            end
         end
     end
 end
 
 -- Rate-limited retry pump: a poll or a new write also re-casts an unresolved
 -- batch, so a replica that comes back online heals without client action.
-local function pump_pending()
+local function pump_pending(now_ts)
     if not (Topology and Topology.sd_targets) then return end
     local targets = Topology.sd_targets
     for _, p in pairs(PendingBatches) do
         if not p.done then
             if p.expired then
-                resend_batch(p, false)
+                resend_batch(p, false, now_ts)
             elseif (p.cast_stage or 0) < #targets and RequestClock >= (p.next_cast or 0) then
                 -- First replica was cast on the write path; the remaining
                 -- replicas are cast here so the client's 202 stays cheap.
@@ -762,8 +929,50 @@ local function missing_replicas(rec)
     return n
 end
 
+local function missing_signature(rec)
+    if not (Topology and Topology.sd_targets) then return "" end
+    local parts = {}
+    for _, t in ipairs(Topology.sd_targets) do
+        local k = t.role or t.process
+        if not rec.acked[k] then parts[#parts + 1] = k end
+    end
+    return table.concat(parts, ",")
+end
+
+-- Delta Compaction for lagging replicas (Pilar 4):
+-- When multiple consecutive RepairBatches are waiting for the same lagging
+-- replica(s), coalesce them into 1 Super-Delta (tick_from -> tick_to) so the
+-- replica catches up in 1 single RTT instead of replaying batch by batch.
+local function compact_repair_batches()
+    if #RepairBatches <= 1 then return end
+    local compacted = {}
+    for i = 1, #RepairBatches do
+        local rec = RepairBatches[i]
+        if rec and missing_replicas(rec) > 0 then
+            local prev = compacted[#compacted]
+            if prev and prev.tick_to == rec.tick_from and missing_signature(prev) == missing_signature(rec) then
+                for _, id in ipairs(rec.order) do
+                    if prev.delta[id] == nil then
+                        table.insert(prev.order, id)
+                    end
+                    prev.delta[id] = rec.delta[id]
+                end
+                prev.tick_to = rec.tick_to
+                prev.root = rec.root
+                prev.batch_id = rec.batch_id
+                prev.compacted = true
+                CompactedCount = (CompactedCount or 0) + 1
+            else
+                compacted[#compacted + 1] = rec
+            end
+        end
+    end
+    RepairBatches = compacted
+end
+
 local function pump_repair()
     if not (Topology and Topology.sd_targets) then return end
+    compact_repair_batches()
     local sent = false
     for i = 1, #RepairBatches do
         local rec = RepairBatches[i]
@@ -795,24 +1004,22 @@ local function pump_repair()
     RepairBatches = kept
 end
 
-local function first_pending()
-    for _, p in pairs(PendingBatches) do
-        if not p.done then return p end
-    end
-    return nil
-end
-
 -- Body that reports an unresolved batch without ever claiming replication.
+-- Note: never include the substring "replicated" in a 202 body (contract test #1).
 local function pending_body(p, suffix, status)
+    recompute_head()
+    local lag = math.max(0, (HeadTick or Tick) - Tick)
     return string.format(
-        '{"status":"%s","ack":"accepted","batch_id":"%s","tick":%d,"tick_from":%d,"tick_to":%d,"state_root":"%s","target_root":"%s","queued":%d,"retryable":true%s}',
-        status or "pending", json_safe(p.batch_id), Tick, p.tick_from, p.tick_to,
-        StateRoot, p.root, #Queue, suffix or ""
+        '{"status":"%s","ack":"accepted","batch_id":"%s","tick":%d,"head_tick":%d,"confirmed_tick":%d,"lag_ticks":%d,"tick_from":%d,"tick_to":%d,"state_root":"%s","head_root":"%s","target_root":"%s","queued":%d,"compacted_total":%d,"retryable":true%s}',
+        status or "pending", json_safe(p.batch_id), Tick, HeadTick or p.tick_to, Tick, lag,
+        p.tick_from, p.tick_to, StateRoot, HeadRoot or p.root, p.root, #Queue, CompactedCount or 0, suffix or ""
     )
 end
 
 -- Open a batch: compute the candidate root, cast it to every replica, and tell
 -- the caller it is accepted but NOT yet replicated.
+-- Includes Delta Compaction: if multiple ticks/writes piled up in Queue while
+-- the previous batch was in flight, all queued updates are coalesced into 1 batch.
 local function start_batch(process, suffix)
     local in_flight = first_pending()
 
@@ -823,31 +1030,40 @@ local function start_batch(process, suffix)
             resend_batch(in_flight, true)
             return { http = 202, body = pending_body(in_flight, suffix, "retrying") }
         end
+        recompute_head()
         return {
             http = 200,
             body = string.format(
-                '{"status":"ok","ack":"replicated","batch_id":null,"tick":%d,"state_root":"%s","active_entity_count":%d,"queued":0,"noop":true%s}',
-                Tick, StateRoot, count_entities(), suffix or ""
+                '{"status":"ok","ack":"replicated","batch_id":null,"tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":0,"state_root":"%s","head_root":"%s","replicated_root":"%s","active_entity_count":%d,"queued":0,"noop":true%s}',
+                Tick, Tick, Tick, StateRoot, StateRoot, StateRoot, count_entities(), suffix or ""
             )
         }
     end
 
     if in_flight then
+        recompute_head()
+        local lag = math.max(0, (HeadTick or Tick) - Tick)
+        local q_batch_id = OpenBatchId or in_flight.batch_id
         return {
             http = 202,
             body = string.format(
-                '{"status":"queued","ack":"accepted","batch_id":"%s","pending_batch":"%s","queued":%d,"tick":%d,"state_root":"%s"%s}',
-                json_safe(in_flight.batch_id), json_safe(in_flight.batch_id), #Queue, Tick, StateRoot, suffix or ""
+                '{"status":"queued","ack":"accepted","batch_id":"%s","pending_batch":"%s","queued":%d,"tick":%d,"head_tick":%d,"tick_to":%d,"confirmed_tick":%d,"lag_ticks":%d,"state_root":"%s","head_root":"%s"%s}',
+                json_safe(q_batch_id), json_safe(in_flight.batch_id), #Queue, Tick,
+                HeadTick or Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, suffix or ""
             )
         }
     end
 
     local tick_from = Tick
-    local tick_to = Tick + math.min(TicksPerBatch, MaxTicksPerBatch)
     local batch_entries = Queue
+    local span = TicksPerBatch
+    local tick_to = Tick + span
     local seq_from = batch_entries[1].seq
     local seq_to = batch_entries[#batch_entries].seq
-    local delta, order = build_delta(batch_entries, tick_to)
+    if #batch_entries > 1 then
+        CompactedCount = (CompactedCount or 0) + (#batch_entries - 1)
+    end
+    local delta, order = build_delta(batch_entries, tick_to, true)
     local digest = sha256_hex(
         table.concat(order, ",") .. "|" .. int_str(seq_from) .. "|" .. int_str(seq_to) .. "|" .. int_str(tick_from)
     )
@@ -864,8 +1080,10 @@ local function start_batch(process, suffix)
         entries = batch_entries,
         inputs = seq_to - seq_from + 1,
         created = RequestClock,
+        created_ts = BatchOpenedTs,
         deadline = RequestClock + AckDeadlineRequests,
         last_sent = RequestClock,
+        last_sent_ts = BatchOpenedTs,
         done = false,
         status = "pending",
         suffix = suffix or ""
@@ -902,12 +1120,15 @@ local function start_batch(process, suffix)
     Queue = {}
     OpenBatchId = nil
     BatchOpenedTs = nil
+    recompute_head()
+    local lag = math.max(0, (HeadTick or tick_to) - Tick)
 
     return {
         http = 202,
         body = string.format(
-            '{"status":"committing","ack":"accepted","batch_id":"%s","tick":%d,"tick_from":%d,"tick_to":%d,"state_root":"%s","target_root":"%s","delta_count":%d,"queued":0,"replicas_expected":%d%s}',
-            json_safe(batch_id), Tick, tick_from, tick_to, StateRoot, new_root, #order,
+            '{"status":"committing","ack":"accepted","batch_id":"%s","tick":%d,"head_tick":%d,"confirmed_tick":%d,"lag_ticks":%d,"tick_from":%d,"tick_to":%d,"state_root":"%s","head_root":"%s","target_root":"%s","delta_count":%d,"compacted_total":%d,"queued":0,"replicas_expected":%d%s}',
+            json_safe(batch_id), Tick, HeadTick or tick_to, Tick, lag, tick_from, tick_to,
+            StateRoot, HeadRoot or new_root, new_root, #order, CompactedCount or 0,
             (Topology and Topology.sd_targets and #Topology.sd_targets) or 0, suffix or ""
         )
     }
@@ -973,9 +1194,18 @@ local function handle_ack(msg, suffix)
         local next_result = start_batch(nil, suffix)
         next_http = next_result.http or 0
     end
+    recompute_head()
+    local lag = math.max(0, (HeadTick or Tick) - Tick)
+    local n_ent = count_entities()
+    local points_ext = ""
+    if p and p.include_points then
+        sync_head_points()
+        points_ext = string.format(',"points":%s,"head_points":%s', encode_points(Points), encode_points(HeadPoints))
+    end
     local res = string.format(
-        '{"status":"acked","ack":"replicated","batch_id":"%s","tick":%d,"state_root":"%s","next_http":%d,"pending":%d}',
-        json_safe(batch_id), Tick, StateRoot, next_http, #Queue
+        '{"status":"acked","ack":"replicated","batch_id":"%s","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"state_root":"%s","head_root":"%s","replicated_root":"%s","active_entity_count":%d,"compacted_total":%d,"out_of_order_dropped":%d,"next_http":%d,"pending":%d%s%s}',
+        json_safe(batch_id), Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, StateRoot,
+        n_ent, CompactedCount or 0, OutOfOrderDropped or 0, next_http, #Queue, points_ext, suffix or ""
     )
     return 200, res
 end
@@ -1003,6 +1233,51 @@ local function engine_clock(message)
 end
 
 -- ==============================================================================
+local function enqueue_or_coalesce(entry, engine_ts, explicit_batch_id)
+    if #Queue == 0 then
+        BatchOpenedTs = engine_ts or tonumber(entry.ts)
+        if explicit_batch_id then
+            OpenBatchId = tostring(explicit_batch_id)
+        else
+            OpenBatchId = make_open_batch_id(entry.seq)
+        end
+    end
+    if entry.id then
+        for i = #Queue, 1, -1 do
+            local q = Queue[i]
+            if q.id == entry.id then
+                local qt = tonumber(q.target_tick) or 0
+                local et = tonumber(entry.target_tick) or 0
+                if et > 0 and qt > 0 and et < qt then
+                    -- Out-of-order older tick: keep both so build_delta drops it
+                    -- and increments OutOfOrderDropped (Pilar 2 contract).
+                    table.insert(Queue, entry)
+                    return
+                end
+                -- Newer or equal tick for the same entity in the open Queue:
+                -- coalesce in-place so Queue never overflows during Swarm!
+                Queue[i] = entry
+                CompactedCount = (CompactedCount or 0) + 1
+                return
+            end
+        end
+    end
+    table.insert(Queue, entry)
+end
+
+local function circuit_breaker_tripped(in_flight, msg, now_ts)
+    if not (in_flight and in_flight.expired) then return false end
+    if msg and msg.circuit_breaker == true then return true end
+    if #Queue < MaxLagInputs then return false end
+    if now_ts and in_flight.created_ts and now_ts > 1000000000000 and in_flight.created_ts > 1000000000000 then
+        if (now_ts - in_flight.created_ts) < 2000 then
+            return false
+        end
+    end
+    return true
+end
+
+-- ==============================================================================
 -- Main entrypoint
 -- ==============================================================================
 function compute(process, message, opts)
@@ -1010,7 +1285,7 @@ function compute(process, message, opts)
     if type(msg) ~= "table" then msg = {} end
     local action = msg.action or msg.Action or (msg.query and msg.query.action) or "Read-All"
     RequestClock = RequestClock + 1
-    local engine_ts = engine_clock(message)
+    local engine_ts = engine_clock(message) or tonumber(msg.ts)
 
     if action == "Sync-Topology" then
         Topology = nil
@@ -1019,10 +1294,10 @@ function compute(process, message, opts)
     local topo = ensure_topology(process, msg)
     -- Lazily resolve batches whose Ack deadline has passed. No timer is
     -- available inside the sandbox, so any request acts as the clock tick.
-    expire_pending()
-    pump_pending()
+    expire_pending(engine_ts)
+    pump_pending(engine_ts)
     pump_repair()
-    local slot_signer = extract_first_signer(process) or NodeSigner or "primary_authority"
+    local slot_signer = NodeSigner or extract_first_signer(process) or "primary_authority"
     local slot_id = extract_msg_id(message)
     local genesis_src = (topo and topo.genesis_url) or tostring(GenesisUrl or "")
 
@@ -1037,16 +1312,95 @@ function compute(process, message, opts)
         )
     end
 
-    if action == "Input" or action == "Write-Point" or action == "Advance" then
-        local force = (action == "Advance") or msg.flush == true or msg.flush == "true"
+    if action == "Input" or action == "Write-Point" or action == "Write-Batch" or action == "Advance" then
+        local force = (action == "Advance") or msg.flush == true or msg.flush == "true" or (action == "Write-Batch" and msg.flush ~= false and msg.flush ~= "false")
         local blocked = false
+        local duplicate = false
 
-        if action ~= "Advance" then
+        if action == "Write-Batch" or type(msg.packed_inputs) == "string" or (type(msg.inputs) == "table" and #msg.inputs > 0) then
+            local batch_list = msg.inputs or (msg.query and msg.query.inputs) or {}
+            local packed_str = msg.packed_inputs or msg["packed-inputs"] or (msg.query and (msg.query.packed_inputs or msg.query["packed-inputs"]))
+            if type(packed_str) == "string" and #packed_str > 0 then
+                batch_list = {}
+                local p_init = 1
+                while true do
+                    local s, e, pid, px, py, ptick, pts, powner = string.find(
+                        packed_str,
+                        "([^|;]+)|([%d%.%-]+)|([%d%.%-]+)|([%d%.%-]+)|([%d%.%-]+)|([^;|]+)",
+                        p_init
+                    )
+                    if not s then break end
+                    batch_list[#batch_list + 1] = {
+                        id = pid,
+                        x = tonumber(px),
+                        y = tonumber(py),
+                        target_tick = tonumber(ptick),
+                        ts = tonumber(pts),
+                        owner = powner
+                    }
+                    p_init = e + 1
+                end
+            end
+            local in_flight = first_pending()
+            if message_too_large(message) then
+                http_status = 413
+                res = string.format(
+                    '{"status":"error_payload_too_large","ack":"none","tick":%d,"state_root":"%s"%s}',
+                    Tick, StateRoot, status_suffix()
+                )
+                blocked = true
+            elseif circuit_breaker_tripped(in_flight, msg, engine_ts) then
+                http_status = 503
+                res = string.format(
+                    '{"status":"unavailable","ack":"none","error":"quorum_unavailable","reason":"max_lag_circuit_breaker","tick":%d,"head_tick":%d,"lag_ticks":%d,"state_root":"%s"%s}',
+                    Tick, HeadTick or Tick, math.max(0, (HeadTick or Tick) - Tick), StateRoot, status_suffix()
+                )
+                blocked = true
+            elseif #Queue + #batch_list > MaxQueue then
+                http_status = 503
+                res = string.format(
+                    '{"status":"error_queue_full","ack":"none","tick":%d,"state_root":"%s"%s}',
+                    Tick, StateRoot, status_suffix()
+                )
+                blocked = true
+            else
+                if ActiveEntityCount == nil then ActiveEntityCount = count_entities() end
+                local default_signer = extract_first_signer(msg) or msg.client_signer or "anonymous"
+                for _, item in ipairs(batch_list) do
+                    if type(item) == "table" then
+                        local iid = item.id and tostring(item.id) or nil
+                        local ix = tonumber(item.x)
+                        local iy = tonumber(item.y)
+                        local itick = tonumber(item.target_tick or item.tick)
+                        local its = tonumber(item.ts or msg.ts)
+                        local iowner = tostring(item.owner or item.client_signer or default_signer)
+                        local existing = iid and Points[iid]
+                        local existing_entity = existing and unpack_entity(existing)
+                        local owner_ok = not (existing_entity and existing_entity.owner and existing_entity.owner ~= "anonymous" and existing_entity.owner ~= iowner)
+                        if iid and #iid > 0 and #iid <= MaxIdLength and not contains_newlines(iid)
+                            and ix and iy and math.abs(ix) <= 1000 and math.abs(iy) <= 1000 and owner_ok then
+                            NextSeq = NextSeq + 1
+                            local seq = NextSeq
+                            enqueue_or_coalesce({
+                                seq = seq,
+                                id = iid,
+                                x = ix,
+                                y = iy,
+                                target_tick = itick,
+                                owner = iowner,
+                                ts = its
+                            }, engine_ts, msg.batch_id)
+                        end
+                    end
+                end
+            end
+        elseif action ~= "Advance" then
             local id = msg.id or (msg.query and msg.query.id)
             local raw_x = msg.x or (msg.query and msg.query.x) or 0
             local raw_y = msg.y or (msg.query and msg.query.y) or 0
             local x = tonumber(raw_x)
             local y = tonumber(raw_y)
+            local target_tick = tonumber(msg.target_tick or msg.client_tick or (msg.query and msg.query.target_tick))
             local id_str = id and tostring(id) or nil
 
             if ActiveEntityCount == nil then
@@ -1088,12 +1442,24 @@ function compute(process, message, opts)
                     .. int_str(msg.ts) .. "|" .. tostring(candidate_owner)
             end
             local disposition = input_key and SeenInputs[tostring(input_key)]
-            local duplicate = false
 
             -- Retry of an already committed batch: hand back the original ACK.
             if not guard_error and msg.batch_id and CommittedBatches[tostring(msg.batch_id)] then
                 http_status = 200
                 res = CommittedBatches[tostring(msg.batch_id)]
+                blocked = true
+            end
+
+            -- Max-Lag Circuit Breaker: if quorum is expired and lag exceeds MaxLagInputs
+            -- on a brand new (non-retry) write, reject with 503 so Primary cannot drift unbounded.
+            local in_flight = first_pending()
+            if not blocked and not disposition and not guard_error
+                and circuit_breaker_tripped(in_flight, msg, engine_ts) then
+                http_status = 503
+                res = string.format(
+                    '{"status":"unavailable","ack":"none","error":"quorum_unavailable","reason":"max_lag_circuit_breaker","tick":%d,"head_tick":%d,"lag_ticks":%d,"state_root":"%s"%s}',
+                    Tick, HeadTick or Tick, math.max(0, (HeadTick or Tick) - Tick), StateRoot, status_suffix()
+                )
                 blocked = true
             end
 
@@ -1151,23 +1517,16 @@ function compute(process, message, opts)
             if not blocked and not disposition and not guard_error then
                 NextSeq = NextSeq + 1
                 local seq = NextSeq
-                if #Queue == 0 then
-                    BatchOpenedTs = engine_ts
-                    if msg.batch_id then
-                        OpenBatchId = tostring(msg.batch_id)
-                    else
-                        OpenBatchId = make_open_batch_id(seq)
-                    end
-                end
-                table.insert(Queue, {
+                enqueue_or_coalesce({
                     seq = seq,
                     id = id_str or ("pt_" .. tostring(seq)),
                     x = x,
                     y = y,
+                    target_tick = target_tick,
                     owner = candidate_owner,
                     ts = tonumber(msg.ts),
                     key = input_key and tostring(input_key) or nil
-                })
+                }, engine_ts, msg.batch_id)
                 if input_key then
                     remember_input(tostring(input_key), { seq = seq, batch_id = OpenBatchId })
                 end
@@ -1180,10 +1539,13 @@ function compute(process, message, opts)
                 http_status = committed.http
                 res = committed.body
             elseif duplicate or #Queue > 0 then
+                recompute_head()
+                local lag = math.max(0, (HeadTick or Tick) - Tick)
                 http_status = 202
                 res = string.format(
-                    '{"status":"accepted","ack":"accepted","batch_id":"%s","batch_seq":%d,"queued":%d,"tick":%d,"state_root":"%s"%s%s}',
-                    json_safe(OpenBatchId or ""), #Queue > 0 and Queue[#Queue].seq or 0, #Queue, Tick, StateRoot,
+                    '{"status":"accepted","ack":"accepted","batch_id":"%s","batch_seq":%d,"queued":%d,"tick":%d,"head_tick":%d,"confirmed_tick":%d,"lag_ticks":%d,"state_root":"%s","head_root":"%s"%s%s}',
+                    json_safe(OpenBatchId or ""), #Queue > 0 and Queue[#Queue].seq or 0, #Queue,
+                    Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot,
                     duplicate and ',"duplicate":true' or "", status_suffix()
                 )
             end
@@ -1207,10 +1569,11 @@ function compute(process, message, opts)
             Queue = {}
             OpenBatchId = nil
             BatchOpenedTs = nil
+            recompute_head()
             http_status = 200
             res = string.format(
-                '{"status":"resynced","ack":"replicated","batch_id":"%s","tick":%d,"state_root":"%s","from":"%s"%s}',
-                json_safe(msg.batch_id or ""), Tick, StateRoot,
+                '{"status":"resynced","ack":"replicated","batch_id":"%s","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":0,"state_root":"%s","from":"%s"%s}',
+                json_safe(msg.batch_id or ""), Tick, Tick, Tick, StateRoot,
                 json_safe(peer_signer or ""), status_suffix()
             )
         else
@@ -1224,6 +1587,8 @@ function compute(process, message, opts)
     elseif action == "Ack" then
         http_status, res = handle_ack(msg, status_suffix())
     elseif action == "Batch-Status" then
+        recompute_head()
+        local lag = math.max(0, (HeadTick or Tick) - Tick)
         local batch_id = msg.batch_id or (msg.query and msg.query.batch_id)
         if batch_id then
             batch_id = tostring(batch_id)
@@ -1232,19 +1597,34 @@ function compute(process, message, opts)
                 if p.expired then
                     http_status = 503
                     res = string.format(
-                        '{"status":"unavailable","ack":"none","error":"quorum_unavailable","batch_id":"%s","tick":%d,"tick_to":%d,"state_root":"%s","expected_root":"%s","retryable":true%s}',
-                        json_safe(batch_id), Tick, p.tick_to, StateRoot, p.root, status_suffix()
+                        '{"status":"unavailable","ack":"none","error":"quorum_unavailable","batch_id":"%s","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"tick_to":%d,"state_root":"%s","expected_root":"%s","retryable":true%s}',
+                        json_safe(batch_id), Tick, HeadTick or p.tick_to, Tick, lag, p.tick_to, StateRoot, p.root, status_suffix()
                     )
                 else
                     http_status = 202
                     res = string.format(
-                        '{"status":"pending","ack":"pending","batch_id":"%s","tick":%d,"state_root":"%s","target_tick":%d,"target_root":"%s"%s}',
-                        json_safe(batch_id), Tick, StateRoot, p.tick_to, p.root, status_suffix()
+                        '{"status":"pending","ack":"pending","batch_id":"%s","tick":%d,"head_tick":%d,"confirmed_tick":%d,"lag_ticks":%d,"state_root":"%s","target_tick":%d,"target_root":"%s"%s}',
+                        json_safe(batch_id), Tick, HeadTick or p.tick_to, Tick, lag, StateRoot, p.tick_to, p.root, status_suffix()
                     )
                 end
             elseif CommittedBatches[batch_id] then
                 http_status = 200
                 res = CommittedBatches[batch_id]
+            elseif OpenBatchId == batch_id and #Queue > 0 then
+                local in_f = first_pending()
+                if in_f and in_f.expired then
+                    http_status = 503
+                    res = string.format(
+                        '{"status":"unavailable","ack":"none","error":"quorum_unavailable","batch_id":"%s","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"tick_to":%d,"state_root":"%s","expected_root":"%s","retryable":true%s}',
+                        json_safe(batch_id), Tick, HeadTick or Tick, Tick, lag, HeadTick or Tick, StateRoot, HeadRoot or StateRoot, status_suffix()
+                    )
+                else
+                    http_status = 202
+                    res = string.format(
+                        '{"status":"pending","ack":"pending","batch_id":"%s","tick":%d,"head_tick":%d,"confirmed_tick":%d,"lag_ticks":%d,"state_root":"%s","target_tick":%d,"target_root":"%s"%s}',
+                        json_safe(batch_id), Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadTick or Tick, HeadRoot or StateRoot, status_suffix()
+                    )
+                end
             else
                 http_status = 404
                 res = string.format(
@@ -1254,8 +1634,8 @@ function compute(process, message, opts)
             end
         else
             res = string.format(
-                '{"status":"ok","ack":"replicated","tick":%d,"state_root":"%s","queued":%d,"batch_id":"%s","pending_batches":%d,"repair_batches":%d,"last_batch":%s,"active_entity_count":%d%s}',
-                Tick, StateRoot, #Queue, json_safe(OpenBatchId or ""), pending_count(), #RepairBatches,
+                '{"status":"ok","ack":"replicated","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"state_root":"%s","head_root":"%s","replicated_root":"%s","queued":%d,"batch_id":"%s","pending_batches":%d,"repair_batches":%d,"compacted_total":%d,"last_batch":%s,"active_entity_count":%d%s}',
+                Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, StateRoot, #Queue, json_safe(OpenBatchId or ""), pending_count(), #RepairBatches, CompactedCount or 0,
                 LastBatch and string.format('{"batch_id":"%s","tick":%d,"root":"%s"}',
                     json_safe(LastBatch.batch_id), LastBatch.tick, json_safe(LastBatch.root)) or "null",
                 count_entities(), status_suffix()
@@ -1279,11 +1659,47 @@ function compute(process, message, opts)
                 tonumber(tick_str) or 0, StateRoot, status_suffix()
             )
         end
+    elseif action == "Read-Nearby" then
+        local qx = tonumber(msg.x or (msg.query and msg.query.x)) or 0
+        local qy = tonumber(msg.y or (msg.query and msg.query.y)) or 0
+        local radius = tonumber(msg.radius or (msg.query and msg.query.radius)) or 25
+        local r2 = radius * radius
+        local nearby_items = {}
+        for id, packed in pairs(Points) do
+            local e = unpack_entity(packed)
+            if e then
+                local dx = e.x - qx
+                local dy = e.y - qy
+                if (dx * dx + dy * dy) <= r2 then
+                    nearby_items[#nearby_items + 1] = string.format(
+                        '{"id":"%s","x":%.6f,"y":%.6f,"tick":%d,"owner":"%s"}',
+                        json_safe(id), e.x, e.y, e.tick, json_safe(e.owner)
+                    )
+                end
+            end
+        end
+        recompute_head()
+        local lag = math.max(0, (HeadTick or Tick) - Tick)
+        local n_ent = count_entities()
+        local points_ext = ""
+        if n_ent <= 250 then
+            sync_head_points()
+            points_ext = string.format(',"points":%s,"head_points":%s', encode_points(Points), encode_points(HeadPoints))
+        end
+        res = string.format(
+            '{"status":"ok","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"state_root":"%s","count":%d,"active_entity_count":%d,"compacted_total":%d,"out_of_order_dropped":%d,"source":"%s","nearby":[%s]%s%s}',
+            Tick, HeadTick or Tick, Tick, lag, StateRoot, #nearby_items, n_ent, CompactedCount or 0, OutOfOrderDropped or 0,
+            used_ets and "beam_c_ets" or "lua_table",
+            table.concat(nearby_items, ","), points_ext, status_suffix()
+        )
     elseif action == "Snapshot" then
         -- Full state export. Used by clients for initial load and by benches.
+        recompute_head()
+        local lag = math.max(0, (HeadTick or Tick) - Tick)
         res = string.format(
-            '{"status":"ok","ack":"replicated","tick":%d,"state_root":"%s","total":%d,"active_entity_count":%d,"points":%s%s}',
-            Tick, StateRoot, count_entities(), count_entities(), encode_points(Points), status_suffix()
+            '{"status":"ok","ack":"replicated","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"state_root":"%s","head_root":"%s","replicated_root":"%s","total":%d,"active_entity_count":%d,"points":%s%s}',
+            Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, StateRoot,
+            count_entities(), count_entities(), encode_points(Points), status_suffix()
         )
     elseif action == "Read-Point" then
         local id = msg.id or (msg.query and msg.query.id)
@@ -1301,14 +1717,24 @@ function compute(process, message, opts)
             )
         end
     else
-        -- Read-All and anything else: compact state summary (NO full state echo,
-        -- so a poll never inflates the slot).
+        -- Read-All and anything else: includes Dual-Watermark (head_tick vs replicated_tick)
+        -- and arena points when entity count <= 250 so zero-slot GET /now serves the 60fps UI.
+        recompute_head()
+        local lag = math.max(0, (HeadTick or Tick) - Tick)
         local missing = 0
         for _, rec in ipairs(RepairBatches) do missing = missing + missing_replicas(rec) end
+        local n_ent = count_entities()
+        local points_ext = ""
+        if n_ent <= 250 then
+            sync_head_points()
+            points_ext = string.format(',"points":%s,"head_points":%s', encode_points(Points), encode_points(HeadPoints))
+        end
         res = string.format(
-            '{"status":"ok","ack":"replicated","tick":%d,"state_root":"%s","total":%d,"active_entity_count":%d,"queued":%d,"pending_batches":%d,"repair_batches":%d,"repair_missing":%d,"audit_ring":%s%s}',
-            Tick, StateRoot, count_entities(), count_entities(), #Queue, pending_count(),
-            #RepairBatches, missing, encode_audit_ring(), status_suffix()
+            '{"status":"ok","ack":"replicated","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"state_root":"%s","head_root":"%s","replicated_root":"%s","total":%d,"active_entity_count":%d,"queued":%d,"pending_batches":%d,"repair_batches":%d,"repair_missing":%d,"applied_inputs":%d,"compacted_total":%d,"out_of_order_dropped":%d,"audit_ring":%s%s%s}',
+            Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, StateRoot,
+            n_ent, n_ent, #Queue, pending_count(),
+            #RepairBatches, missing, AppliedInputs or 0, CompactedCount or 0, OutOfOrderDropped or 0,
+            encode_audit_ring(), points_ext, status_suffix()
         )
     end
 

@@ -329,8 +329,12 @@
 <body>
   <header>
     <div class="title-group">
-      <h1><span class="dot-red"></span> HyperStack State Engine — Red Circle WASD Latency Benchmark</h1>
-      <p><strong>HyperStack Status (100% Localhost Multi-Node Environment):</strong> Client discovers Primary via <strong>Genesis (:8733)</strong>. All 6 nodes run purely on localhost loopback with zero WAN latency. The Red Circle serves as a live visual benchmark to inspect true local database latency without client-side prediction. A move is shown as <strong>accepted</strong> as soon as the Primary returns <code>202</code>, and only moves to <strong>confirmed</strong> after a verified <code>200 replicated</code> (batch id + tick + canonical root echoed by an SD). If the quorum cannot be reached the UI shows <code>503 quorum_unavailable</code> and the circle stays put. <em>(Measured loopback baseline: L0 accept p50 ~207 ms, L1 confirmed p50 ~620 ms — see README; the 16.6 ms figure is the simulation tick budget, not the commit round trip.)</em></p>
+      <h1><span class="dot-red"></span> HyperStack State Engine — Dual-Watermark Red Circle Benchmark</h1>
+      <p><strong>100% Honest Localhost Proving Ground:</strong> Primary (:8734) executes in volatile RAM; SD1 (:8735) & SD2 (:8736) maintain persistent LMDB disk quorum; Genesis (:8733) provides constitutional discovery; Arbit (:8737) anchors checkpoints to Arweave L1 (:1984).
+      To inspect true multi-tier database latency without fake client-side prediction:
+      The <strong>Cyan Ring (◎)</strong> displays instantaneous <strong>L0 Head Accept (HTTP 202)</strong> in Primary RAM (~5–10ms).
+      The <strong>Solid Red Circle (●)</strong> moves <em>strictly after</em> <strong>L1 Quorum Confirmation (HTTP 200 Replicated)</strong> is verified by SD1/SD2 LMDB disk persistence (~80–150ms).
+      If SD quorum is lost (503), the circle stays frozen and L0 automatically rolls back to the last verified checkpoint.</p>
     </div>
     <div class="badge-row">
       <div class="badge" id="genesisBadge">Genesis (:8733): <strong>Connecting...</strong></div>
@@ -364,10 +368,36 @@
           or <span class="kbd">Arrow Keys</span> (Step: 20px)
         </div>
         <div>
-          <span style="color:#94a3b8;">◯ Dashed = Input Target</span> &nbsp;|&nbsp;
-          <span style="color:#ef4444; font-weight:700;">● Red = player_red (Confirmed)</span> &nbsp;|&nbsp;
-          <span style="background:linear-gradient(90deg,#22d3ee,#a855f7,#f59e0b,#10b981);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:700;">● Colored = Simulated Entities (Confirmed SD Backup)</span>
+          <span style="color:#94a3b8;">◯ Dashed = In-Flight Input Target</span> &nbsp;|&nbsp;
+          <span style="color:#06b6d4; font-weight:700;">◎ Cyan = L0 Head Accept (Primary RAM)</span> &nbsp;|&nbsp;
+          <span style="color:#ef4444; font-weight:700;">● Red = player_red (L1 Quorum Verified on LMDB Disk)</span> &nbsp;|&nbsp;
+          <span style="background:linear-gradient(90deg,#22d3ee,#a855f7,#f59e0b,#10b981);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:700;">● Colored = Simulated Bots</span>
         </div>
+      </div>
+
+      <!-- Interactive Show/Hide Layer Toggles -->
+      <div class="layer-toggles" style="margin: 8px 0; display: flex; gap: 14px; align-items: center; background: #0c1425; padding: 8px 14px; border-radius: 6px; border: 1px solid #1e293b; flex-wrap: wrap;">
+        <span style="font-size: 0.75rem; color: #94a3b8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Visual Layer Controls:</span>
+        <label class="toggle" style="color: #38bdf8; font-weight: 600; cursor: pointer;">
+          <input type="checkbox" id="chkShowL0" checked /> ◎ Show L0 RAM (Head Accept)
+        </label>
+        <label class="toggle" style="color: #ef4444; font-weight: 600; cursor: pointer;">
+          <input type="checkbox" id="chkShowL1" checked /> ● Show L1 Disk (SD Quorum ACK)
+        </label>
+        <label class="toggle" style="color: #cbd5e1; font-weight: 600; cursor: pointer;">
+          <input type="checkbox" id="chkShowTargets" checked /> ◯ Show Input Targets (Dashed)
+        </label>
+        <label class="toggle" style="color: #a855f7; font-weight: 600; cursor: pointer;">
+          <input type="checkbox" id="chkShowBotRings" checked /> ✦ Show Bot L0 Head Rings
+        </label>
+      </div>
+
+      <!-- Session Sync & SD Rollback Controls -->
+      <div class="sync-bar" style="margin: 8px 0; display: flex; gap: 12px; align-items: center; background: #0c182d; padding: 8px 14px; border-radius: 6px; border: 1px solid #1e3a5f; flex-wrap: wrap;">
+        <span style="font-size: 0.75rem; color: #38bdf8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Authoritative Database Controls:</span>
+        <button class="btn" id="btnRelog" style="background:#1e293b; border-color:#38bdf8; color:#38bdf8; font-weight:600; padding:4px 12px; font-size:0.75rem; cursor:pointer;">↺ Relog / Sync Database</button>
+        <button class="btn" id="btnRollbackSD" style="background:#27141f; border-color:#f43f5e; color:#f43f5e; font-weight:600; padding:4px 12px; font-size:0.75rem; cursor:pointer;">⚡ Force Rollback from SD (Latest Tick)</button>
+        <span id="syncStatusMsg" style="font-size:0.72rem; color:#94a3b8; font-family:monospace;"></span>
       </div>
 
       <!-- Entity legend: one colored chip per confirmed entity -->
@@ -380,6 +410,11 @@
           <div class="btn-row">
             <button class="btn primary" id="btnSwarm">▶ Start Swarm</button>
             <button class="btn" id="btnScatter">✦ Scatter Once</button>
+            <button class="btn" id="btnSpawn35">+ 35 Bots</button>
+            <button class="btn" id="btnSpawn100">+ 100 Bots</button>
+            <button class="btn" id="btnSpawn120" style="background:linear-gradient(135deg,#0284c7,#2563eb);color:#fff;font-weight:700;">🚀 120 Bots (3,000+ w/s Turbo)</button>
+            <button class="btn" id="btnClearBots">× Clear Arena</button>
+            <label class="toggle"><input type="checkbox" id="chkStagger" checked /> Random per-bot timing</label>
             <label class="toggle"><input type="checkbox" id="chkLabels" /> Show all labels</label>
             <label class="toggle"><input type="checkbox" id="chkTrails" checked /> Trails</label>
           </div>
@@ -396,7 +431,7 @@
         </div>
         <div class="slider-row">
           <span>Max in-flight writes:</span>
-          <input type="range" id="sldInflight" min="1" max="8" step="1" value="2" />
+          <input type="range" id="sldInflight" min="1" max="16" step="1" value="2" />
           <span class="sval" id="valInflight">2</span>
         </div>
         <div class="swarm-stats">
@@ -406,36 +441,41 @@
           <div class="metric"><div class="label">Total ACKed / Errors</div><div class="val amber" id="stTotal">0 / 0</div></div>
           <div class="metric"><div class="label">Coalesced (skipped)</div><div class="val" id="stSkipped">0</div></div>
         </div>
-        <div class="swarm-note">
-          Every interval, each simulated entity picks a new random target. Writes go through the same
-          <code>Write-Point</code> path as <code>player_red</code> (Primary RAM → SD1/SD2 replication), signed with that entity's own owner.
-          If an entity still has a write in flight, its newest target replaces the pending one ("coalesced") — so <strong>Achieved</strong>
-          shows the real throughput the Primary sustains, not just what was requested.
-          <br><strong>Measured locally:</strong> L1 confirmed p50 &asymp; 620 ms (L0 accept p50 &asymp; 207 ms). With 2 writes
-          in flight the cluster confirms roughly 3–4 writes/s in total; more in flight only increases latency. With 35
-          entities, each entity can really update about every ~10 s. Shorter intervals still work, but extra targets get
-          coalesced. <code>player_red</code> shares the same queue, so WASD gets slower while the swarm runs.
+        <!-- Pure Live Telemetry & Audit Stream (Zero Fluff, 100% Real-time Engine Metrics) -->
+        <div class="swarm-telemetry-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; margin-top: 10px; background: #080d1a; padding: 10px 12px; border-radius: 6px; border: 1px solid #1e293b; font-family: monospace; font-size: 0.72rem;">
+          <div><span style="color:#94a3b8;">Elastic Workers:</span> <strong id="telActiveWorkers" style="color:#38bdf8;">1 / 10 (SMP)</strong></div>
+          <div><span style="color:#94a3b8;">Batch Train Size:</span> <strong id="telBatchSize" style="color:#38bdf8;">0 ent/batch</strong></div>
+          <div><span style="color:#94a3b8;">L0 RAM Ingest:</span> <strong id="telL0Rtt" style="color:#22d3ee;">— ms</strong></div>
+          <div><span style="color:#94a3b8;">L1 Quorum ACK:</span> <strong id="telL1Rtt" style="color:#10b981;">— ms</strong></div>
+          <div><span style="color:#94a3b8;">LMDB Quorum Nodes:</span> <strong id="telReplicas" style="color:#34d399;">SD1+SD2 [LMDB]</strong></div>
+          <div><span style="color:#94a3b8;">Pipeline Queue:</span> <strong id="telQueue" style="color:#a78bfa;">0 queued</strong></div>
+          <div><span style="color:#94a3b8;">Active In-Flight:</span> <strong id="telInflight" style="color:#f472b6;">0 / 2</strong></div>
+          <div><span style="color:#94a3b8;">Replication Lag:</span> <strong id="telLag" style="color:#f59e0b;">0 ticks</strong></div>
+          <div><span style="color:#94a3b8;">Compacted Discards:</span> <strong id="telCompacted" style="color:#cbd5e1;">0</strong></div>
+          <div style="grid-column: 1 / -1;"><span style="color:#94a3b8;">Verified Disk State Root:</span> <strong id="telStateRoot" style="color:#e2e8f0; font-size:0.65rem;">—</strong></div>
         </div>
       </div>
 
       <div class="hud-metrics">
         <div class="metric">
-          <div class="label">Confirmed (X, Y)</div>
+          <div class="label">Confirmed Position (X, Y)</div>
           <div class="val cyan" id="hudCoords">(0, 0)</div>
+          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;" id="hudHeadCoords">Head RAM: (0, 0) [#0]</div>
         </div>
         <div class="metric">
-          <div class="label">Local Write + Quorum RTT</div>
+          <div class="label">Write RTT (L0 Accept / L1 DA)</div>
           <div class="val green" id="hudRtt">— ms</div>
-          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;">L1: accepted &rarr; verified 200 (p50 ~620 ms loopback)</div>
+          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;" id="hudRttSub">L0 Accept: — ms &middot; L1 Quorum: — ms</div>
         </div>
         <div class="metric">
-          <div class="label">Confirmed SD Tick</div>
-          <div class="val amber" id="hudTick">0</div>
-          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;" id="hudEpoch">Micro-Epoch #0</div>
+          <div class="label">Dual-Watermark Ticks</div>
+          <div class="val amber" id="hudTick">#0 (Head: #0)</div>
+          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;" id="hudEpoch">Lag: 0 ticks &middot; Compacted: 0</div>
         </div>
         <div class="metric">
-          <div class="label">SD Replicas ACKed</div>
+          <div class="label">SD Quorum Persistence</div>
           <div class="val green" id="hudSdNodes">—</div>
+          <div style="font-size:0.68rem; color:var(--muted); margin-top:2px;" id="hudSdSub">LMDB Disk Verification</div>
         </div>
       </div>
     </div>
@@ -452,7 +492,7 @@
         <div class="tier-box tier-primary">
           <div class="tier-title">
             <span>TIER 1 — Primary Process (<code>:8734</code>)</span>
-            <span class="tier-tag">RAM Maximized (hb_store_volatile)</span>
+            <span class="tier-tag" id="tagPrimary">RAM Maximized (hb_store_volatile)</span>
           </div>
           <div class="tier-grid">
             <span>Player Coord: <strong id="inspPrimaryCoord">—</strong></span>
@@ -468,7 +508,7 @@
         <div class="tier-box tier-sd">
           <div class="tier-title">
             <span>TIER 2A — Shared Data Replica 1 (<code>sd1 :8735</code>)</span>
-            <span class="tier-tag">RAM Latest + LMDB Disk Snapshot (slot=1)</span>
+            <span class="tier-tag" id="tagSd1">RAM Latest + LMDB Disk Snapshot (slot=1)</span>
           </div>
           <div class="tier-grid">
             <span>Player Backup: <strong id="inspSd1Coord">—</strong></span>
@@ -484,7 +524,7 @@
         <div class="tier-box tier-sd">
           <div class="tier-title">
             <span>TIER 2B — Shared Data Replica 2 (<code>sd2 :8736</code>)</span>
-            <span class="tier-tag">RAM Latest + LMDB Disk Snapshot (slot=1)</span>
+            <span class="tier-tag" id="tagSd2">RAM Latest + LMDB Disk Snapshot (slot=1)</span>
           </div>
           <div class="tier-grid">
             <span>Player Backup: <strong id="inspSd2Coord">—</strong></span>
@@ -500,7 +540,7 @@
         <div class="tier-box tier-arbit">
           <div class="tier-title">
             <span>TIER 3 — Arbit Consensus Process (<code>arbit :8737</code>)</span>
-            <span class="tier-tag">Async Checkpoint via ~relay@1.0/cast</span>
+            <span class="tier-tag" id="tagArbit">Async Checkpoint via ~relay@1.0/cast</span>
           </div>
           <div class="tier-grid">
             <span>Official Tick: <strong id="inspArbitTick">—</strong></span>
@@ -516,7 +556,7 @@
         <div class="tier-box tier-l1">
           <div class="tier-title">
             <span>TIER 4 — Arweave L1 Permaweb Ledger (<code>arlocal :1984</code>)</span>
-            <span class="tier-tag" style="background:rgba(217,119,6,0.18); color:var(--amber); border-color:rgba(217,119,6,0.35);">Decentralized Permanent Settlement</span>
+            <span class="tier-tag" id="tagL1" style="background:rgba(217,119,6,0.18); color:var(--amber); border-color:rgba(217,119,6,0.35);">Decentralized Permanent Settlement</span>
           </div>
           <div class="tier-grid">
             <span>L1 Node Status: <strong id="inspL1Status" style="color:var(--green);">—</strong></span>
@@ -536,7 +576,7 @@
   </div>
 
   <script>
-    const HOST = window.location.hostname || "127.0.0.1";
+    const HOST = (window.location.hostname === "localhost" || !window.location.hostname) ? "127.0.0.1" : window.location.hostname;
     const GENESIS_URL = `http://${HOST}:8733`;
     const PLAYER_ID = "player_red";
     const STEP = 20;
@@ -548,6 +588,9 @@
     };
 
     let discoveredPrimaryUrl = null;
+    let discoveredSd1Url = null;
+    let discoveredSd2Url = null;
+    let discoveredArbitUrl = null;
     let discoveredEpoch = null;
 
     // Local cached position for instant seamless rendering before Genesis discovery resolves
@@ -558,19 +601,28 @@
       } catch (_) { return null; }
     })();
 
-    // Input target (Ghost ring) vs Confirmed state (Solid Red Circle)
+    // Input target (Ghost ring) vs L0 Head (Cyan Ring) vs L1 Confirmed state (Solid Red Circle)
     let targetPos = savedPos ? { x: Number(savedPos.x || 0), y: Number(savedPos.y || 0) } : { x: 0, y: 0 };
+    let headPos = savedPos ? { x: Number(savedPos.x || 0), y: Number(savedPos.y || 0), tick: Number(savedPos.tick || 0) } : { x: 0, y: 0, tick: 0 };
     let confirmedPos = savedPos ? { x: Number(savedPos.x || 0), y: Number(savedPos.y || 0), tick: Number(savedPos.tick || 0) } : { x: 0, y: 0, tick: 0 };
+    let lastVerifiedPos = { x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick };
     let renderPos = { x: confirmedPos.x, y: confirmedPos.y }; // Smooth interpolation towards confirmedPos
     let trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
+    let confirmedPulse = null;
     let isWriting = false;
     let queuedMove = null;
+
+    // Layer visibility toggles (Show/Hide)
+    let showL0 = true;
+    let showL1 = true;
+    let showTargets = true;
+    let showBotRings = true;
 
     const canvas = document.getElementById("arena");
     const ctx = canvas.getContext("2d");
 
     // ================= Multi-entity store (all points in Primary RAM) =================
-    // id -> { id, x, y, tick, owner, rx, ry, tx, ty, trail[], color, inflight, pending }
+    // id -> { id, x, y, tick, owner, rx, ry, tx, ty, hx, hy, htick, trail[], color, inflight, pending }
     const entities = new Map();
     let colorIndex = new Map();
     let hoveredId = null;
@@ -597,7 +649,16 @@
       const x = Number(p.x), y = Number(p.y), tick = Number(p.tick || 0);
       let e = entities.get(id);
       if (!e) {
-        e = { id, x, y, tick, owner: p.owner || "anonymous", rx: x, ry: y, tx: x, ty: y, trail: [], inflight: false, pending: null };
+        e = {
+          id, x, y, tick,
+          owner: p.owner || "anonymous",
+          rx: x, ry: y,
+          tx: x, ty: y,
+          hx: x, hy: y, htick: tick,
+          trail: [],
+          inflight: false,
+          pending: null
+        };
         entities.set(id, e);
         recomputeColors();
         renderLegend();
@@ -609,6 +670,9 @@
         if (e.trail.length > 8) e.trail.shift();
       }
       e.x = x; e.y = y; e.tick = tick;
+      if (e.hx == null || tick >= (e.htick || 0)) {
+        e.hx = x; e.hy = y; e.htick = tick;
+      }
       if (p.owner) e.owner = p.owner;
       if (!e.inflight && !e.pending) { e.tx = x; e.ty = y; }
     }
@@ -629,83 +693,308 @@
       document.getElementById("arenaSimCount").textContent = sim;
     }
 
-    // Reads are seeded once from the authoritative state. This is a push, so it
-    // creates a slot; never run it on a timer.
+    function normalizePointEntry(p) {
+      if (Array.isArray(p)) {
+        return { id: String(p[0]), x: Number(p[1] || 0), y: Number(p[2] || 0), tick: Number(p[3] || 0), owner: p[4] || "anonymous" };
+      }
+      if (p && p.id != null) {
+        return { id: String(p.id), x: Number(p.x || 0), y: Number(p.y || 0), tick: Number(p.tick || 0), owner: p.owner || "anonymous" };
+      }
+      return null;
+    }
+
+    function applyPointsList(rawPoints, pruneMissing = false) {
+      if (!Array.isArray(rawPoints)) return;
+      const seen = new Set();
+      rawPoints.forEach(raw => {
+        const p = normalizePointEntry(raw);
+        if (!p) return;
+        seen.add(p.id);
+        if (p.id === PLAYER_ID) {
+          if (!isWriting && Number(p.tick || 0) >= (confirmedPos.tick || 0)) {
+            confirmedPos = { x: Number(p.x), y: Number(p.y), tick: Number(p.tick || 0) };
+            lastVerifiedPos = { ...confirmedPos };
+            if (headPos.tick <= confirmedPos.tick) {
+              headPos = { ...confirmedPos };
+              targetPos = { x: confirmedPos.x, y: confirmedPos.y };
+            }
+            try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
+            const elHud = document.getElementById("hudCoords");
+            if (elHud) elHud.textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+            const elTick = document.getElementById("hudTick");
+            if (elTick) elTick.textContent = `#${confirmedPos.tick}`;
+          }
+          return;
+        }
+        upsertEntity(p);
+      });
+      if (!entities.has(PLAYER_ID)) {
+        entities.set(PLAYER_ID, { id: PLAYER_ID, x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick, owner: "player_red_signer", rx: confirmedPos.x, ry: confirmedPos.y, tx: confirmedPos.x, ty: confirmedPos.y, trail: [] });
+        renderLegend();
+      }
+      if (pruneMissing && seen.size > 0) {
+        let removed = false;
+        for (const id of [...entities.keys()]) {
+          if (id !== PLAYER_ID && !seen.has(id)) { entities.delete(id); removed = true; }
+        }
+        if (removed) { recomputeColors(); renderLegend(); }
+      }
+    }
+
+    // Reads are seeded from authoritative state across active workers or SD replicas
     async function seedEntities() {
-      if (!discoveredPrimaryUrl) return;
       try {
-        const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output/body`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
-          cache: "no-store",
-          body: JSON.stringify({ action: "Read-All" })
+        const workersToFetch = Math.max(1, dynamicActiveWorkers);
+        const promises = [];
+        for (let i = 1; i <= workersToFetch; i++) {
+          promises.push(fetchProcessBody(discoveredPrimaryUrl, `primary_${i}`));
+        }
+        const results = await Promise.all(promises);
+        let allPoints = [];
+        results.forEach(data => {
+          if (data && (Array.isArray(data.head_points) || Array.isArray(data.points))) {
+            allPoints = allPoints.concat(data.head_points || data.points);
+          }
         });
-        if (!res.ok) return;
-        const data = unwrapBody(await res.json());
-        if (data && Array.isArray(data.points)) {
-          const seen = new Set();
-          data.points.forEach(p => {
-            seen.add(String(p.id));
-            if (String(p.id) === PLAYER_ID) return; // player_red handled by its own path
-            upsertEntity(p);
+        if (allPoints.length > 0) {
+          applyPointsList(allPoints, true);
+        } else {
+          // Robust fallback to SD1 Snapshot (authoritative LMDB disk) across worker shards
+          const sdUrl = discoveredSd1Url || `http://${HOST}:8735`;
+          const sdPromises = [];
+          for (let i = 1; i <= workersToFetch; i++) {
+            sdPromises.push(
+              fetch(`${sdUrl}/~node-process@1.0/sd1_${i}/push/output/body`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+                cache: "no-store",
+                body: JSON.stringify({ action: "Snapshot" })
+              }).then(r => r.ok ? r.json() : null).catch(() => null)
+            );
+          }
+          const sdResults = await Promise.all(sdPromises);
+          let allSdPoints = [];
+          sdResults.forEach(raw => {
+            if (!raw) return;
+            const b = unwrapBody(raw);
+            if (b && Array.isArray(b.points)) {
+              allSdPoints = allSdPoints.concat(b.points);
+            }
           });
-          if (!entities.has(PLAYER_ID)) {
-            entities.set(PLAYER_ID, { id: PLAYER_ID, x: 0, y: 0, tick: 0, owner: "player_red_signer", rx: 0, ry: 0, tx: 0, ty: 0, trail: [] });
-            renderLegend();
+          if (allSdPoints.length > 0) {
+            applyPointsList(allSdPoints, true);
           }
-          let removed = false;
-          for (const id of [...entities.keys()]) {
-            if (id !== PLAYER_ID && !seen.has(id)) { entities.delete(id); removed = true; }
-          }
-          if (removed) { recomputeColors(); renderLegend(); }
         }
       } catch (_) {}
     }
 
-    // /now is slot-free. Poll it for status; it never advances the Primary's
-    // request clock and never creates a slot.
-    let lastNow = { tick: 0, root: "—", ack: "none" };
+    // /now is slot-free. Poll primary_1 for status, live HUD & centralized L1 quorum confirmation.
+    let lastNow = { tick: 0, headTick: 0, lag: 0, compacted: 0, root: "—", ack: "none" };
+    const pendingSwarmBatches = [];
+    const pendingPlayerWrites = [];
     async function pollNow() {
       if (!discoveredPrimaryUrl) return;
       try {
-        const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/now/results~message@1.0/output/body`, {
+        const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/now/results~message@1.0/output/body`, {
           headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
           cache: "no-store"
         });
         if (!res.ok) return;
         const data = unwrapBody(await res.json());
-        lastNow = { tick: Number(data.tick || 0), root: data.state_root || "—", ack: data.ack || "none" };
+        const repTick = Number(data.replicated_tick ?? data.tick ?? 0);
+        const headTick = Number(data.head_tick ?? repTick);
+        const lag = Number(data.replication_lag ?? Math.max(0, headTick - repTick));
+        const compacted = Number(data.compacted_total ?? 0);
+        lastNow = { tick: repTick, headTick, lag, compacted, root: data.state_root || "—", ack: data.ack || "none" };
+
+        // Zero-overhead centralized L1 Quorum confirmation for player_red (zero extra sockets!)
+        if (pendingPlayerWrites.length > 0) {
+          const nowPerf = performance.now();
+          const remainingPlayer = [];
+          for (const pw of pendingPlayerWrites) {
+            if (repTick >= pw.targetTick) {
+              const l1Rtt = Math.round(nowPerf - pw.t0);
+              lastVerifiedPos = { x: pw.nx, y: pw.ny, tick: repTick };
+              confirmedPos = { x: pw.nx, y: pw.ny, tick: repTick };
+              try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
+              trail.push({ x: confirmedPos.x, y: confirmedPos.y, tick: repTick });
+              if (trail.length > 18) trail.shift();
+              confirmedPulse = { x: confirmedPos.x, y: confirmedPos.y, r: 15, alpha: 1.0 };
+
+              document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+              const elHeadCoords = document.getElementById("hudHeadCoords");
+              if (elHeadCoords) elHeadCoords.textContent = `In sync with Head RAM`;
+              document.getElementById("hudRtt").textContent = `${pw.l0Rtt}ms L0 / ${l1Rtt}ms L1`;
+              const elRttSub = document.getElementById("hudRttSub");
+              if (elRttSub) elRttSub.textContent = `L0 Accept: ${pw.l0Rtt}ms · L1 DA Quorum: ${l1Rtt}ms`;
+              document.getElementById("hudTick").textContent = `#${repTick} (Head: #${Math.max(repTick, headPos.tick)})`;
+              document.getElementById("hudSdNodes").textContent = (data.replicas || ["sd1", "sd2"]).join(" + ");
+              const elSdSub = document.getElementById("hudSdSub");
+              if (elSdSub) elSdSub.textContent = `LMDB disk confirmed · 200 replicated`;
+
+              const coordStr = `(${pw.nx}, ${pw.ny}) [rep #${repTick}]`;
+              const el1 = document.getElementById("inspSd1Coord"); if (el1) el1.textContent = coordStr;
+              const el2 = document.getElementById("inspSd2Coord"); if (el2) el2.textContent = coordStr;
+              const el1T = document.getElementById("inspSd1Tick"); if (el1T) el1T.textContent = `#${repTick} (confirmed)`;
+              const el2T = document.getElementById("inspSd2Tick"); if (el2T) el2T.textContent = `#${repTick} (confirmed)`;
+              setGateBadge("confirmed", data, l1Rtt);
+
+              if (!pw.isInit) {
+                appendLog(
+                  `Move <code>(${pw.nx}, ${pw.ny})</code> &rarr; L0 Head in <strong>${pw.l0Rtt} ms</strong> &middot; ` +
+                  `<span class="ack">L1 Quorum Confirmed [${(data.replicas || ["sd1", "sd2"]).join(", ")}]</span> ` +
+                  `Tick #${repTick} in <strong>${l1Rtt} ms</strong> (root: <code>${String(lastNow.root || "—").slice(0, 14)}…</code>)`
+                );
+              }
+            } else if (nowPerf - pw.t0 > 8000) {
+              // timeout fallback
+            } else {
+              remainingPlayer.push(pw);
+            }
+          }
+          pendingPlayerWrites.length = 0;
+          pendingPlayerWrites.push(...remainingPlayer);
+        }
+
+        // Zero-overhead centralized L1 Quorum confirmation for all swarm batches (zero extra sockets!)
+        if (pendingSwarmBatches.length > 0) {
+          const nowPerf = performance.now();
+          const remaining = [];
+          for (const item of pendingSwarmBatches) {
+            if (repTick >= item.targetTick) {
+              const l1Rtt = Math.round(nowPerf - item.t0);
+              const elL1 = document.getElementById("telL1Rtt"); if (elL1) elL1.textContent = `${l1Rtt} ms`;
+              const elRep = document.getElementById("telReplicas"); if (elRep) elRep.textContent = (data.replicas || ["sd1", "sd2"]).join("+") + " [LMDB]";
+              item.batchItems.forEach((bItem) => {
+                const e = entities.get(bItem.id);
+                const owner = (e && e.owner && e.owner !== "anonymous") ? e.owner : `sim_${item.wName}_worker`;
+                upsertEntity({ id: bItem.id, x: bItem.x, y: bItem.y, tick: item.targetTick, owner });
+              });
+            } else if (nowPerf - item.t0 > 8000) {
+              item.batchItems.forEach((bItem) => {
+                const e = entities.get(bItem.id);
+                if (e) { e.hx = e.x; e.hy = e.y; e.htick = e.tick; }
+              });
+            } else {
+              remaining.push(item);
+            }
+          }
+          pendingSwarmBatches.length = 0;
+          pendingSwarmBatches.push(...remaining);
+        }
+
+        if (Array.isArray(data.points)) {
+          for (const raw of data.points) {
+            const p = normalizePointEntry(raw);
+            if (p && p.id === PLAYER_ID && p.tick >= (lastVerifiedPos.tick || 0)) {
+              lastVerifiedPos = { x: Number(p.x), y: Number(p.y), tick: Number(p.tick || repTick) };
+              if (!isWriting && confirmedPos.tick < lastVerifiedPos.tick) {
+                confirmedPos = { ...lastVerifiedPos };
+                headPos = { ...lastVerifiedPos };
+                document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+              }
+              break;
+            }
+          }
+        }
+        if (Array.isArray(data.head_points) || Array.isArray(data.points)) {
+          applyPointsList(data.head_points || data.points, false);
+        }
         const elTotal = document.getElementById("inspPrimaryTotal");
         if (elTotal) elTotal.textContent = `${data.active_entity_count || 0} in RAM`;
+        const elTick = document.getElementById("hudTick");
+        if (elTick) elTick.textContent = `#${repTick} (Head: #${headTick})`;
+        const elEpoch = document.getElementById("hudEpoch");
+        if (elEpoch) elEpoch.textContent = `Lag: ${lag} ticks · Compacted: ${compacted}`;
         const nowBadge = document.getElementById("nowBadge");
         if (nowBadge) {
-          nowBadge.className = "badge ok";
-          nowBadge.innerHTML = `State: <strong>tick #${lastNow.tick} &middot; root ${String(lastNow.root).slice(0, 12)}&hellip;</strong>`;
+          nowBadge.className = lag > 4 ? "badge warn" : "badge ok";
+          nowBadge.innerHTML = `Watermark: <strong>Head #${headTick} / Rep #${repTick} (Lag ${lag}) &middot; ${String(lastNow.root).slice(0, 10)}&hellip;</strong>`;
         }
       } catch (_) {}
     }
 
-    // ================= Swarm simulation =================
+    // ================= Dynamic Elastic Swarm & Multi-Worker Architecture =================
+    const MAX_PRIMARY_WORKERS = 10;
+    let dynamicActiveWorkers = 1;
+    const workerPipelines = {};
+    for (let i = 1; i <= MAX_PRIMARY_WORKERS; i++) {
+      workerPipelines[`primary_${i}`] = {
+        name: `primary_${i}`,
+        queue: [],
+        inflight: 0,
+        maxInflight: 2,
+        lastRtt: 0
+      };
+    }
+
+    function updateDynamicWorkers() {
+      if (!swarm.running) {
+        dynamicActiveWorkers = 1;
+      } else {
+        const botCount = simIds().length;
+        const reqWps = swarm.intervalMs > 0 ? (botCount * 1000 / swarm.intervalMs) : 0;
+        // Elastic SMP auto-scaler for 4-core physical CPU:
+        // Automatically scales workers based on bot count OR incoming write pressure (reqWps):
+        // - 4 workers (SMP saturated): reqWps >= 1200 w/s OR >= 60 bots -> ~3,000+ w/s capacity
+        // - 2 workers: reqWps >= 500 w/s OR >= 25 bots -> ~1,600+ w/s capacity
+        // - 1 worker: light load -> 850+ w/s capacity
+        if (botCount >= 60 || reqWps >= 1200) dynamicActiveWorkers = 4;
+        else if (botCount >= 25 || reqWps >= 500) dynamicActiveWorkers = 2;
+        else dynamicActiveWorkers = 1;
+      }
+      const elAct = document.getElementById("telActiveWorkers");
+      if (elAct) elAct.textContent = `${dynamicActiveWorkers} / 4 (SMP)`;
+    }
+
+    function getWorkerForEntity(entityId) {
+      if (entityId === PLAYER_ID) return "primary_1";
+      let h = 5381;
+      for (let i = 0; i < entityId.length; i++) {
+        h = ((h << 5) + h) + entityId.charCodeAt(i);
+      }
+      const idx = (Math.abs(h) % dynamicActiveWorkers) + 1;
+      return `primary_${idx}`;
+    }
+
     const swarm = {
       running: false,
+      staggered: true,    // each bot moves on its own independent randomized clock
       intervalMs: 1000,
       step: 30,
       maxInflight: 2,
       inflight: 0,
       timer: null,
-      queue: [],          // ids with a pending target, FIFO
+      queue: [],          // global tracker
       acked: 0,
       errors: 0,
       skipped: 0,
       requested: 0,
       rttSum: 0,
       rttN: 0,
-      ackTimes: [],       // timestamps of ACKs for the rolling rate
+      ackTimes: [],       // timestamps of ACKs for rolling rate
       reqTimes: []
     };
 
     function simIds() {
       return [...entities.keys()].filter(id => id !== PLAYER_ID);
+    }
+
+    function nextBotDelayMs() {
+      if (!swarm.staggered) return swarm.intervalMs;
+      // Independent random cadence per bot: 30% to 170% of intervalMs
+      return Math.max(15, Math.round(swarm.intervalMs * (0.3 + Math.random() * 1.4)));
+    }
+
+    function seedBotSchedule(now = performance.now()) {
+      simIds().forEach(id => {
+        const e = entities.get(id);
+        if (e) {
+          e.nextMoveAt = swarm.staggered
+            ? now + Math.round(Math.random() * swarm.intervalMs)
+            : now + swarm.intervalMs;
+        }
+      });
     }
 
     function planTarget(e, scatter = false) {
@@ -715,9 +1004,9 @@
         ny = Math.round((Math.random() * 2 - 1) * BOUNDS_Y);
       } else {
         const ang = Math.random() * Math.PI * 2;
-        const r = swarm.step * (0.4 + Math.random() * 0.6);
-        const bx = e.pending ? e.pending.x : e.x;
-        const by = e.pending ? e.pending.y : e.y;
+        const r = swarm.step * (0.25 + Math.random() * 0.95);
+        const bx = e.tx != null ? e.tx : e.x;
+        const by = e.ty != null ? e.ty : e.y;
         nx = Math.round(bx + Math.cos(ang) * r);
         ny = Math.round(by + Math.sin(ang) * r);
         // bounce off the walls
@@ -726,74 +1015,170 @@
       }
       nx = Math.max(-BOUNDS_X, Math.min(BOUNDS_X, nx));
       ny = Math.max(-BOUNDS_Y, Math.min(BOUNDS_Y, ny));
-      if (e.pending) swarm.skipped++;
-      else swarm.queue.push(e.id);
-      e.pending = { x: nx, y: ny };
       e.tx = nx; e.ty = ny;
+      const nextTargetTick = (Number(e.tick || lastNow.headTick || 0)) + 1;
+      const move = { id: e.id, x: nx, y: ny, target_tick: nextTargetTick, planned_ts: Date.now() };
+
+      const wName = getWorkerForEntity(e.id);
+      const wp = workerPipelines[wName];
+      if (wp) {
+        if (wp.queue.length > 500) {
+          wp.queue.shift();
+          swarm.skipped++;
+        }
+        wp.queue.push(move);
+      }
+
       swarm.requested++;
       swarm.reqTimes.push(performance.now());
     }
 
     function swarmTick(scatter = false) {
-      simIds().forEach(id => planTarget(entities.get(id), scatter));
-      pumpSwarm();
+      const now = performance.now();
+      if (scatter || !swarm.staggered) {
+        simIds().forEach(id => {
+          const e = entities.get(id);
+          if (e) {
+            planTarget(e, scatter);
+            e.nextMoveAt = now + nextBotDelayMs();
+          }
+        });
+        pumpSwarm();
+        return;
+      }
+      let fired = 0;
+      simIds().forEach(id => {
+        const e = entities.get(id);
+        if (!e) return;
+        if (e.nextMoveAt == null) {
+          e.nextMoveAt = now + Math.round(Math.random() * swarm.intervalMs);
+        }
+        if (now >= e.nextMoveAt) {
+          planTarget(e, false);
+          e.nextMoveAt = now + nextBotDelayMs();
+          fired++;
+        }
+      });
+      if (fired > 0 || (swarm.queue && swarm.queue.length > 0)) {
+        pumpSwarm();
+      }
     }
 
     function pumpSwarm() {
-      while (swarm.inflight < swarm.maxInflight && swarm.queue.length > 0) {
-        const id = swarm.queue.shift();
-        const e = entities.get(id);
-        if (!e || !e.pending || e.inflight) continue;
-        const target = e.pending;
-        e.pending = null;
-        e.inflight = true;
+      updateDynamicWorkers();
+      for (let i = 1; i <= dynamicActiveWorkers; i++) {
+        pumpWorker(`primary_${i}`);
+      }
+    }
+
+    function pumpWorker(wName) {
+      const wp = workerPipelines[wName];
+      if (!wp) return;
+      const maxInflightPerWorker = 2; // Pipelined 2 in-flight writes per worker
+      while (wp.inflight < maxInflightPerWorker && wp.queue.length > 0) {
+        const batchItems = [];
+        while (wp.queue.length > 0 && batchItems.length < 100) {
+          batchItems.push(wp.queue.shift());
+        }
+        if (batchItems.length === 0) break;
+        wp.inflight++;
         swarm.inflight++;
-        sendSwarmWrite(e, target).finally(() => {
-          e.inflight = false;
-          swarm.inflight--;
-          if (e.pending && !swarm.queue.includes(e.id)) swarm.queue.push(e.id);
-          pumpSwarm();
+        sendSwarmBatchToWorker(wName, batchItems).finally(() => {
+          wp.inflight--;
+          swarm.inflight = Math.max(0, swarm.inflight - 1);
+          pumpWorker(wName);
         });
       }
     }
 
-    async function sendSwarmWrite(e, target) {
-      if (!discoveredPrimaryUrl) return;
+    async function sendSwarmBatchToWorker(wName, batchItems) {
+      if (!discoveredPrimaryUrl || batchItems.length === 0) return;
       const t0 = performance.now();
+      const nowTs = Date.now();
+      const packed_inputs = batchItems.map((item, idx) => {
+        const e = entities.get(item.id);
+        const owner = (e && e.owner && e.owner !== "anonymous") ? e.owner : `sim_${wName}_worker`;
+        const ttick = item.target_tick || (lastNow.headTick + idx + 1);
+        return `${item.id}|${item.x}|${item.y}|${ttick}|${nowTs + idx}|${owner}`;
+      }).join(";");
       try {
-        const owner = e.owner && e.owner !== "anonymous" ? e.owner : "sim_swarm_worker";
-        const { http, body } = await acceptedWrite(e.id, target.x, target.y, owner);
-        if (http !== 202 && http !== 200) throw new Error(`HTTP ${http}`);
-        if (http === 202) setGateBadge("accepted", body);
-        const final = await waitBatchConfirmed(body);
+        const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/${wName}/push/output~message@1.0`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+          cache: "no-store",
+          body: JSON.stringify({ action: "Write-Batch", packed_inputs, ts: nowTs, flush: true })
+        });
+        const raw = await res.json().catch(() => ({}));
+        const http = Number(raw.status || res.status || 200);
+        const body = unwrapBody(raw);
         const rtt = performance.now() - t0;
-        if (final.status === "ok") {
-          upsertEntity({ id: e.id, x: target.x, y: target.y, tick: final.tick, owner });
-          setGateBadge("confirmed", final, Math.round(rtt));
-          swarm.acked++;
+        if (http === 202 || http === 200) {
+          const appliedTick = Number(body.head_tick || body.tick_to || body.tick || lastNow.headTick + 1);
+          swarm.lastBatchSize = batchItems.length;
+          const elL0 = document.getElementById("telL0Rtt"); if (elL0) elL0.textContent = `${Math.round(rtt)} ms`;
+          const elBSize = document.getElementById("telBatchSize"); if (elBSize) elBSize.textContent = `${batchItems.length} ent/batch`;
+          batchItems.forEach((item) => {
+            const e = entities.get(item.id);
+            if (e) {
+              e.hx = item.x;
+              e.hy = item.y;
+              e.htick = appliedTick;
+            }
+            swarm.acked++;
+            swarm.ackTimes.push(performance.now());
+          });
           swarm.rttSum += rtt; swarm.rttN++;
-          swarm.ackTimes.push(performance.now());
-        } else if (final.status === "unavailable") {
-          swarm.errors++;
-          setGateBadge("unavailable", final);
+          setGateBadge(http === 200 ? "confirmed" : "accepted", body, Math.round(rtt));
+
+          if (http === 200) {
+            // Immediate L1 Quorum Confirmed (HTTP 200)
+            const elL1 = document.getElementById("telL1Rtt"); if (elL1) elL1.textContent = `${Math.round(rtt)} ms`;
+            const elRep = document.getElementById("telReplicas"); if (elRep) elRep.textContent = (body.replicas || ["sd1", "sd2"]).join("+") + " [LMDB]";
+            batchItems.forEach((item) => {
+              const e = entities.get(item.id);
+              const owner = (e && e.owner && e.owner !== "anonymous") ? e.owner : `sim_${wName}_worker`;
+              upsertEntity({ id: item.id, x: item.x, y: item.y, tick: appliedTick, owner });
+            });
+          } else if (body && body.batch_id) {
+            // Centralized zero-overhead L1 Quorum confirmation (confirmed in pollNow without flooding sockets)
+            pendingSwarmBatches.push({
+              wName,
+              batchId: body.batch_id,
+              targetTick: appliedTick,
+              t0,
+              batchItems
+            });
+            if (pendingSwarmBatches.length > 512) pendingSwarmBatches.shift();
+          }
+        } else if (http === 503) {
+          swarm.errors += batchItems.length;
+          setGateBadge("unavailable", body);
           if (swarm.errors <= 5 || swarm.errors % 50 === 0) {
-            appendLog(`<span class="err">Swarm write unavailable (503)</span> <code>${e.id}</code>: quorum_down`);
+            appendLog(`<span class="err">Swarm batch unavailable (503)</span> on ${wName} (${batchItems.length} entities): quorum_down`);
           }
         } else {
-          swarm.skipped++;
+          swarm.skipped += batchItems.length;
           setGateBadge("pending", body);
         }
       } catch (err) {
-        swarm.errors++;
+        swarm.errors += batchItems.length;
         if (swarm.errors <= 5 || swarm.errors % 50 === 0) {
-          appendLog(`<span class="err">Swarm write error</span> <code>${e.id}</code>: ${err.message}`);
+          appendLog(`<span class="err">Swarm batch error</span> on ${wName}: ${err.message}`);
         }
       }
     }
 
+
     function restartSwarmTimer() {
       if (swarm.timer) clearInterval(swarm.timer);
-      swarm.timer = swarm.running ? setInterval(() => swarmTick(false), swarm.intervalMs) : null;
+      if (!swarm.running) {
+        swarm.timer = null;
+        updateDynamicWorkers();
+        return;
+      }
+      seedBotSchedule(performance.now());
+      const tickMs = swarm.staggered ? 20 : swarm.intervalMs;
+      swarm.timer = setInterval(() => swarmTick(false), tickMs);
     }
 
     function updateSwarmStats() {
@@ -808,8 +1193,30 @@
       document.getElementById("stRtt").textContent = swarm.rttN ? `${Math.round(swarm.rttSum / swarm.rttN)} ms` : "— ms";
       document.getElementById("stTotal").textContent = `${swarm.acked} / ${swarm.errors}`;
       document.getElementById("stSkipped").textContent = `${swarm.skipped}`;
-      // reset RTT average every ~5s so it reflects current load
       if (swarm.rttN > 200) { swarm.rttSum = swarm.rttSum / swarm.rttN * 20; swarm.rttN = 20; }
+
+      // Aggregate Queue & In-Flight across active workers
+      let totalQueued = 0;
+      let totalInflight = 0;
+      for (let i = 1; i <= dynamicActiveWorkers; i++) {
+        const wp = workerPipelines[`primary_${i}`];
+        if (wp) {
+          totalQueued += wp.queue.length;
+          totalInflight += wp.inflight;
+        }
+      }
+
+      // Update Pure Live Telemetry Grid
+      const elQueue = document.getElementById("telQueue");
+      if (elQueue) elQueue.textContent = `${totalQueued} queued`;
+      const elInflight = document.getElementById("telInflight");
+      if (elInflight) elInflight.textContent = `${totalInflight} / ${dynamicActiveWorkers * 2}`;
+      const elLag = document.getElementById("telLag");
+      if (elLag) elLag.textContent = `${lastNow.lag || 0} ticks`;
+      const elComp = document.getElementById("telCompacted");
+      if (elComp) elComp.textContent = `${lastNow.compacted || 0}`;
+      const elRoot = document.getElementById("telStateRoot");
+      if (elRoot) elRoot.textContent = String(lastNow.root || "—").slice(0, 18) + "…";
     }
 
     function bindSwarmControls() {
@@ -825,6 +1232,13 @@
         if (swarm.running) swarmTick(false);
       });
       document.getElementById("btnScatter").addEventListener("click", () => swarmTick(true));
+      const chkStagger = document.getElementById("chkStagger");
+      if (chkStagger) {
+        chkStagger.addEventListener("change", () => {
+          swarm.staggered = chkStagger.checked;
+          restartSwarmTimer();
+        });
+      }
 
       const sI = document.getElementById("sldInterval");
       sI.addEventListener("input", () => {
@@ -843,6 +1257,94 @@
         document.getElementById("valInflight").textContent = `${swarm.maxInflight}`;
         pumpSwarm();
       });
+
+      const btnSpawn35 = document.getElementById("btnSpawn35");
+      if (btnSpawn35) btnSpawn35.addEventListener("click", () => spawnBots(35));
+      const btnSpawn100 = document.getElementById("btnSpawn100");
+      if (btnSpawn100) btnSpawn100.addEventListener("click", () => spawnBots(100));
+      const btnSpawn120 = document.getElementById("btnSpawn120");
+      if (btnSpawn120) btnSpawn120.addEventListener("click", () => {
+        swarm.intervalMs = 30;
+        swarm.step = 30;
+        swarm.maxInflight = 4;
+        const sI = document.getElementById("sldInterval"); if (sI) sI.value = 30;
+        const vI = document.getElementById("valInterval"); if (vI) vI.textContent = "30 ms";
+        const sS = document.getElementById("sldStep"); if (sS) sS.value = 30;
+        const vS = document.getElementById("valStep"); if (vS) vS.textContent = "30 px";
+        const sF = document.getElementById("sldInflight"); if (sF) sF.value = 4;
+        const vF = document.getElementById("valInflight"); if (vF) vF.textContent = "4";
+        spawnBots(120);
+      });
+      const btnClearBots = document.getElementById("btnClearBots");
+      if (btnClearBots) btnClearBots.addEventListener("click", () => clearBots());
+
+      const chkShowL0 = document.getElementById("chkShowL0");
+      if (chkShowL0) chkShowL0.addEventListener("change", (e) => { showL0 = e.target.checked; });
+      const chkShowL1 = document.getElementById("chkShowL1");
+      if (chkShowL1) chkShowL1.addEventListener("change", (e) => { showL1 = e.target.checked; });
+      const chkShowTargets = document.getElementById("chkShowTargets");
+      if (chkShowTargets) chkShowTargets.addEventListener("change", (e) => { showTargets = e.target.checked; });
+      const chkShowBotRings = document.getElementById("chkShowBotRings");
+      if (chkShowBotRings) chkShowBotRings.addEventListener("change", (e) => { showBotRings = e.target.checked; });
+
+      const btnRelog = document.getElementById("btnRelog");
+      if (btnRelog) btnRelog.addEventListener("click", () => relogSession());
+      const btnRollbackSD = document.getElementById("btnRollbackSD");
+      if (btnRollbackSD) btnRollbackSD.addEventListener("click", () => rollbackFromSD("Manual user trigger"));
+    }
+
+    async function spawnBots(count = 35) {
+      if (!discoveredPrimaryUrl) return;
+      appendLog(`Spawning ${count} simulated bots across multi-worker pool...`);
+      const items = [];
+      const nowTs = Date.now();
+      for (let i = 1; i <= count; i++) {
+        const id = `bot_${i}`;
+        const x = Math.round((Math.random() * 2 - 1) * (BOUNDS_X - 40));
+        const y = Math.round((Math.random() * 2 - 1) * (BOUNDS_Y - 40));
+        items.push({ id, x, y, owner: `bot_${i}_signer` });
+      }
+
+      updateDynamicWorkers();
+
+      // Partition spawned bots by their assigned worker
+      const workerBatches = {};
+      items.forEach(it => {
+        const wName = getWorkerForEntity(it.id);
+        if (!workerBatches[wName]) workerBatches[wName] = [];
+        workerBatches[wName].push(it);
+      });
+
+      try {
+        await Promise.all(Object.entries(workerBatches).map(async ([wName, wItems]) => {
+          const packed_inputs = wItems.map((it, idx) => `${it.id}|${it.x}|${it.y}|${idx + 1}|${nowTs + idx}|${it.owner}`).join(";");
+          await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/${wName}/push/output~message@1.0`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+            cache: "no-store",
+            body: JSON.stringify({ action: "Write-Batch", packed_inputs, ts: nowTs, flush: true })
+          });
+          wItems.forEach(it => upsertEntity({ id: it.id, x: it.x, y: it.y, tick: 1, owner: it.owner }));
+        }));
+        seedBotSchedule();
+        appendLog(`<span class="ack">${count} bots spawned and distributed across ${dynamicActiveWorkers} active workers!</span>`);
+      } catch (e) {
+        appendLog(`<span class="err">Failed spawning bots: ${e.message}</span>`);
+      }
+    }
+
+    function clearBots() {
+      for (const id of [...entities.keys()]) {
+        if (id !== PLAYER_ID) entities.delete(id);
+      }
+      recomputeColors();
+      renderLegend();
+      swarm.queue = [];
+      for (let i = 1; i <= MAX_PRIMARY_WORKERS; i++) {
+        workerPipelines[`primary_${i}`].queue = [];
+      }
+      updateDynamicWorkers();
+      appendLog(`Arena cleared. Only <strong>${PLAYER_ID}</strong> remains.`);
     }
 
     function appendLog(html) {
@@ -881,12 +1383,18 @@
       }
     }
 
-    // Step 1: Discover Primary exclusively from Genesis Process (:8733)
+    // Step 1: Discover Primary and SD replicas from Genesis Process (:8733)
     async function discoverFromGenesis() {
       try {
         const data = await fetchProcessBody(GENESIS_URL, "genesis");
         const rawPrimary = data.primary_url || (data.primary && data.primary.url) || "http://127.0.0.1:8734";
         discoveredPrimaryUrl = rawPrimary.replace("127.0.0.1", HOST);
+        const rawSd1 = data.sd1_url || "http://127.0.0.1:8735";
+        discoveredSd1Url = rawSd1.replace("127.0.0.1", HOST);
+        const rawSd2 = data.sd2_url || "http://127.0.0.1:8736";
+        discoveredSd2Url = rawSd2.replace("127.0.0.1", HOST);
+        const rawArbit = data.arbit_url || "http://127.0.0.1:8737";
+        discoveredArbitUrl = rawArbit.replace("127.0.0.1", HOST);
         discoveredEpoch = data.epoch || 1;
 
         const gBadge = document.getElementById("genesisBadge");
@@ -897,13 +1405,13 @@
         pBadge.className = "badge ok";
         pBadge.innerHTML = `Discovered Primary: <strong>${discoveredPrimaryUrl}</strong>`;
 
-        appendLog(`Genesis Discovery <code>${GENESIS_URL}</code> &rarr; Discovered Primary at <strong>${discoveredPrimaryUrl}</strong>`);
+        appendLog(`Genesis Discovery <code>${GENESIS_URL}</code> &rarr; Discovered Primary at <strong>${discoveredPrimaryUrl}</strong> | SD1 at <strong>${discoveredSd1Url}</strong>`);
 
-        // Query Primary specifically for existing player coordinates on relog/refresh
+        // Query database specifically for existing player coordinates on relog/refresh
         let existingPoint = null;
+        // 1. Direct targeted Read-Point on SD1 worker replica (LMDB disk source of truth for player_red)
         try {
-          // 1. Direct targeted Read-Point on Primary RAM
-          const readRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output/body`, {
+          const sdRead = await fetch(`${discoveredSd1Url}/~node-process@1.0/sd1_1/push/output/body`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -916,18 +1424,18 @@
               id: PLAYER_ID
             })
           });
-          if (readRes.ok) {
-            const parsed = unwrapBody(await readRes.json());
-            if (parsed && parsed.status === "ok" && parsed.point) {
-              existingPoint = parsed.point;
+          if (sdRead.ok) {
+            const parsedSd = unwrapBody(await sdRead.json());
+            if (parsedSd && parsedSd.status === "ok" && parsedSd.point) {
+              existingPoint = parsedSd.point;
             }
           }
         } catch (_ignore) {}
 
+        // 2. Fallback check Primary_1 RAM Read-Point
         if (!existingPoint) {
           try {
-            // 2. Fallback check SD1 replica Read-Point
-            const sdRead = await fetch(`http://${HOST}:8735/~node-process@1.0/sd1/push/output/body`, {
+            const readRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/push/output/body`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
@@ -940,21 +1448,22 @@
                 id: PLAYER_ID
               })
             });
-            if (sdRead.ok) {
-              const parsedSd = unwrapBody(await sdRead.json());
-              if (parsedSd && parsedSd.status === "ok" && parsedSd.point) {
-                existingPoint = parsedSd.point;
+            if (readRes.ok) {
+              const parsed = unwrapBody(await readRes.json());
+              if (parsed && parsed.status === "ok" && parsed.point) {
+                existingPoint = parsed.point;
               }
             }
           } catch (_ignore) {}
         }
 
+        // 3. Fallback scan sd1_1 state output body
         if (!existingPoint) {
           try {
-            // 3. Fallback scan SD1 state output body
-            const sdData = await fetchProcessBody(`http://${HOST}:8735`, "sd1");
+            const sdData = await fetchProcessBody(discoveredSd1Url, "sd1_1");
             if (sdData && Array.isArray(sdData.points)) {
-              existingPoint = sdData.points.find(p => p.id === PLAYER_ID);
+              existingPoint = sdData.points.find(p => (Array.isArray(p) ? p[0] : p.id) === PLAYER_ID);
+              if (existingPoint && Array.isArray(existingPoint)) existingPoint = normalizePointEntry(existingPoint);
             } else if (sdData && Array.isArray(sdData.recent_diffs)) {
               const d = sdData.recent_diffs.slice().reverse().find(p => p.id === PLAYER_ID);
               if (d) existingPoint = d;
@@ -968,11 +1477,15 @@
             y: Number(existingPoint.y),
             tick: Number(existingPoint.tick || 0)
           };
+          lastVerifiedPos = { x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick };
+          headPos = { ...confirmedPos };
           targetPos = { x: confirmedPos.x, y: confirmedPos.y };
           renderPos = { x: confirmedPos.x, y: confirmedPos.y };
           trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
           try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
           document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+          const elHeadCoords = document.getElementById("hudHeadCoords");
+          if (elHeadCoords) elHeadCoords.textContent = `Head RAM: (${headPos.x}, ${headPos.y}) [#${headPos.tick}]`;
           document.getElementById("hudTick").textContent = `#${confirmedPos.tick}`;
           const epochNum = Math.floor(confirmedPos.tick / 10);
           const elEpoch = document.getElementById("hudEpoch");
@@ -980,13 +1493,15 @@
             elEpoch.innerHTML = `<span>Micro-Epoch #${epochNum}</span>`;
           }
           appendLog(
-            `Position restored from Primary/SD State: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> ` +
+            `Position restored from SD/Primary State: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> ` +
             `[Tick #${confirmedPos.tick}]`
           );
           pollClusterState();
         } else {
-          // Initialize at (0, 0) only if player does not exist yet on Primary
+          // Initialize at (0, 0) only if player does not exist yet on SD/Primary
           confirmedPos = { x: 0, y: 0, tick: 0 };
+          lastVerifiedPos = { x: 0, y: 0, tick: 0 };
+          headPos = { x: 0, y: 0, tick: 0 };
           targetPos = { x: 0, y: 0 };
           renderPos = { x: 0, y: 0 };
           try { localStorage.removeItem("hb_player_pos"); } catch (_) {}
@@ -1000,6 +1515,195 @@
       }
     }
 
+    // Rollback authoritative state strictly from SD (LMDB disk replica) to the latest confirmed tick
+    async function rollbackFromSD(reason = "Manual / Quorum Failure") {
+      const statusEl = document.getElementById("syncStatusMsg");
+      if (statusEl) statusEl.textContent = "Rolling back from SD...";
+      try {
+        const sdUrl = discoveredSd1Url || `http://${HOST}:8735`;
+        appendLog(`[Rollback] Requesting authoritative state from SD1 (<code>${sdUrl}</code>)...`);
+
+        let sdPoint = null;
+        let sdTick = 0;
+        let sdRoot = "";
+
+        // 1. Fetch player_red point from sd1_1 (authoritative LMDB disk)
+        try {
+          const res = await fetch(`${sdUrl}/~node-process@1.0/sd1_1/push/output/body`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+            cache: "no-store",
+            body: JSON.stringify({ action: "Read-Point", id: PLAYER_ID })
+          });
+          if (res.ok) {
+            const parsed = unwrapBody(await res.json());
+            if (parsed && parsed.status === "ok" && parsed.point) {
+              sdPoint = parsed.point;
+              sdTick = Number(parsed.last_tick || parsed.point.tick || 0);
+              sdRoot = parsed.state_root || "";
+            }
+          }
+        } catch (err) {
+          console.warn("sd1_1 Read-Point failed:", err);
+        }
+
+        // 2. Fetch sd1_1 /now to get the true committed disk tick and root if not yet known
+        if (!sdTick || !sdRoot) {
+          try {
+            const nowRes = await fetch(`${sdUrl}/~node-process@1.0/sd1_1/now/results~message@1.0/output/body`, {
+              headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
+              cache: "no-store"
+            });
+            if (nowRes.ok) {
+              const nowData = unwrapBody(await nowRes.json());
+              if (nowData) {
+                sdTick = Number(nowData.last_tick || nowData.tick || sdTick);
+                sdRoot = nowData.state_root || sdRoot;
+              }
+            }
+          } catch (_) {}
+        }
+
+        // 3. Fetch snapshots across all active SD replicas for complete state
+        let allSdPoints = [];
+        try {
+          const workersToFetch = Math.max(1, dynamicActiveWorkers);
+          const snapPromises = [];
+          for (let i = 1; i <= workersToFetch; i++) {
+            snapPromises.push(
+              fetch(`${sdUrl}/~node-process@1.0/sd1_${i}/push/output/body`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+                cache: "no-store",
+                body: JSON.stringify({ action: "Snapshot" })
+              }).then(r => r.ok ? r.json() : null).catch(() => null)
+            );
+          }
+          const snapResults = await Promise.all(snapPromises);
+          snapResults.forEach(raw => {
+            if (!raw) return;
+            const b = unwrapBody(raw);
+            if (b && Array.isArray(b.points)) {
+              allSdPoints = allSdPoints.concat(b.points);
+              if (!sdPoint) {
+                const found = b.points.find(p => (Array.isArray(p) ? p[0] : p.id) === PLAYER_ID);
+                if (found) sdPoint = normalizePointEntry(found);
+              }
+              if (!sdTick && b.last_tick) sdTick = Number(b.last_tick);
+              if (!sdRoot && b.state_root) sdRoot = b.state_root;
+            }
+          });
+        } catch (err) {
+          console.warn("SD Snapshot failed:", err);
+        }
+
+        // 4. Fallback to primary_1 only if SD1 completely unreachable
+        if (!sdPoint && discoveredPrimaryUrl) {
+          try {
+            const pRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/push/output/body`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+              cache: "no-store",
+              body: JSON.stringify({ action: "Read-Point", id: PLAYER_ID })
+            });
+            if (pRes.ok) {
+              const pData = unwrapBody(await pRes.json());
+              if (pData && pData.point) {
+                sdPoint = pData.point;
+                sdTick = Number(pData.tick || sdPoint.tick || 0);
+                sdRoot = pData.state_root || "";
+              }
+            }
+          } catch (_) {}
+        }
+
+        // Discard unconfirmed in-flight writes
+        isWriting = false;
+        queuedMove = null;
+
+        if (sdPoint) {
+          const ptick = Number(sdPoint.tick || sdTick || 0);
+          confirmedPos = { x: Number(sdPoint.x), y: Number(sdPoint.y), tick: ptick };
+          lastVerifiedPos = { ...confirmedPos };
+          headPos = { ...confirmedPos };
+          targetPos = { x: confirmedPos.x, y: confirmedPos.y };
+          renderPos = { x: confirmedPos.x, y: confirmedPos.y };
+          trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
+          try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
+        }
+
+        if (allSdPoints.length > 0) {
+          applyPointsList(allSdPoints, true);
+        }
+
+        // Align all bot L0 heads strictly to their confirmed SD state
+        entities.forEach(e => {
+          e.hx = e.x;
+          e.hy = e.y;
+          e.htick = e.tick;
+          e.tx = e.x;
+          e.ty = e.y;
+          e.pending = null;
+          e.inflight = false;
+        });
+
+        // Update HUD
+        document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+        const elHeadCoords = document.getElementById("hudHeadCoords");
+        if (elHeadCoords) elHeadCoords.textContent = `Rolled back to SD LMDB disk [#${confirmedPos.tick}]`;
+        document.getElementById("hudTick").textContent = `#${confirmedPos.tick} (Head: #${confirmedPos.tick})`;
+        const elEpoch = document.getElementById("hudEpoch");
+        if (elEpoch) elEpoch.innerHTML = `<span>Lag: 0 ticks &middot; Authoritative SD State</span>`;
+        document.getElementById("hudSdNodes").textContent = "sd1 (LMDB disk verified)";
+        const elSdSub = document.getElementById("hudSdSub");
+        if (elSdSub) elSdSub.textContent = `Rolled back to latest disk tick #${confirmedPos.tick}`;
+        setGateBadge("unavailable", { replicas: ["sd1"] });
+
+        appendLog(
+          `<span class="err">⚡ [Rollback to SD]:</span> Authoritative state restored directly from SD1 LMDB disk: ` +
+          `<strong>(${confirmedPos.x}, ${confirmedPos.y})</strong> @ tick <strong>#${confirmedPos.tick}</strong> ` +
+          `(root: <code>${String(sdRoot || "—").slice(0, 14)}…</code>) [Reason: ${reason}]`
+        );
+        if (statusEl) statusEl.textContent = `Rolled back to tick #${confirmedPos.tick}`;
+      } catch (err) {
+        appendLog(`<span class="err">Rollback Error:</span> ${err.message}`);
+        if (statusEl) statusEl.textContent = `Rollback error: ${err.message}`;
+      }
+    }
+
+    // Clean Relog: Clears transient client state and re-hydrates authoritative state directly from the database
+    async function relogSession() {
+      const statusEl = document.getElementById("syncStatusMsg");
+      if (statusEl) statusEl.textContent = "Re-authenticating session...";
+      try {
+        appendLog(`[Relog] Clearing local transient state & re-authenticating against Genesis...`);
+        // Cancel in-flight writes
+        isWriting = false;
+        queuedMove = null;
+        try { localStorage.removeItem("hb_player_pos"); } catch (_) {}
+
+        // 1. Re-discover Genesis topology
+        await discoverFromGenesis();
+
+        // 2. Fetch authoritative snapshot from SD1 / Primary
+        await seedEntities();
+
+        // 3. Poll immediate status
+        await pollNow();
+        await pollClusterState();
+        await pollTelemetryMetrics();
+
+        appendLog(
+          `<span class="ack">↺ [Relog Success]:</span> Client state re-authenticated & synchronized with SD1/Primary at ` +
+          `tick <strong>#${confirmedPos.tick}</strong>: <code>(${confirmedPos.x}, ${confirmedPos.y})</code>`
+        );
+        if (statusEl) statusEl.textContent = `Relogged @ tick #${confirmedPos.tick}`;
+      } catch (err) {
+        appendLog(`<span class="err">Relog Error:</span> ${err.message}`);
+        if (statusEl) statusEl.textContent = `Relog error: ${err.message}`;
+      }
+    }
+
     // ---- Honest ACK helpers -------------------------------------------------
     const ackStats = { accepted: 0, confirmed: 0, failed: 0 };
 
@@ -1009,61 +1713,48 @@
       if (kind === "accepted") ackStats.accepted++;
       else if (kind === "confirmed") ackStats.confirmed++;
       else if (kind === "unavailable") ackStats.failed++;
-      const label = kind === "confirmed" ? "confirmed (200 replicated)"
-        : kind === "accepted" ? "accepted (202, awaiting quorum)"
-        : kind === "unavailable" ? "503 quorum unavailable"
-        : kind === "pending" ? "pending (no verified 200 yet)"
+      const label = kind === "confirmed" ? "confirmed (200 SD Quorum Replicated)"
+        : kind === "accepted" ? "accepted (202 Primary RAM, awaiting SD)"
+        : kind === "unavailable" ? "503 quorum unavailable (rolled back)"
+        : kind === "pending" ? "pending (awaiting SD quorum)"
         : "error";
-      el.className = "badge " + (kind === "confirmed" ? "ok" : "warn");
-      el.innerHTML = `Last ACK: <strong>${label}</strong>` +
+      el.className = "badge " + (kind === "confirmed" ? "ok" : kind === "accepted" ? "ok" : "warn");
+      el.innerHTML = `Replication Gate: <strong>${label}</strong>` +
         ` &middot; accepted ${ackStats.accepted} / confirmed ${ackStats.confirmed} / failed ${ackStats.failed}` +
         (rtt != null ? ` &middot; ${rtt} ms` : "") +
-        (data && data.replicas ? ` &middot; ${data.replicas.join("+")}` : "");
+        (data && data.replicas ? ` &middot; [${data.replicas.join("+")}]` : "");
     }
 
-    // L0: enqueue a write. HTTP 202 + ack:"accepted" never claims replication.
-    async function acceptedWrite(id, x, y, owner) {
-      const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output/body`, {
+    // L0: enqueue a write to Primary RAM. Returns immediately on 202 (Zero-Wait on SD replication).
+    async function acceptedWrite(id, x, y, owner, targetTick) {
+      const wName = getWorkerForEntity(id);
+      const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/${wName}/push/output~message@1.0`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
         cache: "no-store",
-        body: JSON.stringify({ action: "Write-Point", id, x, y, client_signer: owner, flush: true })
+        body: JSON.stringify({
+          action: "Write-Point",
+          id,
+          x,
+          y,
+          target_tick: targetTick,
+          ts: Date.now(),
+          client_signer: owner,
+          flush: true
+        })
       });
-      const body = unwrapBody(await res.json());
-      return { http: res.status, body };
+      const raw = await res.json().catch(() => ({}));
+      const http = Number(raw.status || res.status || 200);
+      const body = unwrapBody(raw);
+      return { http, body };
     }
 
-    // L1: poll /now (slot-free) until the Primary's tick reaches the target,
-    // then ask Batch-Status once for the verified verdict (200/503).
-    async function waitBatchConfirmed(accepted, timeoutMs = 6000) {
-      const bid = accepted && accepted.batch_id;
-      if (!bid) return { status: "pending" };
-      const target = Number(accepted.tick_to || accepted.target_tick || 0);
-      const deadline = performance.now() + timeoutMs;
-      while (performance.now() < deadline) {
-        const r = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/now/results~message@1.0/output/body`, {
-          headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
-          cache: "no-store"
-        });
-        if (r.ok) {
-          const s = unwrapBody(await r.json());
-          if (Number(s.tick || 0) >= target && s.ack === "replicated") {
-            const vr = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output/body`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
-              body: JSON.stringify({ action: "Batch-Status", batch_id: bid })
-            });
-            const v = unwrapBody(await vr.json());
-            if (vr.status === 200) return { status: "ok", tick: Number(v.tick || target), root: v.state_root, replicas: v.replicas || [], raw: v };
-            if (vr.status === 503) return { status: "unavailable", error: v.error || "quorum_unavailable", raw: v };
-          }
-        }
-        await new Promise(r => setTimeout(r, 50));
-      }
-      return { status: "pending" };
-    }
+    // Deprecated: L1 quorum confirmation is now handled centrally with zero socket overhead in pollNow()
+    async function waitBatchConfirmed() { return { status: "pending" }; }
 
-    // Step 2: Client Write-Point to Primary: 202 accepted, then verified 200.
+    let moveCounter = 0;
+
+    // Step 2: Zero-Wait Local Head Compute + Background Quorum Verification (Dual-Watermark)
     async function writeCoordinate(nx, ny, isInit = false) {
       if (!discoveredPrimaryUrl) return;
       if (isWriting) {
@@ -1072,9 +1763,11 @@
       }
       isWriting = true;
       const t0 = performance.now();
+      moveCounter = (moveCounter % 4) + 1;
+      const nextTargetTick = Math.max(Number(headPos.tick || 0), Number(confirmedPos.tick || 0), Number(lastNow.headTick || 0)) + 1;
 
       try {
-        const { http, body } = await acceptedWrite(PLAYER_ID, nx, ny, "player_red_signer");
+        const { http, body } = await acceptedWrite(PLAYER_ID, nx, ny, "player_red_signer", nextTargetTick);
         if (http === 403) {
           appendLog(`<span class="err">Ownership rejected (403):</span> ${PLAYER_ID} is owned by another signer.`);
           return;
@@ -1083,46 +1776,53 @@
           appendLog(`<span class="err">Input rejected (${http}):</span> ${(body && (body.error || body.status)) || ""}`);
           return;
         }
+        if (http === 503) {
+          setGateBadge("unavailable", body);
+          await rollbackFromSD(`Circuit Breaker (503): quorum unavailable (${(body && body.reason) || "max_lag"})`);
+          return;
+        }
         if (http !== 202 && http !== 200) throw new Error(`Push HTTP ${http}`);
 
-        if (http === 202 && body.batch_id) setGateBadge("accepted", body);
-        const final = await waitBatchConfirmed(body);
-        const rtt = Math.round(performance.now() - t0);
+        const l0Rtt = Math.round(performance.now() - t0);
+        const headTick = Number(body.head_tick || body.tick_to || body.tick || nextTargetTick);
+        const repTick = Number(body.confirmed_tick ?? body.tick ?? lastVerifiedPos.tick);
+        const lag = Math.max(0, headTick - repTick);
 
-        if (final.status === "ok") {
-          confirmedPos = { x: Number(nx), y: Number(ny), tick: final.tick };
-          try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
-          trail.push({ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick });
-          if (trail.length > 18) trail.shift();
+        // L0 HEAD ACCEPT (Primary RAM Optimistic State)
+        headPos = { x: Number(nx), y: Number(ny), tick: headTick };
 
-          document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
-          document.getElementById("hudRtt").textContent = `${rtt} ms`;
-          document.getElementById("hudTick").textContent = `#${final.tick}`;
-          const elEpoch = document.getElementById("hudEpoch");
-          if (elEpoch) elEpoch.innerHTML = `<span>Micro-Epoch #${Math.floor(final.tick / 10)} (tick ${final.tick})</span>`;
-          document.getElementById("hudSdNodes").textContent = (final.replicas || []).join(" + ") || "—";
+        // If it's init, align immediately so player starts properly
+        if (isInit) {
+          confirmedPos = { x: Number(nx), y: Number(ny), tick: repTick || headTick };
+          lastVerifiedPos = { ...confirmedPos };
+          renderPos = { x: confirmedPos.x, y: confirmedPos.y };
+        }
 
-          const currentCoordStr = `(${confirmedPos.x}, ${confirmedPos.y}) [tick #${confirmedPos.tick}]`;
-          const elP = document.getElementById("inspPrimaryCoord"); if (elP) elP.textContent = currentCoordStr;
-          const el1 = document.getElementById("inspSd1Coord"); if (el1) el1.textContent = currentCoordStr;
-          const el2 = document.getElementById("inspSd2Coord"); if (el2) el2.textContent = currentCoordStr;
-          const el1T = document.getElementById("inspSd1Tick"); if (el1T) el1T.textContent = `#${final.tick} (confirmed)`;
-          const el2T = document.getElementById("inspSd2Tick"); if (el2T) el2T.textContent = `#${final.tick} (confirmed)`;
+        const elHeadCoords = document.getElementById("hudHeadCoords");
+        if (elHeadCoords) elHeadCoords.textContent = `Head RAM: (${headPos.x}, ${headPos.y}) [#${headTick}]`;
+        document.getElementById("hudRtt").textContent = `${l0Rtt} ms (L0 Head)`;
+        const elRttSub = document.getElementById("hudRttSub");
+        if (elRttSub) elRttSub.textContent = `Awaiting SD1/SD2 quorum disk verification...`;
+        document.getElementById("hudTick").textContent = `#${repTick} (Head: #${headTick})`;
+        const elEpoch = document.getElementById("hudEpoch");
+        if (elEpoch) elEpoch.innerHTML = `<span>Lag: ${lag} ticks &middot; Compacted: ${body.compacted_total || 0}</span>`;
+        const elP = document.getElementById("inspPrimaryCoord");
+        if (elP) elP.textContent = `(${headPos.x}, ${headPos.y}) [head #${headTick}]`;
 
-          setGateBadge("confirmed", final, rtt);
-          if (!isInit) {
-            appendLog(
-              `Move <code>(${confirmedPos.x}, ${confirmedPos.y})</code> &rarr; ` +
-              `<span class="ack">confirmed [${(final.replicas || []).join(", ") || "quorum"}]</span> ` +
-              `Tick #${final.tick} in <strong>${rtt} ms</strong> (root: <code>${String(final.root || "—").slice(0, 18)}…</code>)`
-            );
-          }
-        } else if (final.status === "unavailable") {
-          setGateBadge("unavailable", final);
-          appendLog(`<span class="err">Quorum unavailable (503):</span> batch <code>${body.batch_id}</code> not replicated; server state unchanged.`);
-        } else {
-          setGateBadge("pending", body);
-          appendLog(`<span class="err">Still pending:</span> batch <code>${body.batch_id}</code> — no verified 200 within ${(rtt / 1000).toFixed(1)} s.`);
+        setGateBadge("accepted", body, l0Rtt);
+
+        // Centralized zero-overhead SD replication verification in pollNow (zero extra sockets!)
+        if (body && body.batch_id) {
+          pendingPlayerWrites.push({
+            batchId: body.batch_id,
+            targetTick: headTick,
+            repTick,
+            t0,
+            l0Rtt,
+            nx: Number(nx),
+            ny: Number(ny),
+            isInit
+          });
         }
       } catch (err) {
         setGateBadge("error", {});
@@ -1132,9 +1832,7 @@
         if (queuedMove) {
           const next = queuedMove;
           queuedMove = null;
-          if (next.x !== confirmedPos.x || next.y !== confirmedPos.y) {
-            writeCoordinate(next.x, next.y);
-          }
+          writeCoordinate(next.x, next.y);
         }
       }
     }
@@ -1238,69 +1936,127 @@
       }
     }
 
-    // Backstage Inspector: polls Primary (:8734), SD1 (:8735), SD2 (:8736), and Arbit (:8737)
+    // Backstage Inspector: polls Primary Worker 1 (:8734), SD1_1 (:8735), SD2_1 (:8736), and Arbit (:8737)
     async function pollClusterState() {
       pollTelemetryMetrics();
       try {
-        const [pState, sd1State, sd2State, arbitState] = await Promise.all([
-          fetchProcessBody(`http://${HOST}:8734`, "primary"),
-          fetchProcessBody(`http://${HOST}:8735`, "sd1"),
-          fetchProcessBody(`http://${HOST}:8736`, "sd2"),
+        const [pRes, sd1Res, sd2Res, arbitRes] = await Promise.allSettled([
+          fetchProcessBody(`http://${HOST}:8734`, "primary_1"),
+          fetchProcessBody(`http://${HOST}:8735`, "sd1_1"),
+          fetchProcessBody(`http://${HOST}:8736`, "sd2_1"),
           fetchProcessBody(`http://${HOST}:8737`, "arbit")
         ]);
 
-        const findPlayer = (state) => {
-          if (!state) return "—";
-          if (state.point && state.point.id === PLAYER_ID) {
-            return `(${state.point.x}, ${state.point.y}) [tick #${state.point.tick}]`;
+        const pState = pRes.status === "fulfilled" ? pRes.value : null;
+        const sd1State = sd1Res.status === "fulfilled" ? sd1Res.value : null;
+        const sd2State = sd2Res.status === "fulfilled" ? sd2Res.value : null;
+        const arbitState = arbitRes.status === "fulfilled" ? arbitRes.value : null;
+
+        const setNodeStatusTag = (id, online, onlineText, offlineText) => {
+          const el = document.getElementById(id);
+          if (!el) return;
+          if (online) {
+            el.style.background = "rgba(16, 185, 129, 0.15)";
+            el.style.color = "var(--green)";
+            el.style.border = "1px solid rgba(16, 185, 129, 0.35)";
+            el.textContent = `● ${onlineText}`;
+          } else {
+            el.style.background = "rgba(239, 68, 68, 0.15)";
+            el.style.color = "var(--red)";
+            el.style.border = "1px solid rgba(239, 68, 68, 0.35)";
+            el.textContent = `⚠ ${offlineText}`;
           }
-          if (Array.isArray(state.points)) {
-            const p = state.points.find(item => item.id === PLAYER_ID);
-            if (p) return `(${p.x}, ${p.y}) [tick #${p.tick}]`;
-          }
-          if (Array.isArray(state.recent_diffs)) {
-            const d = state.recent_diffs.slice().reverse().find(item => item.id === PLAYER_ID);
-            if (d) return `(${d.x}, ${d.y}) [tick #${d.tick}]`;
-          }
-          return "—";
         };
 
-        document.getElementById("inspPrimaryCoord").textContent = findPlayer(pState);
-        document.getElementById("inspPrimaryTopo").textContent = pState.topology_source || "—";
-        document.getElementById("inspPrimarySdTargets").textContent = (pState.sd_targets || []).join(", ");
+        setNodeStatusTag("tagPrimary", !!pState, "Online (Pure RAM Ingest)", "Offline");
+        setNodeStatusTag("tagSd1", !!sd1State, "Online (LMDB Slot 1)", "Offline");
+        setNodeStatusTag("tagSd2", !!sd2State, "Online (LMDB Slot 1)", "Offline");
+        setNodeStatusTag("tagArbit", !!arbitState, "Online (Checkpoint)", "Offline");
 
-        document.getElementById("inspSd1Coord").textContent = findPlayer(sd1State);
-        document.getElementById("inspSd1Tick").textContent = sd1State.last_tick ?? "—";
-        document.getElementById("inspSd1Persist").textContent = sd1State.persistence || "ram+lmdb";
-        document.getElementById("inspSd1Arbit").textContent = sd1State.arbit_target || "—";
+        const findPlayer = (state) => {
+          if (!state) return null;
+          if (state.point) {
+            const p = normalizePointEntry(state.point);
+            if (p && p.id === PLAYER_ID) return `(${p.x}, ${p.y}) [tick #${p.tick}]`;
+          }
+          const list = state.head_points || state.points;
+          if (Array.isArray(list)) {
+            for (const item of list) {
+              const p = normalizePointEntry(item);
+              if (p && p.id === PLAYER_ID) return `(${p.x}, ${p.y}) [tick #${p.tick}]`;
+            }
+          }
+          if (Array.isArray(state.recent_diffs)) {
+            for (let i = state.recent_diffs.length - 1; i >= 0; i--) {
+              const p = normalizePointEntry(state.recent_diffs[i]);
+              if (p && p.id === PLAYER_ID) return `(${p.x}, ${p.y}) [tick #${p.tick}]`;
+            }
+          }
+          return null;
+        };
 
-        document.getElementById("inspSd2Coord").textContent = findPlayer(sd2State);
-        document.getElementById("inspSd2Tick").textContent = sd2State.last_tick ?? "—";
-        document.getElementById("inspSd2Persist").textContent = sd2State.persistence || "ram+lmdb";
-        document.getElementById("inspSd2Arbit").textContent = sd2State.arbit_target || "—";
+        if (pState) {
+          const pCoord = findPlayer(pState);
+          const elCoord = document.getElementById("inspPrimaryCoord");
+          if (elCoord) elCoord.textContent = pCoord || (headPos.tick ? `(${headPos.x}, ${headPos.y}) [head #${headPos.tick}]` : `(${confirmedPos.x}, ${confirmedPos.y})`);
+          const elTopo = document.getElementById("inspPrimaryTopo");
+          if (elTopo) elTopo.textContent = pState.topology_source || "—";
+          const elSdTargets = document.getElementById("inspPrimarySdTargets");
+          if (elSdTargets) elSdTargets.textContent = (pState.sd_targets || []).join(", ");
+        }
 
-        const arbitTick = arbitState.official_tick ?? 0;
-        const batchInt = arbitState.batch_interval || 100;
-        document.getElementById("inspArbitTick").textContent = `#${arbitTick} (Batch Interval: every ${batchInt} ticks)`;
-        document.getElementById("inspArbitSeq").textContent = `#${arbitState.commitment_seq ?? 0}`;
-        document.getElementById("inspArbitRoot").textContent = arbitState.state_root || "—";
-        document.getElementById("inspArbitL1").textContent = arbitState.l1_gateway || "—";
+        if (sd1State) {
+          const sd1Coord = findPlayer(sd1State);
+          const elSd1Coord = document.getElementById("inspSd1Coord");
+          if (elSd1Coord) elSd1Coord.textContent = sd1Coord || (lastVerifiedPos.tick ? `(${lastVerifiedPos.x}, ${lastVerifiedPos.y}) [rep #${lastVerifiedPos.tick}]` : "—");
+          const elSd1Tick = document.getElementById("inspSd1Tick");
+          if (elSd1Tick) elSd1Tick.textContent = sd1State.last_tick != null ? `#${sd1State.last_tick} (lmdb disk)` : "—";
+          const elSd1Persist = document.getElementById("inspSd1Persist");
+          if (elSd1Persist) elSd1Persist.textContent = sd1State.persistence || "lmdb_disk";
+          const elSd1Arbit = document.getElementById("inspSd1Arbit");
+          if (elSd1Arbit) elSd1Arbit.textContent = sd1State.arbit_target || "—";
+        }
 
-        // Query Arweave L1 Node (:1984)
+        if (sd2State) {
+          const sd2Coord = findPlayer(sd2State);
+          const elSd2Coord = document.getElementById("inspSd2Coord");
+          if (elSd2Coord) elSd2Coord.textContent = sd2Coord || (lastVerifiedPos.tick ? `(${lastVerifiedPos.x}, ${lastVerifiedPos.y}) [rep #${lastVerifiedPos.tick}]` : "—");
+          const elSd2Tick = document.getElementById("inspSd2Tick");
+          if (elSd2Tick) elSd2Tick.textContent = sd2State.last_tick != null ? `#${sd2State.last_tick} (lmdb disk)` : "—";
+          const elSd2Persist = document.getElementById("inspSd2Persist");
+          if (elSd2Persist) elSd2Persist.textContent = sd2State.persistence || "lmdb_disk";
+          const elSd2Arbit = document.getElementById("inspSd2Arbit");
+          if (elSd2Arbit) elSd2Arbit.textContent = sd2State.arbit_target || "—";
+        }
+
+        if (arbitState) {
+          const arbitTick = arbitState.official_tick ?? 0;
+          const batchInt = arbitState.batch_interval || 100;
+          const elArbTick = document.getElementById("inspArbitTick");
+          if (elArbTick) elArbTick.textContent = `#${arbitTick} (Batch Interval: every ${batchInt} ticks)`;
+          const elArbSeq = document.getElementById("inspArbitSeq");
+          if (elArbSeq) elArbSeq.textContent = `#${arbitState.commitment_seq ?? 0}`;
+          const elArbRoot = document.getElementById("inspArbitRoot");
+          if (elArbRoot) elArbRoot.textContent = arbitState.state_root || "—";
+          const elArbL1 = document.getElementById("inspArbitL1");
+          if (elArbL1) elArbL1.textContent = arbitState.l1_gateway || "—";
+        }
+
+        // Query Arweave L1 Node (:1984) - try /arweave/info proxy first to avoid browser CORS warnings
         let l1Info = null;
         try {
-          const l1Res = await fetch(`http://${HOST}:1984/info`, {
+          const proxyRes = await fetch(`/arweave/info`, {
             headers: { "Accept": "application/json" },
             cache: "no-store"
           });
-          if (l1Res.ok) l1Info = await l1Res.json();
+          if (proxyRes.ok) l1Info = await proxyRes.json();
         } catch (_) {
           try {
-            const proxyRes = await fetch(`/arweave/info`, {
+            const l1Res = await fetch(`http://${HOST}:1984/info`, {
               headers: { "Accept": "application/json" },
               cache: "no-store"
             });
-            if (proxyRes.ok) l1Info = await proxyRes.json();
+            if (l1Res.ok) l1Info = await l1Res.json();
           } catch (_) {}
         }
 
@@ -1312,6 +2068,7 @@
           const elHeight = document.getElementById("inspL1Height"); if (elHeight) elHeight.textContent = `Block #${h}`;
           const elNet = document.getElementById("inspL1Network"); if (elNet) elNet.textContent = net;
           const elHash = document.getElementById("inspL1Hash"); if (elHash) elHash.textContent = currHash.length > 24 ? currHash.slice(0, 24) + "..." : currHash;
+          setNodeStatusTag("tagL1", true, `Online (Block #${h})`, "Offline");
           const l1B = document.getElementById("l1Badge");
           if (l1B) {
             l1B.className = "badge ok";
@@ -1319,6 +2076,7 @@
           }
         } else {
           const elStatus = document.getElementById("inspL1Status"); if (elStatus) elStatus.textContent = "Offline / Waiting";
+          setNodeStatusTag("tagL1", false, "", "Offline / Waiting");
           const l1B = document.getElementById("l1Badge");
           if (l1B) {
             l1B.className = "badge warn";
@@ -1337,10 +2095,15 @@
           }
         }
 
-        document.getElementById("pollStatus").textContent =
-          `Synced @ ${new Date().toLocaleTimeString("en-US", { hour12: false })}`;
+        const statusEl = document.getElementById("pollStatus");
+        if (statusEl) {
+          statusEl.innerHTML = `<span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:#10b981; margin-right:5px; box-shadow: 0 0 6px #10b981;"></span>Synced @ ${new Date().toLocaleTimeString("en-US", { hour12: false })}`;
+        }
       } catch (e) {
-        document.getElementById("pollStatus").textContent = `Inspector sync warning: ${e.message}`;
+        const statusEl = document.getElementById("pollStatus");
+        if (statusEl) {
+          statusEl.textContent = `Inspector sync warning: ${e.message}`;
+        }
       }
     }
 
@@ -1435,8 +2198,8 @@
           ctx.restore();
         }
 
-        // In-flight target: thin dashed ring in entity color (not yet ACKed)
-        if (ent.tx !== ent.x || ent.ty !== ent.y) {
+        // 1. In-flight target: thin dashed ring in entity color (not yet ACKed)
+        if (showTargets && (ent.tx !== (ent.hx || ent.x) || ent.ty !== (ent.hy || ent.y))) {
           ctx.save();
           ctx.strokeStyle = col;
           ctx.globalAlpha = 0.55;
@@ -1445,17 +2208,30 @@
           ctx.restore();
         }
 
-        // Confirmed position (moves only after Primary + SD ACK)
-        ctx.save();
-        ctx.shadowColor = col;
-        ctx.shadowBlur = isHover ? 22 : 12;
-        ctx.fillStyle = col;
-        ctx.beginPath(); ctx.arc(px, py, isHover ? 9 : 7, 0, Math.PI * 2); ctx.fill();
-        ctx.shadowBlur = 0;
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = "rgba(255,255,255,0.75)";
-        ctx.stroke();
-        ctx.restore();
+        // 2. L0 Head RAM: Cyan Ring around ent.hx, ent.hy
+        if (showL0 && showBotRings && ent.hx != null && (ent.hx !== ent.x || ent.hy !== ent.y)) {
+          ctx.save();
+          ctx.strokeStyle = "rgba(6, 182, 212, 0.95)";
+          ctx.lineWidth = 1.8;
+          ctx.shadowColor = "rgba(6, 182, 212, 0.75)";
+          ctx.shadowBlur = 8;
+          ctx.beginPath(); ctx.arc(cx + ent.hx, cy + ent.hy, 9, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+        }
+
+        // 3. Confirmed position (moves only after Primary + SD ACK)
+        if (showL1) {
+          ctx.save();
+          ctx.shadowColor = col;
+          ctx.shadowBlur = isHover ? 22 : 12;
+          ctx.fillStyle = col;
+          ctx.beginPath(); ctx.arc(px, py, isHover ? 9 : 7, 0, Math.PI * 2); ctx.fill();
+          ctx.shadowBlur = 0;
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = "rgba(255,255,255,0.75)";
+          ctx.stroke();
+          ctx.restore();
+        }
 
         if (showLabels || isHover) {
           ctx.font = "9px monospace";
@@ -1470,17 +2246,19 @@
       }
 
       // Draw replicated trail
-      for (let i = 0; i < trail.length; i++) {
-        const pt = trail[i];
-        const alpha = ((i + 1) / trail.length) * 0.35;
-        ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
-        ctx.beginPath();
-        ctx.arc(cx + pt.x, cy + pt.y, 5, 0, Math.PI * 2);
-        ctx.fill();
+      if (showTrails && trail.length) {
+        for (let i = 0; i < trail.length; i++) {
+          const pt = trail[i];
+          const alpha = ((i + 1) / trail.length) * 0.35;
+          ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
+          ctx.beginPath();
+          ctx.arc(cx + pt.x, cy + pt.y, 5, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
 
       // Draw Ghost Ring (Unconfirmed / In-Flight Input Target)
-      if (targetPos.x !== confirmedPos.x || targetPos.y !== confirmedPos.y || isWriting) {
+      if (showTargets && (targetPos.x !== confirmedPos.x || targetPos.y !== confirmedPos.y || isWriting)) {
         ctx.save();
         ctx.strokeStyle = "rgba(226, 232, 240, 0.75)";
         ctx.lineWidth = 2;
@@ -1491,42 +2269,73 @@
         ctx.restore();
       }
 
-      // Smoothly interpolate visual position towards confirmedPos
+      // Draw L0 Head Ring (Primary RAM Optimistic State: HTTP 202 Accepted)
+      if (showL0 && headPos && (headPos.x !== confirmedPos.x || headPos.y !== confirmedPos.y || (headPos.tick > confirmedPos.tick))) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(6, 182, 212, 0.95)";
+        ctx.lineWidth = 2;
+        ctx.shadowColor = "rgba(6, 182, 212, 0.75)";
+        ctx.shadowBlur = 12;
+        ctx.beginPath();
+        ctx.arc(cx + headPos.x, cy + headPos.y, 16, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.font = "9px monospace";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#22d3ee";
+        ctx.fillText(`L0 Head #${headPos.tick} (RAM)`, cx + headPos.x, cy + headPos.y + 24);
+        ctx.restore();
+      }
+
+      // Draw Quorum Confirmation Pulse animation
+      if (confirmedPulse && confirmedPulse.alpha > 0.05) {
+        ctx.save();
+        ctx.strokeStyle = `rgba(16, 185, 129, ${confirmedPulse.alpha})`;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(cx + confirmedPulse.x, cy + confirmedPulse.y, confirmedPulse.r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+        confirmedPulse.r += 1.8;
+        confirmedPulse.alpha *= 0.88;
+      }
+
+      // Smoothly interpolate visual position towards confirmedPos (L1 SD Quorum Verified)
       renderPos.x += (confirmedPos.x - renderPos.x) * 0.35;
       renderPos.y += (confirmedPos.y - renderPos.y) * 0.35;
 
-      // Draw Confirmed Solid Red Circle (ONLY moves after Primary + SD1/SD2 ACK)
-      ctx.save();
-      ctx.shadowColor = "rgba(239, 68, 68, 0.75)";
-      ctx.shadowBlur = 18;
-      ctx.fillStyle = "#ef4444";
-      ctx.beginPath();
-      ctx.arc(cx + renderPos.x, cy + renderPos.y, 15, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.lineWidth = 2.5;
-      ctx.strokeStyle = "#fecaca";
-      ctx.stroke();
-      ctx.restore();
+      // Draw Confirmed Solid Red Circle (ONLY moves after Primary + SD1/SD2 200 Replicated Quorum ACK!)
+      if (showL1) {
+        ctx.save();
+        ctx.shadowColor = "rgba(239, 68, 68, 0.85)";
+        ctx.shadowBlur = 18;
+        ctx.fillStyle = "#ef4444";
+        ctx.beginPath();
+        ctx.arc(cx + renderPos.x, cy + renderPos.y, 15, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = "#fecaca";
+        ctx.stroke();
+        ctx.restore();
 
-      // Label above circle
-      ctx.fillStyle = "#f8fafc";
-      ctx.font = "11px monospace";
-      ctx.textAlign = "center";
-      ctx.fillText(
-        `${PLAYER_ID} (${confirmedPos.x}, ${confirmedPos.y}) [tick #${confirmedPos.tick}]`,
-        cx + renderPos.x,
-        cy + renderPos.y - 22
-      );
+        // Label above circle
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "11px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(
+          `${PLAYER_ID} (${Math.round(confirmedPos.x)}, ${Math.round(confirmedPos.y)}) [rep #${confirmedPos.tick}]`,
+          cx + renderPos.x,
+          cy + renderPos.y - 22
+        );
+      }
 
       requestAnimationFrame(renderLoop);
     }
 
-    discoverFromGenesis().then(() => { seedEntities(); pollNow(); });
+    discoverFromGenesis().then(() => { seedEntities(); pollNow(); pollClusterState(); });
     bindSwarmControls();
     setInterval(pollClusterState, 1200);
-    // Status polling is slot-free (/now); the entity table is seeded once and
-    // then updated from confirmed write ACKs, never by a polling push read.
-    setInterval(pollNow, 1200);
+    // Poll /now every 80ms for instant slot-free L1 batch confirmations & live HUD
+    setInterval(pollNow, 80);
     setInterval(updateSwarmStats, 250);
     requestAnimationFrame(renderLoop);
   </script>

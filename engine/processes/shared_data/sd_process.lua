@@ -34,7 +34,7 @@ MaxCommittedHistory = MaxCommittedHistory or 512
 MaxPendingBatches = MaxPendingBatches or 64
 
 MaxEntities = MaxEntities or 1000
-MaxBatchInputs = MaxBatchInputs or 64
+MaxBatchInputs = MaxBatchInputs or 256
 MaxPayloadBytes = MaxPayloadBytes or 65536
 
 local function json_safe(value)
@@ -64,7 +64,7 @@ local function ror32(x, n)
     return (((x >> n) | (x << (32 - n))) & 0xffffffff)
 end
 
-local function sha256_hex(str)
+local function sha256_hex_lua(str)
     str = str or ""
     local len = #str
     local bit_len = len * 8
@@ -120,6 +120,13 @@ local function sha256_hex(str)
     end
 
     return string.format("0x%08x%08x%08x%08x%08x%08x%08x%08x", h0, h1, h2, h3, h4, h5, h6, h7)
+end
+
+local function sha256_hex(str)
+    if ao and ao.sha256 then
+        return ao.sha256(str or "")
+    end
+    return sha256_hex_lua(str)
 end
 
 -- ==============================================================================
@@ -252,26 +259,27 @@ local function count_replicas()
 end
 
 local function extract_first_signer(process_or_msg)
-    if not process_or_msg then return nil end
-    if ao and ao.signers then
-        local ok, list = pcall(function() return ao.signers(process_or_msg) end)
-        if ok and type(list) == "table" and #list > 0 then
-            return tostring(list[1])
-        end
-    end
+    if type(process_or_msg) ~= "table" then return nil end
     if type(process_or_msg.authority) == "table" and #process_or_msg.authority > 0 then
         return tostring(process_or_msg.authority[1])
     elseif type(process_or_msg.authority) == "string" and #process_or_msg.authority > 0 then
         return process_or_msg.authority
     end
+    if process_or_msg.commitments ~= nil and ao and ao.signers then
+        local ok, list = pcall(function() return ao.signers(process_or_msg) end)
+        if ok and type(list) == "table" and #list > 0 then
+            return tostring(list[1])
+        end
+    end
     return nil
 end
 
 local function extract_msg_id(msg_obj)
-    if not msg_obj or not ao or not ao.id then return "uncommitted" end
-    local ok, mid = pcall(function() return ao.id(msg_obj) end)
-    if ok and mid then return tostring(mid) end
-    return "uncommitted"
+    if type(msg_obj) == "table" then
+        if msg_obj.id then return tostring(msg_obj.id) end
+        if msg_obj["hash-chain"] then return tostring(msg_obj["hash-chain"]) end
+    end
+    return "sd-slot-" .. tostring(LastTick or 0)
 end
 
 local function fetch_genesis_topology_once(genesis_url)
@@ -331,10 +339,15 @@ end
 
 local function parse_delta(raw)
     local delta, order = {}, {}
-    local function add(id, x, y, owner)
+    local function add(id, x, y, owner, etick)
         id = tostring(id)
         if delta[id] == nil then table.insert(order, id) end
-        delta[id] = { x = tonumber(x) or 0, y = tonumber(y) or 0, owner = tostring(owner or "anonymous") }
+        delta[id] = {
+            x = tonumber(x) or 0,
+            y = tonumber(y) or 0,
+            owner = tostring(owner or "anonymous"),
+            tick = etick and tonumber(etick) or nil
+        }
     end
     if type(raw) == "table" then
         -- HyperBEAM decodes the relayed JSON body into a Lua table.
@@ -347,7 +360,8 @@ local function parse_delta(raw)
                     local x = item[2] or item.x
                     local y = item[3] or item.y
                     local owner = item[4] or item.owner
-                    if id ~= nil then add(id, x, y, owner) end
+                    local etick = item[5] or item.tick
+                    if id ~= nil then add(id, x, y, owner, etick) end
                 end
             end
         end
@@ -356,13 +370,14 @@ local function parse_delta(raw)
     raw = tostring(raw or "")
     local init = 1
     while true do
-        local s, e, id, x, y, owner = string.find(
+        local s, e, id, x, y, owner, rest = string.find(
             raw,
-            '%[%s*"([^"]+)"%s*,%s*([%d%.%-]+)%s*,%s*([%d%.%-]+)%s*,%s*"([^"]*)"%s*%]',
+            '%[%s*"([^"]+)"%s*,%s*([%d%.%-]+)%s*,%s*([%d%.%-]+)%s*,%s*"([^"]*)"%s*([^%]]*)%]',
             init
         )
         if not s then break end
-        add(id, x, y, owner)
+        local etick = rest and string.match(rest, ',%s*(%d+)')
+        add(id, x, y, owner, etick)
         init = e + 1
     end
     return delta, order
@@ -421,10 +436,12 @@ end
 -- raises on a dead peer, so the replica can never block on the primary.
 local function cast_ack(topo, batch_id, tick, root, sd_signer, node_role)
     if not (topo and topo.primary_url) then return end
+    local worker_suffix = node_role and string.match(tostring(node_role), "_(%d+)$")
+    local target_primary = worker_suffix and ("primary_" .. worker_suffix) or topo.primary_process
     pcall(function()
         ao.resolve({
             path = "/~relay@1.0/cast",
-            ["relay-path"] = topo.primary_url .. "/~node-process@1.0/" .. topo.primary_process .. "/push",
+            ["relay-path"] = topo.primary_url .. "/~node-process@1.0/" .. target_primary .. "/push",
             ["relay-method"] = "POST",
             ["relay-body"] = string.format(
                 '{"action":"Ack","batch_id":"%s","tick":%d,"state_root":"%s","sd_signer":"%s","role":"%s","epoch":%d}',
@@ -441,10 +458,12 @@ end
 -- wrong) so it can re-hydrate instead of retrying forever. Cast only.
 local function cast_reject(topo, batch_id, reason, sd_signer, node_role)
     if not (topo and topo.primary_url) then return end
+    local worker_suffix = node_role and string.match(tostring(node_role), "_(%d+)$")
+    local target_primary = worker_suffix and ("primary_" .. worker_suffix) or topo.primary_process
     pcall(function()
         ao.resolve({
             path = "/~relay@1.0/cast",
-            ["relay-path"] = topo.primary_url .. "/~node-process@1.0/" .. topo.primary_process .. "/push",
+            ["relay-path"] = topo.primary_url .. "/~node-process@1.0/" .. target_primary .. "/push",
             ["relay-method"] = "POST",
             ["relay-body"] = string.format(
                 '{"action":"Reject","batch_id":"%s","reason":"%s","last_tick":%d,"state_root":"%s","sd_signer":"%s","role":"%s"}',
@@ -487,7 +506,7 @@ local function apply_delta(batch_id, tick_from, tick_to, delta, order, sd_signer
     local packed = {}
     for _, id in ipairs(order) do
         local d = delta[id]
-        packed[id] = pack_entity(d.x, d.y, tick_to, d.owner)
+        packed[id] = pack_entity(d.x, d.y, d.tick or tick_to, d.owner)
         ReplicaStore[id] = packed[id]
     end
     LastTick = tick_to
@@ -534,9 +553,12 @@ function compute(process, message, opts)
     local batch_interval = (topo and topo.arbit_batch_interval) or 5
     local node_role = tostring(process["node-role"] or "sd1")
 
-    local sd_signer = extract_first_signer(process) or "sd_authority"
+    if not SdSigner then
+        SdSigner = extract_first_signer(process) or "sd_authority"
+    end
+    local sd_signer = SdSigner
     local assignment_id = extract_msg_id(message)
-    local incoming_signer = extract_first_signer(msg) or msg.relayed_by_signer
+    local incoming_signer = msg.relayed_by_signer or extract_first_signer(msg)
     if incoming_signer then
         LastRelayedBySigner = incoming_signer
     end
@@ -621,7 +643,7 @@ function compute(process, message, opts)
             -- Verify the claimed root BEFORE mutating (verify-don't-trust).
             local packed = {}
             for id, d in pairs(delta) do
-                packed[id] = pack_entity(d.x, d.y, tick_to, d.owner)
+                packed[id] = pack_entity(d.x, d.y, d.tick or tick_to, d.owner)
             end
             local computed_root = candidate_root(Shards, ShardHashes, packed, tick_to)
             if computed_root ~= claimed_root then

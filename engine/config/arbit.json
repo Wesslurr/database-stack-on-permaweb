@@ -1,5 +1,6 @@
 {
   "port": 8737,
+  "priv-key-location": "/home/weslur/database/engine/data/arbit/wallet.json",
   "priv_key_location": "/home/weslur/database/engine/data/arbit/wallet.json",
   "gateway": "http://127.0.0.1:1984",
   "relay-allow-commit-request": true,
@@ -12,14 +13,17 @@
   "process_workers": true,
   "scheduling-mode": "local_confirmation",
   "scheduling_mode": "local_confirmation",
+  "scheduler-lookahead": false,
+  "scheduler_lookahead": false,
   "scheduler-default-commitment-spec": "ans104@1.0",
   "scheduler_default_commitment_spec": "ans104@1.0",
   "force-signed": true,
   "force_signed": true,
-  "process-snapshot-slots": 10,
-  "process_snapshot_slots": 10,
+  "process-snapshot-slots": 1,
+  "process_snapshot_slots": 1,
   "process-snapshot-time": false,
   "process_snapshot_time": false,
+  "http-max-body": 65536,
   "http_max_body": 65536,
   "cache-control": [
     "no-store"
@@ -105,5 +109,6 @@
       "genesis-url": "http://127.0.0.1:8733"
     }
   },
+  "bundler-ans104": "http://127.0.0.1:1984",
   "bundler_ans104": "http://127.0.0.1:1984"
 }

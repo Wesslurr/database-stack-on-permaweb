@@ -5,9 +5,12 @@ set -uo pipefail
 
 PROJECT_ROOT="/home/weslur/database"
 HB_SRC="$PROJECT_ROOT/HyperBEAM"
-export PATH="/home/weslur/.local/bin:/home/weslur/.cargo/bin:$PATH"
+export PATH="/home/weslur/erlang/27.0/bin:/home/weslur/.local/bin:/home/weslur/.cargo/bin:$PATH"
 
 python3 "$PROJECT_ROOT/tools/build_configs.py" >/dev/null || exit 1
+
+# Ensure HyperBEAM is compiled once to avoid shared _build races among workers
+(cd "$HB_SRC" && rebar3 compile >/dev/null 2>&1 || true)
 
 # HyperBEAM persists the node-process name registry (local-name@1.0) in the
 # node store. A changed Lua module therefore needs a clean registry, otherwise
@@ -47,7 +50,7 @@ sleep 1
 
 for NODE_SPEC in "${NODES[@]}"; do
     IFS=":" read -r SESSION_NAME PORT CONFIG_PATH <<< "$NODE_SPEC"
-    CMD="export PATH=\"/home/weslur/.local/bin:/home/weslur/.cargo/bin:\$PATH\" && export ERL_FLAGS=\"+S 1:1 +A 1 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME"
+    CMD="export PATH=\"/home/weslur/erlang/27.0/bin:/home/weslur/.local/bin:/home/weslur/.cargo/bin:\$PATH\" && export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME"
     tmux new-session -d -s "$SESSION_NAME" "bash -c '$CMD'"
     sleep 2
 done

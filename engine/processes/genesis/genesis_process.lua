@@ -82,7 +82,7 @@ end
 
 local function encode_topology_json(genesis_signer)
     return string.format(
-        [[{"status":"ok","requires_sign":true,"epoch":%d,"genesis_signer":"%s","arbit_batch_interval":%d,"primary_url":"%s","primary_process":"%s","sd1_url":"%s","sd1_process":"%s","sd2_url":"%s","sd2_process":"%s","arbit_url":"%s","arbit_process":"%s","l1_url":"%s","l1_commit_mode":"%s","primary_max_entities":%d,"primary_audit_ring":%d,"sd_snapshot_slots":%d,"sd_diff_slots":%d}]],
+        [[{"status":"ok","requires_sign":true,"epoch":%d,"genesis_signer":"%s","arbit_batch_interval":%d,"primary_url":"%s","primary_process":"%s","max_primary_workers":10,"primary_workers":["primary_1","primary_2","primary_3","primary_4","primary_5","primary_6","primary_7","primary_8","primary_9","primary_10"],"sd1_url":"%s","sd1_process":"%s","sd2_url":"%s","sd2_process":"%s","arbit_url":"%s","arbit_process":"%s","l1_url":"%s","l1_commit_mode":"%s","primary_max_entities":%d,"primary_audit_ring":%d,"sd_snapshot_slots":%d,"sd_diff_slots":%d}]],
         CurrentEpoch,
         json_safe(genesis_signer),
         ArbitBatchInterval,

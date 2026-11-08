@@ -87,8 +87,8 @@ def kill_node(name):
 
 def start_node(name):
     cmd = (
-        "export PATH=\"/home/weslur/.local/bin:/home/weslur/.cargo/bin:$PATH\" && "
-        "export ERL_FLAGS=\"+S 1:1 +A 1 +MBas aobf\" && "
+        "export PATH=\"/home/weslur/erlang/27.0/bin:/home/weslur/.local/bin:/home/weslur/.cargo/bin:$PATH\" && "
+        "export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && "
         "cd \"%s/HyperBEAM\" && HB_PORT=\"%d\" HB_CONFIG=\"%s\" rebar3 shell --sname %s"
         % (PROJECT_ROOT, PORTS[name], CONFIG[name], TMUX[name])
     )

@@ -1,47 +1,47 @@
 {
   "cluster": {
     "computed_slot_size": {
-      "primary": 521343,
-      "sd1": 333681,
-      "sd2": 333681
+      "primary": 602929,
+      "sd1": 363549,
+      "sd2": 363522
     },
     "lmdb_mb": {
       "arbit": 1.0,
       "genesis": 1.0,
       "primary": 1.0,
-      "sd1": 27.0,
-      "sd2": 27.0
+      "sd1": 38.0,
+      "sd2": 39.0
     },
     "roots_equal": true,
     "rss_mb": {
-      "genesis": 132.2,
-      "primary": 420.2,
-      "sd1": 176.6,
-      "sd2": 177.2
+      "genesis": 118.7,
+      "primary": 545.0,
+      "sd1": 146.2,
+      "sd2": 150.8
     },
     "state": {
       "primary": {
-        "entities": 140,
+        "entities": 153,
         "http": 200,
-        "state_root": "0xe7e5afdf6bafd44ba42f1ccd9dca0be4f10af36a13695f101e34a3beb194e98a",
-        "tick": 280
+        "state_root": "0xd0bd42387a785de9404e1a30c462baf1bcd04d5805a5245d4ef578c52f4c1d4c",
+        "tick": 368
       },
       "sd1": {
-        "entities": 140,
+        "entities": 153,
         "http": 200,
-        "state_root": "0xe7e5afdf6bafd44ba42f1ccd9dca0be4f10af36a13695f101e34a3beb194e98a",
-        "tick": 280
+        "state_root": "0xd0bd42387a785de9404e1a30c462baf1bcd04d5805a5245d4ef578c52f4c1d4c",
+        "tick": 368
       },
       "sd2": {
-        "entities": 140,
+        "entities": 153,
         "http": 200,
-        "state_root": "0xe7e5afdf6bafd44ba42f1ccd9dca0be4f10af36a13695f101e34a3beb194e98a",
-        "tick": 280
+        "state_root": "0xd0bd42387a785de9404e1a30c462baf1bcd04d5805a5245d4ef578c52f4c1d4c",
+        "tick": 368
       }
     }
   },
-  "generated_at": "2026-11-06T15:59:56+0700",
-  "git_commit": "3030ad4",
+  "generated_at": "2026-11-07T13:08:23+0700",
+  "git_commit": "c3bcf80",
   "notes": [
     "keep-alive single connection per node; loopback only",
     "write_202 measures L0 accept, write_confirm measures L1 (poll Batch-Status)",
@@ -50,92 +50,208 @@
   ],
   "paths": {
     "advance": {
-      "max_ms": 264.227,
-      "min_ms": 94.598,
+      "max_ms": 585.454,
+      "min_ms": 83.699,
       "n": 40,
-      "p50_ms": 203.486,
-      "p90_ms": 227.565,
-      "p99_ms": 264.227,
+      "p50_ms": 238.948,
+      "p90_ms": 510.945,
+      "p99_ms": 585.454,
       "status_codes": [
         202
       ]
     },
     "cold_hydrate": {
-      "max_ms": 163.457,
-      "min_ms": 147.342,
+      "max_ms": 170.737,
+      "min_ms": 147.678,
       "n": 20,
-      "p50_ms": 152.864,
-      "p90_ms": 158.554,
-      "p99_ms": 163.457,
+      "p50_ms": 156.344,
+      "p90_ms": 160.254,
+      "p99_ms": 170.737,
       "status_codes": [
         200
       ]
     },
     "now": {
-      "max_ms": 13.114,
-      "min_ms": 11.043,
+      "max_ms": 23.115,
+      "min_ms": 11.504,
       "n": 150,
-      "p50_ms": 11.986,
-      "p90_ms": 12.39,
-      "p99_ms": 12.62,
+      "p50_ms": 12.218,
+      "p90_ms": 13.345,
+      "p99_ms": 18.478,
       "status_codes": [
         200
       ]
     },
     "read_push": {
-      "max_ms": 197.823,
-      "min_ms": 79.024,
+      "max_ms": 220.681,
+      "min_ms": 76.496,
       "n": 60,
-      "p50_ms": 80.319,
-      "p90_ms": 81.886,
-      "p99_ms": 82.247,
-      "response_bytes_p50": 11355,
+      "p50_ms": 84.12,
+      "p90_ms": 92.618,
+      "p99_ms": 135.432,
+      "response_bytes_p50": 11624,
       "status_codes": [
         200
       ]
     },
     "relay_call_sd": {
-      "max_ms": 164.789,
-      "min_ms": 146.482,
+      "max_ms": 245.008,
+      "min_ms": 147.897,
       "n": 60,
-      "p50_ms": 151.291,
-      "p90_ms": 155.243,
-      "p99_ms": 158.479,
-      "response_bytes_p50": 8312,
+      "p50_ms": 158.394,
+      "p90_ms": 169.191,
+      "p99_ms": 203.476,
+      "response_bytes_p50": 8561,
       "status_codes": [
         200
       ]
     },
     "sd_direct": {
-      "max_ms": 94.11,
-      "min_ms": 74.619,
+      "max_ms": 117.464,
+      "min_ms": 72.669,
       "n": 60,
-      "p50_ms": 79.953,
-      "p90_ms": 84.896,
-      "p99_ms": 89.059,
-      "response_bytes_p50": 11089,
+      "p50_ms": 81.578,
+      "p90_ms": 86.696,
+      "p99_ms": 104.067,
+      "response_bytes_p50": 11358,
       "status_codes": [
         200
       ]
     },
+    "throughput": {
+      "flush_serial": {
+        "confirmed_per_s": 0.52,
+        "elapsed_s": 32.5,
+        "latency": {
+          "max_ms": 15964.58,
+          "min_ms": 672.523,
+          "n": 24,
+          "p50_ms": 1325.795,
+          "p90_ms": 15771.361,
+          "p99_ms": 15964.58,
+          "status_codes": [
+            200,
+            202
+          ]
+        },
+        "status_counts": {
+          "200": 17,
+          "202": 7
+        },
+        "writers": 8,
+        "writes": 24
+      },
+      "notes": [
+        "paced open-loop writers (one entity per writer, no flush): the queue absorbs bursts, so accepted/s and confirmed/s are both reported",
+        "confirmed/s is inputs committed to the canonical root divided by burst + drain wall time, not by one batch latency",
+        "flush_serial closes one batch per write: the 2-of-3 quorum RTT floor",
+        "queue_peak is the maximum `queued` value observed by the /now monitor"
+      ],
+      "sweep": [
+        {
+          "accepted": 62,
+          "accepted_per_s": 9.22,
+          "applied_before": 154,
+          "confirm_ratio": 1.0,
+          "confirmed_inputs": 62,
+          "confirmed_per_s": 8.41,
+          "drain_s": 0.64,
+          "drained": true,
+          "latency": {
+            "max_ms": 1064.741,
+            "min_ms": 241.135,
+            "n": 62,
+            "p50_ms": 845.417,
+            "p90_ms": 1004.956,
+            "p99_ms": 1063.105,
+            "status_codes": [
+              202
+            ]
+          },
+          "offered_per_s": 50.0,
+          "queue_peak": 9,
+          "seconds": 6.0,
+          "status_counts": {
+            "202": 62
+          },
+          "writers": 8
+        },
+        {
+          "accepted": 55,
+          "accepted_per_s": 8.08,
+          "applied_before": 216,
+          "confirm_ratio": 1.0,
+          "confirmed_inputs": 55,
+          "confirmed_per_s": 7.22,
+          "drain_s": 0.81,
+          "drained": true,
+          "latency": {
+            "max_ms": 1318.662,
+            "min_ms": 264.252,
+            "n": 55,
+            "p50_ms": 931.027,
+            "p90_ms": 1235.232,
+            "p99_ms": 1246.919,
+            "status_codes": [
+              202
+            ]
+          },
+          "offered_per_s": 100.0,
+          "queue_peak": 9,
+          "seconds": 6.0,
+          "status_counts": {
+            "202": 55
+          },
+          "writers": 8
+        },
+        {
+          "accepted": 54,
+          "accepted_per_s": 7.91,
+          "applied_before": 271,
+          "confirm_ratio": 1.0,
+          "confirmed_inputs": 54,
+          "confirmed_per_s": 7.17,
+          "drain_s": 0.7,
+          "drained": true,
+          "latency": {
+            "max_ms": 1246.259,
+            "min_ms": 270.93,
+            "n": 54,
+            "p50_ms": 978.885,
+            "p90_ms": 1167.668,
+            "p99_ms": 1236.686,
+            "status_codes": [
+              202
+            ]
+          },
+          "offered_per_s": 200.0,
+          "queue_peak": 5,
+          "seconds": 6.0,
+          "status_counts": {
+            "202": 54
+          },
+          "writers": 8
+        }
+      ]
+    },
     "write_202": {
-      "max_ms": 480.388,
-      "min_ms": 112.711,
+      "max_ms": 220.72,
+      "min_ms": 70.15,
       "n": 60,
-      "p50_ms": 207.311,
-      "p90_ms": 256.012,
-      "p99_ms": 379.267,
+      "p50_ms": 136.677,
+      "p90_ms": 187.534,
+      "p99_ms": 216.989,
       "status_codes": [
         202
       ]
     },
     "write_confirm": {
-      "max_ms": 702.824,
-      "min_ms": 523.088,
+      "max_ms": 544.966,
+      "min_ms": 226.977,
       "n": 40,
-      "p50_ms": 620.38,
-      "p90_ms": 662.957,
-      "p99_ms": 702.824,
+      "p50_ms": 381.246,
+      "p90_ms": 430.624,
+      "p99_ms": 544.966,
       "status_codes": [
         200
       ]

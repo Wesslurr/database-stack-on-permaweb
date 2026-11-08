@@ -22,6 +22,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import http.client
 
@@ -174,128 +175,240 @@ def drain(client, timeout=60.0):
     return False
 
 
-def main():
-    samples = int(os.environ.get("BENCH_N", "150"))
-    primary = KeepAlive(PRIMARY[0], PRIMARY[1])
-    sd1 = KeepAlive(SD1[0], SD1[1])
+# ==============================================================================
+# Throughput: concurrent writers, offered load swept until the pipeline stops
+# keeping up. Everything below is measured from real HTTP responses; no rate is
+# extrapolated from a single-request latency.
+# ==============================================================================
+NOW_PATH = "/~node-process@1.0/primary/now/results~message@1.0/output/body"
 
-    # Resolve the topology / hydrate before measuring.
-    primary.request("POST", PUSH.format(proc="primary"), {"action": "Read-All"})
 
-    result = {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "git_commit": subprocess.getoutput("git -C '%s' rev-parse --short HEAD" % ROOT).strip(),
-        "samples_per_path": samples,
-        "notes": [
-            "keep-alive single connection per node; loopback only",
-            "write_202 measures L0 accept, write_confirm measures L1 (poll Batch-Status)",
-            "cold_hydrate is a full-state transfer proxy for cold start, not a process restart",
-            "slot size comes from the Erlang debug log (computed_slot_size)",
-        ],
-        "paths": {},
+def now_body(client):
+    code, raw, _ = client.request("GET", NOW_PATH)
+    return code, body_json(raw)
+
+
+def read_all(client):
+    code, raw, _ = client.request(
+        "POST", PUSH.format(proc=PRIMARY[2]), {"action": "Read-All"})
+    return code, body_json(raw)
+
+
+def wait_drained(client, timeout=240.0):
+    """Wait for zero queued inputs, zero pending batches, zero repair work."""
+    deadline = time.perf_counter() + timeout
+    body = {}
+    while time.perf_counter() < deadline:
+        code, body = read_all(client)
+        if code == 200 and int(body.get("queued") or 0) == 0 \
+                and int(body.get("pending_batches") or 0) == 0 \
+                and int(body.get("repair_batches") or 0) == 0:
+            return True, body
+        time.sleep(0.05)
+    return False, body
+
+
+class BatchMonitor(threading.Thread):
+    """Poll /now (slot-free) and record every committed batch it sees."""
+
+    def __init__(self, host, port, stop):
+        super().__init__(daemon=True)
+        self.host, self.port, self.stop = host, port, stop
+        self.batches = {}      # batch_id -> (tick, inputs)
+        self.queue_peak = 0
+        self.last = {}
+
+    def run(self):
+        client = KeepAlive(self.host, self.port)
+        while not self.stop.is_set():
+            code, body = now_body(client)
+            if code == 200:
+                self.last = body
+                bid = body.get("batch_id")
+                tick = int(body.get("tick") or 0)
+                if bid and body.get("ack") == "replicated" and body.get("batch_inputs") is not None:
+                    self.batches[bid] = (tick, int(body.get("batch_inputs") or 0))
+                q = int(body.get("queued") or 0)
+                if q > self.queue_peak:
+                    self.queue_peak = q
+            time.sleep(0.02)
+
+
+def ensure_entities(client, count, ts_base):
+    """Create (or refresh) the entity ids the writers will hammer."""
+    for i in range(count):
+        code, raw, _ = client.request("POST", PUSH.format(proc="primary"), {
+            "action": "Input", "id": "bench_tp_%d" % i, "x": float(i),
+            "y": float(i), "client_signer": "bench", "ts": ts_base + i, "flush": True})
+        if code == 202:
+            poll_batch(client, body_json(raw).get("batch_id") or "")
+    drain(client)
+
+
+def throughput_step(rate, seconds, writers, primary, applied_before, ts_base, step_index):
+    """Paced open-loop writers for `seconds`, then an honest full drain."""
+    stop = threading.Event()
+    lock = threading.Lock()
+    lats, codes = [], []
+    accepted = [0]
+
+    def writer(wid):
+        client = KeepAlive(PRIMARY[0], PRIMARY[1])
+        interval = float(writers) / float(rate) if rate else 0.0
+        deadline = time.perf_counter()
+        n = 0
+        # One entity per writer: the delta stays small, so this measures the
+        # replication pipeline rather than state-growth cost.
+        while not stop.is_set():
+            n += 1
+            ts = ts_base + step_index * 10000000 + wid * 1000000 + n
+            t0 = time.perf_counter()
+            try:
+                code, raw, _ = client.request("POST", PUSH.format(proc="primary"), {
+                    "action": "Input", "id": "bench_tp_%d" % wid,
+                    "x": float(n % 100), "y": float((n * 3) % 100),
+                    "client_signer": "bench", "ts": ts})
+            except Exception:
+                code = 0
+            dt = (time.perf_counter() - t0) * 1000.0
+            with lock:
+                codes.append(code)
+                lats.append(dt)
+                if code in (200, 202):
+                    accepted[0] += 1
+            deadline += interval
+            delay = deadline - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                deadline = time.perf_counter()
+
+    monitor = BatchMonitor(PRIMARY[0], PRIMARY[1], stop)
+    monitor.start()
+    threads = [threading.Thread(target=writer, args=(i,), daemon=True)
+               for i in range(writers)]
+    t_start = time.perf_counter()
+    for t in threads:
+        t.start()
+    time.sleep(seconds)
+    stop.set()
+    for t in threads:
+        t.join(timeout=15)
+    t_stop = time.perf_counter()
+
+    drained, final = wait_drained(primary)
+    t_end = time.perf_counter()
+    monitor.stop.set()
+    monitor.join(timeout=2)
+
+    # Last batch may commit after the monitor's last poll (diagnostic only:
+    # the authoritative count is `applied_inputs` from Read-All).
+    applied_after = int(final.get("applied_inputs") or 0)
+    if applied_after < applied_before:
+        applied_after = applied_before  # node resynced during the run
+    confirmed = applied_after - applied_before
+    elapsed = t_end - t_start
+    status_counts = {}
+    for c in codes:
+        status_counts[str(c)] = status_counts.get(str(c), 0) + 1
+    return {
+        "offered_per_s": rate,
+        "writers": writers,
+        "seconds": round(seconds, 2),
+        "accepted": accepted[0],
+        "accepted_per_s": round(accepted[0] / max(t_stop - t_start, 1e-9), 2),
+        "confirmed_inputs": confirmed,
+        "confirmed_per_s": round(confirmed / max(elapsed, 1e-9), 2),
+        "confirm_ratio": round(confirmed / accepted[0], 4) if accepted[0] else None,
+        "drain_s": round(t_end - t_stop, 2),
+        "queue_peak": monitor.queue_peak,
+        "drained": drained,
+        "status_counts": status_counts,
+        "latency": stats(lats, codes),
     }
 
-    # 1. /now read (no new slot)
-    vals, codes = [], []
-    for _ in range(samples):
-        code, raw, dt = primary.request(
-            "GET", "/~node-process@1.0/primary/now/results~message@1.0/output/body")
-        vals.append(dt); codes.append(code)
-    result["paths"]["now"] = stats(vals, codes)
 
-    # 2. write accepted (202)
-    vals, codes, batch_ids = [], [], []
-    for i in range(min(60, samples)):
-        code, raw, dt = primary.request("POST", PUSH.format(proc="primary"), {
-            "action": "Input", "id": "bench_%d_%d" % (int(time.time()), i),
-            "x": float(i % 100), "y": float((i * 7) % 100),
-            "client_signer": "bench", "ts": 900000 + i, "flush": True})
-        vals.append(dt); codes.append(code)
-        body = body_json(raw)
-        if body.get("batch_id"):
-            batch_ids.append(body["batch_id"])
-        drain(primary)
-    result["paths"]["write_202"] = stats(vals, codes)
-    drain(primary)
+def flush_step(writers, per_writer, primary, ts_base):
+    """Worst case: every write closes its own batch (one quorum RTT per write)."""
+    results = []
+    lock = threading.Lock()
 
-    # 3. write -> confirmed (L1)
-    vals, codes = [], []
-    for i in range(min(40, samples)):
-        t0 = time.perf_counter()
-        code, raw, _ = primary.request("POST", PUSH.format(proc="primary"), {
-            "action": "Input", "id": "bench_confirm_%d_%d" % (int(time.time()), i),
-            "x": 1.0, "y": 1.0, "client_signer": "bench", "ts": 910000 + i, "flush": True})
-        body = body_json(raw)
-        bid = body.get("batch_id")
-        target_tick = int(body.get("tick_to") or 0)
-        fcode = code
-        if bid:
-            # Poll /now: it does not create a new slot, so it cannot starve
-            # the Ack compute (Batch-Status is the documented fallback).
-            deadline = time.perf_counter() + 10.0
-            while time.perf_counter() < deadline:
-                ncode, nraw, _ = primary.request(
-                    "GET", "/~node-process@1.0/primary/now/results~message@1.0/output/body")
-                nb = body_json(nraw)
-                fcode = ncode
-                if nb.get("batch_id") == bid and nb.get("ack") == "replicated":
-                    break
-                if int(nb.get("tick") or 0) >= target_tick and nb.get("ack") == "replicated":
-                    break
-                time.sleep(0.02)
-        vals.append((time.perf_counter() - t0) * 1000.0)
-        codes.append(fcode)
-    result["paths"]["write_confirm"] = stats(vals, codes)
+    def writer(wid):
+        client = KeepAlive(PRIMARY[0], PRIMARY[1])
+        for n in range(1, per_writer + 1):
+            t0 = time.perf_counter()
+            ts = ts_base + 5000000 + wid * 1000 + n
+            code, raw, _ = client.request("POST", PUSH.format(proc="primary"), {
+                "action": "Input", "id": "bench_tp_%d" % wid,
+                "x": float((n * 5) % 100), "y": float((n * 7) % 100),
+                "client_signer": "bench", "ts": ts, "flush": True})
+            body = body_json(raw)
+            bid = body.get("batch_id")
+            tcode = code
+            if code == 202 and bid:
+                deadline = time.perf_counter() + 15.0
+                while time.perf_counter() < deadline:
+                    ncode, nb = now_body(client)
+                    if ncode == 200 and nb.get("batch_id") == bid \
+                            and nb.get("ack") == "replicated":
+                        tcode = 200
+                        break
+                    time.sleep(0.02)
+            with lock:
+                results.append((tcode, (time.perf_counter() - t0) * 1000.0))
 
-    # 4. advance / batch close (queue one write, then Advance)
-    vals, codes = [], []
-    for i in range(min(40, samples)):
-        primary.request("POST", PUSH.format(proc="primary"), {
-            "action": "Input", "id": "bench_adv_%d_%d" % (int(time.time()), i),
-            "x": 2.0, "y": 2.0, "client_signer": "bench", "ts": 920000 + i})
-        code, raw, dt = primary.request("POST", PUSH.format(proc="primary"), {"action": "Advance"})
-        vals.append(dt); codes.append(code)
-    result["paths"]["advance"] = stats(vals, codes)
-    drain(primary)
+    t_start = time.perf_counter()
+    threads = [threading.Thread(target=writer, args=(i,), daemon=True)
+               for i in range(writers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=180)
+    wait_drained(primary)
+    elapsed = time.perf_counter() - t_start
+    codes = [c for c, _ in results]
+    vals = [dt for _, dt in results]
+    return {
+        "writes": len(results),
+        "writers": writers,
+        "elapsed_s": round(elapsed, 2),
+        "confirmed_per_s": round(sum(1 for c in codes if c == 200) / max(elapsed, 1e-9), 2),
+        "status_counts": {str(c): codes.count(c) for c in sorted(set(codes))},
+        "latency": stats(vals, codes),
+    }
 
-    # 5. read via push (snapshot)
-    vals, codes, sizes = [], [], []
-    for _ in range(min(60, samples)):
-        code, raw, dt = primary.request("POST", PUSH.format(proc="primary"), {"action": "Snapshot"})
-        vals.append(dt); codes.append(code); sizes.append(len(raw))
-    st = stats(vals, codes)
-    st["response_bytes_p50"] = pct(sizes, 0.5)
-    result["paths"]["read_push"] = st
 
-    # 6. relay/call to SD1 from inside the primary (what the commit path costs)
-    vals, codes, sizes = [], [], []
-    for _ in range(min(60, samples)):
-        code, raw, dt = primary.request(
-            "POST", PUSH.format(proc=PRIMARY[2]), {"action": "Probe-SD", "sd": 1})
-        body = body_json(raw)
-        vals.append(dt); codes.append(code); sizes.append(int(body.get("bytes") or 0))
-    st = stats(vals, codes)
-    st["response_bytes_p50"] = pct(sizes, 0.5)
-    result["paths"]["relay_call_sd"] = st
+def throughput_suite(samples_note):
+    rates = [float(r) for r in os.environ.get("BENCH_TP_RATES", "50,100,200").split(",")]
+    seconds = float(os.environ.get("BENCH_TP_SECONDS", "6"))
+    writers = int(os.environ.get("BENCH_TP_WRITERS", "8"))
+    primary = KeepAlive(PRIMARY[0], PRIMARY[1])
+    # Keep timestamps well inside a Lua double (< 2^53) so idempotency keys stay exact.
+    ts_base = (int(time.time()) % 1000000) * 10000000
+    ensure_entities(primary, writers, ts_base)
+    code, start = read_all(primary)
+    sweep = []
+    for step_index, rate in enumerate(rates):
+        wait_drained(primary)
+        code, cur = read_all(primary)
+        applied_before = int(cur.get("applied_inputs") or 0)
+        step = throughput_step(rate, seconds, writers, primary, applied_before,
+                               ts_base, step_index + 1)
+        step["applied_before"] = applied_before
+        sweep.append(step)
+        print("  throughput offered=%s/s accepted=%s (%.1f/s) confirmed=%s (%.2f/s) queue_peak=%s drain=%ss"
+              % (step["offered_per_s"], step["accepted"], step["accepted_per_s"],
+                 step["confirmed_inputs"], step["confirmed_per_s"],
+                 step["queue_peak"], step["drain_s"]), file=sys.stderr)
+    flush = flush_step(writers, max(2, int(os.environ.get("BENCH_TP_FLUSH", "3"))),
+                       primary, ts_base)
+    print("  flush   %s writes -> %s confirmed/s" % (flush["writes"], flush["confirmed_per_s"]),
+          file=sys.stderr)
+    return {"notes": samples_note, "sweep": sweep, "flush_serial": flush}
 
-    # 7. direct SD round trip (network floor)
-    vals, codes, sizes = [], [], []
-    for _ in range(min(60, samples)):
-        code, raw, dt = sd1.request("POST", PUSH.format(proc="sd1"), {"action": "Hydrate"})
-        vals.append(dt); codes.append(code); sizes.append(len(raw))
-    st = stats(vals, codes)
-    st["response_bytes_p50"] = pct(sizes, 0.5)
-    result["paths"]["sd_direct"] = st
 
-    # 8. cold hydration proxy: transfer the whole state from SD1 via relay
-    vals, codes = [], []
-    for _ in range(min(20, samples)):
-        code, raw, dt = primary.request(
-            "POST", PUSH.format(proc=PRIMARY[2]), {"action": "Probe-SD", "sd": 1})
-        vals.append(dt); codes.append(code)
-    result["paths"]["cold_hydrate"] = stats(vals, codes)
 
-    # Cluster truth at the end of the run.
+def collect_cluster():
     state = {}
     for proc in ("primary", "sd1", "sd2"):
         port = {"primary": 8734, "sd1": 8735, "sd2": 8736}[proc]
@@ -308,7 +421,7 @@ def main():
             "state_root": body.get("state_root"),
             "entities": body.get("count", body.get("active_entity_count")),
         }
-    result["cluster"] = {
+    return {
         "state": state,
         "roots_equal": len({v.get("state_root") for v in state.values()}) == 1,
         "rss_mb": {p: rss_mb(port) for p, port in
@@ -322,7 +435,152 @@ def main():
         },
     }
 
+
+def main():
+    only = os.environ.get("BENCH_ONLY", "").strip()
+    run_standard = only in ("", "all", "standard")
+    run_throughput = only in ("", "all", "throughput")
+    samples = int(os.environ.get("BENCH_N", "150"))
+    primary = KeepAlive(PRIMARY[0], PRIMARY[1])
+    sd1 = KeepAlive(SD1[0], SD1[1])
     out = os.path.join(ROOT, "tools", "bench_baseline.json")
+
+    # Resolve the topology / hydrate before measuring.
+    primary.request("POST", PUSH.format(proc="primary"), {"action": "Read-All"})
+
+    if only == "throughput" and os.path.exists(out):
+        # Keep the sequential baseline, replace only the throughput section.
+        with open(out) as fh:
+            result = json.load(fh)
+        result["throughput_generated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    else:
+        result = {
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "git_commit": subprocess.getoutput("git -C '%s' rev-parse --short HEAD" % ROOT).strip(),
+            "samples_per_path": samples,
+            "notes": [
+                "keep-alive single connection per node; loopback only",
+                "write_202 measures L0 accept, write_confirm measures L1 (poll Batch-Status)",
+                "cold_hydrate is a full-state transfer proxy for cold start, not a process restart",
+                "slot size comes from the Erlang debug log (computed_slot_size)",
+            ],
+            "paths": {},
+        }
+
+    if run_standard:
+        # 1. /now read (no new slot)
+        vals, codes = [], []
+        for _ in range(samples):
+            code, raw, dt = primary.request(
+                "GET", "/~node-process@1.0/primary/now/results~message@1.0/output/body")
+            vals.append(dt); codes.append(code)
+        result["paths"]["now"] = stats(vals, codes)
+
+        # 2. write accepted (202)
+        vals, codes, batch_ids = [], [], []
+        for i in range(min(60, samples)):
+            code, raw, dt = primary.request("POST", PUSH.format(proc="primary"), {
+                "action": "Input", "id": "bench_%d_%d" % (int(time.time()), i),
+                "x": float(i % 100), "y": float((i * 7) % 100),
+                "client_signer": "bench", "ts": 900000 + i, "flush": True})
+            vals.append(dt); codes.append(code)
+            body = body_json(raw)
+            if body.get("batch_id"):
+                batch_ids.append(body["batch_id"])
+            drain(primary)
+        result["paths"]["write_202"] = stats(vals, codes)
+        drain(primary)
+
+        # 3. write -> confirmed (L1)
+        vals, codes = [], []
+        for i in range(min(40, samples)):
+            t0 = time.perf_counter()
+            code, raw, _ = primary.request("POST", PUSH.format(proc="primary"), {
+                "action": "Input", "id": "bench_confirm_%d_%d" % (int(time.time()), i),
+                "x": 1.0, "y": 1.0, "client_signer": "bench", "ts": 910000 + i, "flush": True})
+            body = body_json(raw)
+            bid = body.get("batch_id")
+            target_tick = int(body.get("tick_to") or 0)
+            fcode = code
+            if bid:
+                # Poll /now: it does not create a new slot, so it cannot starve
+                # the Ack compute (Batch-Status is the documented fallback).
+                deadline = time.perf_counter() + 10.0
+                while time.perf_counter() < deadline:
+                    ncode, nraw, _ = primary.request(
+                        "GET", "/~node-process@1.0/primary/now/results~message@1.0/output/body")
+                    nb = body_json(nraw)
+                    fcode = ncode
+                    if nb.get("batch_id") == bid and nb.get("ack") == "replicated":
+                        break
+                    if int(nb.get("tick") or 0) >= target_tick and nb.get("ack") == "replicated":
+                        break
+                    time.sleep(0.02)
+            vals.append((time.perf_counter() - t0) * 1000.0)
+            codes.append(fcode)
+        result["paths"]["write_confirm"] = stats(vals, codes)
+
+        # 4. advance / batch close (queue one write, then Advance)
+        vals, codes = [], []
+        for i in range(min(40, samples)):
+            primary.request("POST", PUSH.format(proc="primary"), {
+                "action": "Input", "id": "bench_adv_%d_%d" % (int(time.time()), i),
+                "x": 2.0, "y": 2.0, "client_signer": "bench", "ts": 920000 + i})
+            code, raw, dt = primary.request("POST", PUSH.format(proc="primary"), {"action": "Advance"})
+            vals.append(dt); codes.append(code)
+        result["paths"]["advance"] = stats(vals, codes)
+        drain(primary)
+
+        # 5. read via push (snapshot)
+        vals, codes, sizes = [], [], []
+        for _ in range(min(60, samples)):
+            code, raw, dt = primary.request("POST", PUSH.format(proc="primary"), {"action": "Snapshot"})
+            vals.append(dt); codes.append(code); sizes.append(len(raw))
+        st = stats(vals, codes)
+        st["response_bytes_p50"] = pct(sizes, 0.5)
+        result["paths"]["read_push"] = st
+
+        # 6. relay/call to SD1 from inside the primary (what the commit path costs)
+        vals, codes, sizes = [], [], []
+        for _ in range(min(60, samples)):
+            code, raw, dt = primary.request(
+                "POST", PUSH.format(proc=PRIMARY[2]), {"action": "Probe-SD", "sd": 1})
+            body = body_json(raw)
+            vals.append(dt); codes.append(code); sizes.append(int(body.get("bytes") or 0))
+        st = stats(vals, codes)
+        st["response_bytes_p50"] = pct(sizes, 0.5)
+        result["paths"]["relay_call_sd"] = st
+
+        # 7. direct SD round trip (network floor)
+        vals, codes, sizes = [], [], []
+        for _ in range(min(60, samples)):
+            code, raw, dt = sd1.request("POST", PUSH.format(proc="sd1"), {"action": "Hydrate"})
+            vals.append(dt); codes.append(code); sizes.append(len(raw))
+        st = stats(vals, codes)
+        st["response_bytes_p50"] = pct(sizes, 0.5)
+        result["paths"]["sd_direct"] = st
+
+        # 8. cold hydration proxy: transfer the whole state from SD1 via relay
+        vals, codes = [], []
+        for _ in range(min(20, samples)):
+            code, raw, dt = primary.request(
+                "POST", PUSH.format(proc=PRIMARY[2]), {"action": "Probe-SD", "sd": 1})
+            vals.append(dt); codes.append(code)
+        result["paths"]["cold_hydrate"] = stats(vals, codes)
+
+    if run_throughput:
+        result["paths"]["throughput"] = throughput_suite([
+            "paced open-loop writers (one entity per writer, no flush): the queue "
+            "absorbs bursts, so accepted/s and confirmed/s are both reported",
+            "confirmed/s is inputs committed to the canonical root divided by "
+            "burst + drain wall time, not by one batch latency",
+            "flush_serial closes one batch per write: the 2-of-3 quorum RTT floor",
+            "queue_peak is the maximum `queued` value observed by the /now monitor",
+        ])
+
+    # Cluster truth at the end of the run.
+    result["cluster"] = collect_cluster()
+
     with open(out, "w") as fh:
         json.dump(result, fh, indent=2, sort_keys=True)
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -331,3 +589,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

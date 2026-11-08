@@ -22,6 +22,7 @@ Genesis-Centric Node Configuration Builder (Cryptographic AO + Low-Latency)
 =============================================================================
 """
 
+import copy
 import json
 import os
 import re
@@ -125,8 +126,8 @@ def main():
         # - SD1 / SD2 / Arbit / Genesis: Pure LMDB Disk (`hb_store_lmdb` ONLY — 80% disk, minimal RAM)
         node_store = volatile_store if is_primary else lmdb_store
         stores = [node_store]
-        # Micro-Epoch alignment: Primary stays fast in RAM; replicas snapshot every 10 ticks
-        snapshot_slots = 1000 if is_primary else 10
+        # Micro-Epoch alignment: Primary stays fast in RAM; replicas snapshot every slot on LMDB disk
+        snapshot_slots = 1000 if is_primary else 1
         # One bounded request envelope for every node (roadmap T10): an
         # oversized body must be rejected identically on Primary and replicas.
         http_max_body = 65536
@@ -139,6 +140,7 @@ def main():
         is_auth_authority = role in ("genesis", "arbit")
         cfg = {
             "port": node["port"],
+            "priv-key-location": os.path.join(DATA_DIR, node["name"], "wallet.json"),
             "priv_key_location": os.path.join(DATA_DIR, node["name"], "wallet.json"),
             "gateway": l1_gateway,
             "relay-allow-commit-request": True,
@@ -152,6 +154,8 @@ def main():
             "process_workers": True,
             "scheduling-mode": "local_confirmation",
             "scheduling_mode": "local_confirmation",
+            "scheduler-lookahead": False,
+            "scheduler_lookahead": False,
             "scheduler-default-commitment-spec": "ans104@1.0" if is_auth_authority else "httpsig@1.0",
             "scheduler_default_commitment_spec": "ans104@1.0" if is_auth_authority else "httpsig@1.0",
             "force-signed": is_auth_authority,
@@ -161,6 +165,7 @@ def main():
             "process-snapshot-time": False,
             "process_snapshot_time": False,
             # Bounded request envelope + no cache writes for transient traffic.
+            "http-max-body": http_max_body,
             "http_max_body": http_max_body,
             "cache-control": ["no-store"],
             "cache_control": ["no-store"],
@@ -178,9 +183,15 @@ def main():
             "priv_store": [node_store],
             "attested-store": node_store,
             "attested_store": node_store,
-            "node_processes": {
-                role: proc_def,
-            },
+            "node_processes": (lambda: {
+                **{role: proc_def},
+                **(
+                    {
+                        f"{role}_{w_idx}": dict(proc_def, **{"node-role": f"{role}_{w_idx}"})
+                        for w_idx in range(1, 11)
+                    } if role in ("primary", "sd1", "sd2") else {}
+                )
+            })(),
         }
 
         # Only Arbit & Genesis bundle official checkpoints to the L1 ANS-104
@@ -188,8 +199,10 @@ def main():
         # block each tick on a mainnet upload. A closed local port makes the
         # scheduler's best-effort upload fail immediately instead.
         if role in ("arbit", "genesis"):
+            cfg["bundler-ans104"] = l1_gateway
             cfg["bundler_ans104"] = l1_gateway
         else:
+            cfg["bundler-ans104"] = "http://127.0.0.1:1"
             cfg["bundler_ans104"] = "http://127.0.0.1:1"
 
         out_file = os.path.join(CONFIG_DIR, f"{node['name']}.json")

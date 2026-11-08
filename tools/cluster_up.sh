@@ -4,7 +4,7 @@ set -euo pipefail
 # Project root directory
 PROJECT_ROOT="/home/weslur/database"
 HB_SRC="$PROJECT_ROOT/HyperBEAM"
-export PATH="/home/weslur/.local/bin:/home/weslur/.cargo/bin:$PATH"
+export PATH="/home/weslur/erlang/27.0/bin:/home/weslur/.local/bin:/home/weslur/.cargo/bin:$PATH"
 
 echo "=== [1/4] Ensuring clean state before launch ==="
 "$PROJECT_ROOT/tools/cluster_down.sh" >/dev/null 2>&1 || true
@@ -65,7 +65,7 @@ for NODE_SPEC in "${NODES[@]}"; do
     # memory footprint low and removes cross-scheduler contention. The `aobf`
     # allocator is tuned for many small, short-lived allocations (per-tick
     # message maps/buffers), which is the dominant pattern in this engine.
-    CMD="export PATH=\"/home/weslur/.local/bin:/home/weslur/.cargo/bin:\$PATH\" && export ERL_FLAGS=\"+S 1:1 +A 1 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME"
+    CMD="export PATH=\"/home/weslur/.local/bin:/home/weslur/.cargo/bin:\$PATH\" && export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME"
     tmux new-session -d -s "$SESSION_NAME" "bash -c '$CMD'"
     echo "  [STARTED] Node '$SESSION_NAME' on port $PORT (config: $(basename "$CONFIG_PATH"))"
     # Brief pause to let node initialize its VM
