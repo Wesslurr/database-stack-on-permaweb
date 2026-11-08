@@ -21,7 +21,7 @@ sudo add-apt-repository -y ppa:rabbitmq/rabbitmq-erlang
 wait_for_apt
 sudo apt-get update
 wait_for_apt
-sudo apt-get install -y erlang-base erlang-dev erlang-parsetools erlang-eunit erlang-asn1 erlang-crypto erlang-public-key erlang-ssl erlang-syntax-tools erlang-tools erlang-inets erlang-edoc erlang-xmerl
+sudo apt-get install -y erlang-base erlang-dev erlang-parsetools erlang-eunit erlang-asn1 erlang-crypto erlang-public-key erlang-ssl erlang-syntax-tools erlang-tools erlang-inets erlang-edoc erlang-xmerl erlang-os-mon erlang-runtime-tools
 
 # Install Rebar3
 if ! command -v rebar3 &>/dev/null; then

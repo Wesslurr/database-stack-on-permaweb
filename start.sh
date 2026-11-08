@@ -35,6 +35,12 @@ else
     echo "=== [1/3] Erlang OTP $OTP_VER & Rebar3 runtime verified. ==="
 fi
 
+# 1.5. Ensure required Erlang OTP modules (os_mon, runtime_tools)
+if ! erl -noshell -eval 'case application:load(os_mon) of ok -> halt(0); {error, {already_loaded, _}} -> halt(0); _ -> halt(1) end.' 2>/dev/null; then
+    echo "=== [1.5/3] Installing missing Erlang OTP modules (erlang-os-mon, erlang-runtime-tools) ==="
+    sudo apt-get update && sudo apt-get install -y erlang-os-mon erlang-runtime-tools
+fi
+
 # 2. Launch cluster
 echo "=== [2/3] Launching Multi-Node HyperBEAM Cluster ==="
 if [ -f "HyperBEAM/rebar.config" ] && ! grep -q "feature, maybe_expr" "HyperBEAM/rebar.config" 2>/dev/null; then
