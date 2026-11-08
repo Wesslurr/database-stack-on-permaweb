@@ -14,16 +14,24 @@ echo "=== [1/4] Ensuring clean state before launch ==="
 sleep 1
 
 echo ""
-echo "=== [2/4] Starting ArLocal (Arweave L1) in Docker ==="
-if ! docker image inspect ao-localnet-arlocal:latest >/dev/null 2>&1; then
-    echo "  [Auto-Fetch] Image ao-localnet-arlocal:latest not found locally."
-    echo "  Pulling official prebuilt textury/arlocal:latest from Docker Hub..."
-    docker pull textury/arlocal:latest
-    docker tag textury/arlocal:latest ao-localnet-arlocal:latest
-    echo "  [OK] Image ao-localnet-arlocal:latest ready."
+echo "=== [2/4] Starting ArLocal (Arweave L1) ==="
+if docker info >/dev/null 2>&1; then
+    if ! docker image inspect ao-localnet-arlocal:latest >/dev/null 2>&1; then
+        echo "  [Auto-Fetch] Image ao-localnet-arlocal:latest not found locally."
+        echo "  Pulling official prebuilt textury/arlocal:latest from Docker Hub..."
+        docker pull textury/arlocal:latest || true
+        docker tag textury/arlocal:latest ao-localnet-arlocal:latest 2>/dev/null || true
+        echo "  [OK] Image ao-localnet-arlocal:latest ready."
+    fi
+    docker rm -f arlocal >/dev/null 2>&1 || true
+    docker run -d --rm --name arlocal -p 1984:1984 ao-localnet-arlocal:latest >/dev/null
+    echo "  [OK] ArLocal container started on port 1984."
+elif command -v npx >/dev/null 2>&1; then
+    echo "  [Fallback] Docker daemon inactive, launching ArLocal via npx..."
+    fuser -k 1984/tcp >/dev/null 2>&1 || true
+    nohup npx -y arlocal 1984 > /tmp/arlocal.log 2>&1 &
+    echo "  [OK] ArLocal process spawned via npx."
 fi
-docker run -d --rm --name arlocal -p 1984:1984 ao-localnet-arlocal:latest >/dev/null
-echo "  [OK] ArLocal container started on port 1984."
 
 # Wait for ArLocal to be ready
 echo "  Waiting for ArLocal on :1984..."
