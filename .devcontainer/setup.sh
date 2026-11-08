@@ -40,16 +40,12 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Build ArLocal Docker image if not present
+# Fetch official ArLocal Docker image if not present
 if ! docker image inspect ao-localnet-arlocal:latest &>/dev/null; then
-    echo "=== [Codespace Setup] Building ArLocal Docker image ==="
-    cat << 'EOF' | docker build -t ao-localnet-arlocal:latest -
-FROM node:18-alpine
-RUN npm install -g arlocal
-EXPOSE 1984
-ENTRYPOINT ["npx", "arlocal", "1984"]
-EOF
-    echo "  [OK] ArLocal Docker image built and tagged."
+    echo "=== [Codespace Setup] Fetching official ArLocal Docker image ==="
+    docker pull textury/arlocal:latest
+    docker tag textury/arlocal:latest ao-localnet-arlocal:latest
+    echo "  [OK] ArLocal Docker image ready."
 fi
 
 # Initialize git submodule
