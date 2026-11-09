@@ -100,7 +100,24 @@ function compute(process, message, opts)
     local action = msg.action or msg.Action or (msg.query and msg.query.action) or "Get-Topology"
     local genesis_signer = extract_first_signer(process) or "genesis_authority"
 
-    if action == "Register-Node" then
+    if action == "Advance-Epoch" or action == "Set-Epoch" then
+        local caller_key = msg.admin_key or (msg.query and msg.query.admin_key)
+        local caller_signer = msg.caller_signer or (msg.query and msg.query.caller_signer)
+        local is_authorized = false
+        if AdminKey and caller_key == AdminKey then
+            is_authorized = true
+        elseif AdminSigner and caller_signer == AdminSigner then
+            is_authorized = true
+        end
+        if is_authorized then
+            local next_epoch = tonumber(msg.epoch or (msg.query and msg.query.epoch))
+            if next_epoch and next_epoch > CurrentEpoch then
+                CurrentEpoch = next_epoch
+            else
+                CurrentEpoch = CurrentEpoch + 1
+            end
+        end
+    elseif action == "Register-Node" then
         local caller_key = msg.admin_key or (msg.query and msg.query.admin_key)
         local caller_signer = msg.caller_signer or (msg.query and msg.query.caller_signer)
         local is_authorized = false

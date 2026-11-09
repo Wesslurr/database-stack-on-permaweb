@@ -121,6 +121,20 @@ for NODE_SPEC in "${NODES[@]}"; do
 done
 
 echo ""
+echo "=== [3.5/4] Starting Arweave L1 Committer Service (:8738) ==="
+fuser -k 8738/tcp >/dev/null 2>&1 || true
+pkill -f "tools/arweave_committer.py" >/dev/null 2>&1 || true
+tmux kill-session -t hb-committer 2>/dev/null || true
+tmux new-session -d -s hb-committer -c "$PROJECT_ROOT" 'python3 tools/arweave_committer.py'
+for attempt in {1..20}; do
+    if curl -s -f "http://127.0.0.1:8738/health" >/dev/null 2>&1; then
+        echo "  [OK] Arweave L1 Committer ready on http://127.0.0.1:8738"
+        break
+    fi
+    sleep 0.5
+done
+
+echo ""
 echo "=== [4/4] Waiting for HyperBEAM Nodes to Initialize ==="
 
 ALL_READY=true
@@ -152,6 +166,10 @@ done
 
 echo ""
 if [ "$ALL_READY" = true ]; then
+    # Advance cluster epoch to guarantee a clean settlement ledger on fresh boot
+    curl -s -X POST http://127.0.0.1:8733/~node-process@1.0/genesis/push/output \
+         -H 'Content-Type: application/json' \
+         -d '{"action":"Advance-Epoch","admin_key":"hyperstack_admin_genesis_key"}' >/dev/null 2>&1 || true
     echo "=========================================================="
     echo "  SUCCESS: All 6 cluster nodes (1 ArLocal + 5 HyperBEAM)   "
     echo "           are live, independent, and healthy!            "

@@ -2436,7 +2436,12 @@
         const elTx = document.getElementById("inspL1TxId");
         if (elTx) {
           if (arbitState && arbitState.l1_tx_id && arbitState.l1_tx_id !== "") {
-            elTx.textContent = arbitState.l1_tx_id;
+            const txid = arbitState.l1_tx_id;
+            if (txid.startsWith("arlocal_block_") || txid.startsWith("http_tx_")) {
+              elTx.textContent = txid;
+            } else {
+              elTx.innerHTML = `<a href="http://127.0.0.1:1984/tx/${txid}" target="_blank" style="color:var(--cyan); text-decoration:underline; font-weight:bold;">${txid} ↗</a>`;
+            }
           } else if (arbitState && arbitState.official_tick > 0) {
             elTx.textContent = `Committed to L1 Block #${arbitState.l1_height || 0}`;
           } else {

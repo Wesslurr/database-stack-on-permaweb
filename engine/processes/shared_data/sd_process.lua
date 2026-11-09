@@ -299,6 +299,7 @@ local function fetch_genesis_topology_once(genesis_url)
         local primary_url = string.match(body_str, '"primary_url"%s*:%s*"([^"]+)"')
         local primary_proc = string.match(body_str, '"primary_process"%s*:%s*"([^"]+)"') or "primary"
         local epoch_str = string.match(body_str, '"epoch"%s*:%s*(%d+)') or "1"
+        if epoch_str then CurrentEpoch = math.max(CurrentEpoch, tonumber(epoch_str) or 1) end
         local batch_str = string.match(body_str, '"arbit_batch_interval"%s*:%s*(%d+)') or "5"
         local diff_slots_str = string.match(body_str, '"sd_diff_slots"%s*:%s*(%d+)')
         local max_entities_str = string.match(body_str, '"primary_max_entities"%s*:%s*(%d+)')
@@ -480,13 +481,15 @@ local function maybe_checkpoint(topo, batch_interval, node_role, sd_signer, coun
     local uncommitted_count = #RecentDiffs
     local count_trigger = (LastTick % batch_interval == 0) or (LastTick >= 5 and LastBatchSentTick == 0)
     local guard_trigger = (uncommitted_count >= MaxDiffSlots)
-    local is_checkpoint_sender = (node_role == "sd1") or (node_role == "sd2" and (LastTick - LastBatchSentTick >= batch_interval * 2))
+    local is_sd1 = string.sub(node_role, 1, 3) == "sd1"
+    local is_sd2 = string.sub(node_role, 1, 3) == "sd2"
+    local is_checkpoint_sender = is_sd1 or (is_sd2 and (LastTick - LastBatchSentTick >= batch_interval * 2))
     if topo and topo.arbit_url and is_checkpoint_sender and LastTick > 0
         and (count_trigger or guard_trigger) and LastTick > LastBatchSentTick then
         LastBatchSentTick = LastTick
         local payload = string.format(
-            '{"action":"Commit-Checkpoint","last_tick":%d,"point_count":%d,"state_root":"%s","checkpoint_signer":"%s","sd_node":"%s","diff_seq":%d,"epoch":%d}',
-            LastTick, count, json_safe(StateRoot), json_safe(sd_signer), json_safe(node_role), DiffSeq, CurrentEpoch
+            '{"action":"Commit-Checkpoint","last_tick":%d,"point_count":%d,"state_root":"%s","checkpoint_signer":"%s","sd_node":"%s","diff_seq":%d,"epoch":%d,"shard":"%s"}',
+            LastTick, count, json_safe(StateRoot), json_safe(sd_signer), json_safe(node_role), DiffSeq, CurrentEpoch, json_safe(node_role)
         )
         pcall(function()
             ao.resolve({
