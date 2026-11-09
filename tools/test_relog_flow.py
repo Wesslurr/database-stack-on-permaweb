@@ -6,13 +6,13 @@ def test_relog():
     # 1. Player moves to (140, 80)
     print("[1] Moving player_red to (140, 80)...")
     write_req = urllib.request.Request(
-        'http://127.0.0.1:8734/~node-process@1.0/primary/push/output~message@1.0',
+        'http://127.0.0.1:8734/~node-process@1.0/primary_1/push/output~message@1.0',
         data=json.dumps({
             'action': 'Write-Point',
             'id': 'player_red',
             'x': 140,
             'y': 80,
-            'client_signer': 'client_cefbd9818ad459af',
+            'client_signer': 'player_red_signer',
             'flush': True
         }).encode('utf-8'),
         headers={'Content-Type': 'application/json', 'Accept': 'application/json'}
@@ -38,7 +38,7 @@ def test_relog():
 
     # Step B: Client fetches existing position from Primary RAM via Read-Point
     read_req = urllib.request.Request(
-        f'{primary_url}/~node-process@1.0/primary/push/output/body',
+        f'{primary_url}/~node-process@1.0/primary_1/push/output/body',
         data=json.dumps({'action': 'Read-Point', 'id': 'player_red'}).encode('utf-8'),
         headers={'Content-Type': 'application/json', 'Accept': 'application/json'}
     )

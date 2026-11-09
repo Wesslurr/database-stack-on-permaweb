@@ -516,9 +516,17 @@ local function apply_delta(batch_id, tick_from, tick_to, delta, order, sd_signer
     while #RecentDiffs > MaxDiffSlots do
         table.remove(RecentDiffs, 1)
     end
+    local player_pt = ReplicaStore["player_red"]
+    local player_json = "null"
+    if player_pt then
+        local pe = unpack_entity(player_pt)
+        if pe then
+            player_json = string.format('{"id":"player_red","x":%.6f,"y":%.6f,"tick":%d,"owner":"%s"}', pe.x, pe.y, pe.tick, json_safe(pe.owner))
+        end
+    end
     local body = string.format(
-        '{"status":"committed","tier":"shared_data_replica","batch_id":"%s","last_tick":%d,"tick":%d,"state_root":"%s","count":%d,"sd_signer":"%s","diff_seq":%d,"persistence":"lmdb_disk"}',
-        json_safe(batch_id), LastTick, LastTick, StateRoot, count_replicas(), json_safe(sd_signer), DiffSeq
+        '{"status":"committed","tier":"shared_data_replica","batch_id":"%s","last_tick":%d,"tick":%d,"state_root":"%s","count":%d,"sd_signer":"%s","diff_seq":%d,"persistence":"lmdb_disk","point":%s}',
+        json_safe(batch_id), LastTick, LastTick, StateRoot, count_replicas(), json_safe(sd_signer), DiffSeq, player_json
     )
     remember_batch(batch_id, body)
     return body
@@ -737,19 +745,35 @@ function compute(process, message, opts)
             )
         end
     elseif action == "Snapshot" then
+        local player_pt = ReplicaStore["player_red"]
+        local player_json = "null"
+        if player_pt then
+            local pe = unpack_entity(player_pt)
+            if pe then
+                player_json = string.format('{"id":"player_red","x":%.6f,"y":%.6f,"tick":%d,"owner":"%s"}', pe.x, pe.y, pe.tick, json_safe(pe.owner))
+            end
+        end
         res = string.format(
-            '{"status":"ok","tier":"shared_data_replica","last_tick":%d,"state_root":"%s","count":%d,"points":%s,"sd_signer":"%s"}',
-            LastTick, StateRoot, count_replicas(), encode_points(ReplicaStore), json_safe(sd_signer)
+            '{"status":"ok","tier":"shared_data_replica","persistence":"lmdb_disk","last_tick":%d,"state_root":"%s","count":%d,"points":%s,"sd_signer":"%s","point":%s}',
+            LastTick, StateRoot, count_replicas(), encode_points(ReplicaStore), json_safe(sd_signer), player_json
         )
     else
         -- Compact summary; never echo the full replica set into a stored slot.
+        local player_pt = ReplicaStore["player_red"]
+        local player_json = "null"
+        if player_pt then
+            local pe = unpack_entity(player_pt)
+            if pe then
+                player_json = string.format('{"id":"player_red","x":%.6f,"y":%.6f,"tick":%d,"owner":"%s"}', pe.x, pe.y, pe.tick, json_safe(pe.owner))
+            end
+        end
         res = string.format(
-            '{"status":"ok","tier":"shared_data_replica","persistence":"lmdb_disk","requires_sign":true,"sd_signer":"%s","relayed_by_signer":"%s","assignment_id":"%s","topology_source":"%s","arbit_target":"%s","arbit_batch_interval":%d,"last_batch_sent_tick":%d,"last_tick":%d,"tick":%d,"count":%d,"state_root":"%s","last_committed_tick":%d,"last_l1_tx_id":"%s","last_pruned_tick":%d,"pruned_diff_count":%d,"recent_diff_count":%d,"max_diff_slots":%d,"node_role":"%s"}',
+            '{"status":"ok","tier":"shared_data_replica","persistence":"lmdb_disk","requires_sign":true,"sd_signer":"%s","relayed_by_signer":"%s","assignment_id":"%s","topology_source":"%s","arbit_target":"%s","arbit_batch_interval":%d,"last_batch_sent_tick":%d,"last_tick":%d,"tick":%d,"count":%d,"state_root":"%s","last_committed_tick":%d,"last_l1_tx_id":"%s","last_pruned_tick":%d,"pruned_diff_count":%d,"recent_diff_count":%d,"max_diff_slots":%d,"node_role":"%s","point":%s}',
             json_safe(sd_signer), json_safe(LastRelayedBySigner), json_safe(assignment_id),
             json_safe(genesis_src), json_safe(arbit_target), batch_interval, LastBatchSentTick,
             LastTick, LastTick, count_replicas(), json_safe(StateRoot), LastCommittedTick,
             json_safe(LastL1TxId), LastPrunedTick, PrunedDiffCount, #RecentDiffs, MaxDiffSlots,
-            json_safe(node_role)
+            json_safe(node_role), player_json
         )
     end
 

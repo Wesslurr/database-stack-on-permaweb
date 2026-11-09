@@ -1043,15 +1043,26 @@ local function pump_repair()
     RepairBatches = kept
 end
 
+local function player_red_json()
+    local player_pt = Points["player_red"]
+    if player_pt then
+        local pe = unpack_entity(player_pt)
+        if pe then
+            return string.format('{"id":"player_red","x":%.6f,"y":%.6f,"tick":%d,"owner":"%s"}', pe.x, pe.y, pe.tick, json_safe(pe.owner))
+        end
+    end
+    return "null"
+end
+
 -- Body that reports an unresolved batch without ever claiming replication.
 -- Note: never include the substring "replicated" in a 202 body (contract test #1).
 local function pending_body(p, suffix, status)
     recompute_head()
     local lag = math.max(0, (HeadTick or Tick) - Tick)
     return string.format(
-        '{"status":"%s","ack":"accepted","batch_id":"%s","tick":%d,"head_tick":%d,"confirmed_tick":%d,"lag_ticks":%d,"tick_from":%d,"tick_to":%d,"state_root":"%s","head_root":"%s","target_root":"%s","queued":%d,"compacted_total":%d,"retryable":true%s}',
+        '{"status":"%s","ack":"accepted","batch_id":"%s","tick":%d,"head_tick":%d,"confirmed_tick":%d,"lag_ticks":%d,"tick_from":%d,"tick_to":%d,"state_root":"%s","head_root":"%s","target_root":"%s","queued":%d,"compacted_total":%d,"active_entity_count":%d,"point":%s,"retryable":true%s}',
         status or "pending", json_safe(p.batch_id), Tick, HeadTick or p.tick_to, Tick, lag,
-        p.tick_from, p.tick_to, StateRoot, HeadRoot or p.root, p.root, #Queue, CompactedCount or 0, suffix or ""
+        p.tick_from, p.tick_to, StateRoot, HeadRoot or p.root, p.root, #Queue, CompactedCount or 0, count_entities(), player_red_json(), suffix or ""
     )
 end
 
@@ -1073,8 +1084,8 @@ local function start_batch(process, suffix)
         return {
             http = 200,
             body = string.format(
-                '{"status":"ok","ack":"replicated","batch_id":null,"tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":0,"state_root":"%s","head_root":"%s","replicated_root":"%s","active_entity_count":%d,"queued":0,"noop":true%s}',
-                Tick, Tick, Tick, StateRoot, StateRoot, StateRoot, count_entities(), suffix or ""
+                '{"status":"ok","ack":"replicated","batch_id":null,"tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":0,"state_root":"%s","head_root":"%s","replicated_root":"%s","active_entity_count":%d,"queued":0,"noop":true,"point":%s%s}',
+                Tick, Tick, Tick, StateRoot, StateRoot, StateRoot, count_entities(), player_red_json(), suffix or ""
             )
         }
     end
@@ -1086,9 +1097,9 @@ local function start_batch(process, suffix)
         return {
             http = 202,
             body = string.format(
-                '{"status":"queued","ack":"accepted","batch_id":"%s","pending_batch":"%s","queued":%d,"tick":%d,"head_tick":%d,"tick_to":%d,"confirmed_tick":%d,"lag_ticks":%d,"state_root":"%s","head_root":"%s"%s}',
+                '{"status":"queued","ack":"accepted","batch_id":"%s","pending_batch":"%s","queued":%d,"tick":%d,"head_tick":%d,"tick_to":%d,"confirmed_tick":%d,"lag_ticks":%d,"state_root":"%s","head_root":"%s","active_entity_count":%d,"point":%s%s}',
                 json_safe(q_batch_id), json_safe(in_flight.batch_id), #Queue, Tick,
-                HeadTick or Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, suffix or ""
+                HeadTick or Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, count_entities(), player_red_json(), suffix or ""
             )
         }
     end
@@ -1585,9 +1596,9 @@ function compute(process, message, opts)
                 local lag = math.max(0, (HeadTick or Tick) - Tick)
                 http_status = 202
                 res = string.format(
-                    '{"status":"accepted","ack":"accepted","batch_id":"%s","batch_seq":%d,"queued":%d,"tick":%d,"head_tick":%d,"confirmed_tick":%d,"lag_ticks":%d,"state_root":"%s","head_root":"%s"%s%s}',
+                    '{"status":"accepted","ack":"accepted","batch_id":"%s","batch_seq":%d,"queued":%d,"tick":%d,"head_tick":%d,"confirmed_tick":%d,"lag_ticks":%d,"state_root":"%s","head_root":"%s","active_entity_count":%d,"point":%s%s%s}',
                     json_safe(OpenBatchId or ""), #Queue > 0 and Queue[#Queue].seq or 0, #Queue,
-                    Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot,
+                    Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, count_entities(), player_red_json(),
                     duplicate and ',"duplicate":true' or "", status_suffix()
                 )
             end
