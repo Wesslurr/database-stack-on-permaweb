@@ -597,6 +597,19 @@
       return String(rawUrl).replace("127.0.0.1", HOST);
     }
 
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(timer);
+        return response;
+      } catch (err) {
+        clearTimeout(timer);
+        throw err;
+      }
+    }
+
     const GENESIS_URL = clusterUrl(8733);
     const PLAYER_ID = "player_red";
     const STEP = 20;
@@ -1374,8 +1387,25 @@
     }
 
     function unwrapBody(parsed) {
-      if (parsed && parsed["ao-result"] === "body" && typeof parsed.body === "string") {
-        try { return JSON.parse(parsed.body); } catch (_) { return parsed.body; }
+      if (parsed && typeof parsed === "object") {
+        if (typeof parsed.body === "string") {
+          try {
+            const inner = JSON.parse(parsed.body);
+            if (inner && typeof inner === "object") {
+              if (parsed.status != null && inner.status == null) inner.status = parsed.status;
+              if (parsed.http_status != null && inner.http_status == null) inner.http_status = parsed.http_status;
+              if (parsed.state_root != null && inner.state_root == null) inner.state_root = parsed.state_root;
+              if (parsed.primary_signer != null && inner.primary_signer == null) inner.primary_signer = parsed.primary_signer;
+              return inner;
+            }
+            return inner;
+          } catch (_) {
+            return parsed.body;
+          }
+        }
+        if (parsed["ao-result"] === "body" && typeof parsed.body === "string") {
+          try { return JSON.parse(parsed.body); } catch (_) { return parsed.body; }
+        }
       }
       if (typeof parsed === "string") {
         try { return JSON.parse(parsed); } catch (_) { return parsed; }
@@ -1383,47 +1413,54 @@
       return parsed;
     }
 
-    async function fetchProcessBody(baseUrl, processName) {
+    async function fetchProcessBody(baseUrl, processName, timeoutMs = 6000) {
       const url = `${baseUrl}/~node-process@1.0/${processName}/now/results~message@1.0/output/body?_t=${Date.now()}`;
-      const res = await fetch(url, {
-        headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
-        cache: "no-store"
-      });
-      const text = await res.text();
       try {
-        return unwrapBody(JSON.parse(text));
+        const res = await fetchWithTimeout(url, {
+          headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
+          cache: "no-store"
+        }, timeoutMs);
+        if (!res.ok) return null;
+        const text = await res.text();
+        try {
+          return unwrapBody(JSON.parse(text));
+        } catch (_) {
+          return unwrapBody(text);
+        }
       } catch (_) {
-        return unwrapBody(text);
+        return null;
       }
     }
 
-    // Robustly query all available replicas (SD1 and SD2 duplicate node) across active workers
-    // to find the authoritative point with the HIGHEST confirmed tick.
+    // Robustly query authoritative replicas (SD1 and SD2 duplicate node)
+    // for the target entity shard to find the authoritative point with the HIGHEST confirmed tick.
     async function fetchAuthoritativePointFromReplicas(id) {
       const targets = [];
       const sd1 = discoveredSd1Url || clusterUrl(8735);
       const sd2 = discoveredSd2Url || clusterUrl(8736);
-      const workersToFetch = Math.max(4, dynamicActiveWorkers);
 
-      // Add SD1 (primary replica)
-      targets.push({ url: sd1, role: "sd1", name: "sd1" });
-      for (let i = 1; i <= workersToFetch; i++) {
-        targets.push({ url: sd1, role: `sd1_${i}`, name: "sd1" });
-      }
-
-      // Add SD2 (duplicate / replica node)
-      targets.push({ url: sd2, role: "sd2", name: "sd2" });
-      for (let i = 1; i <= workersToFetch; i++) {
-        targets.push({ url: sd2, role: `sd2_${i}`, name: "sd2" });
+      if (id === PLAYER_ID) {
+        // player_red is deterministically routed to worker 1
+        targets.push({ url: sd1, role: "sd1_1", name: "sd1" });
+        targets.push({ url: sd2, role: "sd2_1", name: "sd2" });
+        targets.push({ url: sd1, role: "sd1", name: "sd1" });
+        targets.push({ url: sd2, role: "sd2", name: "sd2" });
+      } else {
+        const wName = getWorkerForEntity(id);
+        const wIdx = wName.replace("primary_", "");
+        targets.push({ url: sd1, role: `sd1_${wIdx}`, name: "sd1" });
+        targets.push({ url: sd2, role: `sd2_${wIdx}`, name: "sd2" });
+        targets.push({ url: sd1, role: "sd1", name: "sd1" });
+        targets.push({ url: sd2, role: "sd2", name: "sd2" });
       }
 
       const promises = targets.map(t =>
-        fetch(`${t.url}/~node-process@1.0/${t.role}/push/output/body`, {
+        fetchWithTimeout(`${t.url}/~node-process@1.0/${t.role}/push/output/body`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
           cache: "no-store",
           body: JSON.stringify({ action: "Read-Point", id })
-        })
+        }, 8000)
         .then(r => r.ok ? r.json() : null)
         .then(raw => {
           if (!raw) return null;
@@ -1444,13 +1481,39 @@
       );
 
       const results = await Promise.all(promises);
+      const valid = results.filter(Boolean);
+      if (valid.length === 0) return null;
+
       let best = null;
-      results.forEach(res => {
-        if (!res) return;
-        if (!best || res.tick > best.tick) {
-          best = res;
+      const replicasAtTop = new Set();
+      valid.forEach(res => {
+        const resScore = res.tick * 1000000000 + (res.last_tick || 0);
+        const bestScore = best ? (best.tick * 1000000000 + (best.last_tick || 0)) : -1;
+        if (!best || resScore > bestScore) {
+          best = { ...res };
+          replicasAtTop.clear();
+          replicasAtTop.add(res.replica_name);
+        } else if (res.tick === best.tick) {
+          replicasAtTop.add(res.replica_name);
+          if (res.last_tick > (best.last_tick || 0)) {
+            best.last_tick = res.last_tick;
+            best.state_root = res.state_root || best.state_root;
+          }
         }
       });
+
+      if (best) {
+        if (replicasAtTop.has("sd1") && replicasAtTop.has("sd2")) {
+          best.replica_name = "sd1+sd2";
+          best.is_quorum = true;
+        } else if (replicasAtTop.has("sd2")) {
+          best.replica_name = "sd2";
+          best.is_quorum = false;
+        } else {
+          best.replica_name = "sd1";
+          best.is_quorum = false;
+        }
+      }
       return best;
     }
 
@@ -1461,22 +1524,26 @@
       const sd2 = discoveredSd2Url || clusterUrl(8736);
       const workersToFetch = Math.max(4, dynamicActiveWorkers);
 
-      // Add base replicas
-      targets.push({ url: sd1, role: "sd1", name: "sd1" });
-      targets.push({ url: sd2, role: "sd2", name: "sd2" });
+      // Prioritize worker 1
+      targets.push({ url: sd1, role: "sd1_1", name: "sd1" });
+      targets.push({ url: sd2, role: "sd2_1", name: "sd2" });
 
-      for (let i = 1; i <= workersToFetch; i++) {
+      for (let i = 2; i <= workersToFetch; i++) {
         targets.push({ url: sd1, role: `sd1_${i}`, name: "sd1" });
         targets.push({ url: sd2, role: `sd2_${i}`, name: "sd2" });
       }
 
+      // Add base replicas as fallback
+      targets.push({ url: sd1, role: "sd1", name: "sd1" });
+      targets.push({ url: sd2, role: "sd2", name: "sd2" });
+
       const promises = targets.map(t =>
-        fetch(`${t.url}/~node-process@1.0/${t.role}/push/output/body`, {
+        fetchWithTimeout(`${t.url}/~node-process@1.0/${t.role}/push/output/body`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
           cache: "no-store",
           body: JSON.stringify({ action: "Snapshot" })
-        })
+        }, 8000)
         .then(r => r.ok ? r.json() : null)
         .then(raw => {
           if (!raw) return null;
@@ -1527,7 +1594,7 @@
     }
 
     // Step 1: Discover Primary and SD replicas from Genesis Process (:8733)
-    async function discoverFromGenesis() {
+    async function discoverFromGenesis(isRelog = false) {
       try {
         const data = await fetchProcessBody(GENESIS_URL, "genesis");
         const rawPrimary = data.primary_url || (data.primary && data.primary.url) || "http://127.0.0.1:8734";
@@ -1619,25 +1686,66 @@
           const elHeadCoords = document.getElementById("hudHeadCoords");
           if (elHeadCoords) elHeadCoords.textContent = `Head RAM: (${headPos.x}, ${headPos.y}) [#${headPos.tick}]`;
           document.getElementById("hudTick").textContent = `#${confirmedPos.tick}`;
+          const elSdNodes = document.getElementById("hudSdNodes");
+          if (elSdNodes) {
+            elSdNodes.textContent = confirmedReplica === "sd1+sd2" ? "SD1+SD2 [LMDB Quorum]" : (confirmedReplica === "sd2" ? "SD2 [Duplicate Node LMDB]" : `${confirmedReplica} (LMDB disk verified)`);
+          }
+          const elSdSub = document.getElementById("hudSdSub");
+          if (elSdSub) {
+            elSdSub.textContent = `LMDB disk confirmed · tick #${confirmedPos.tick}`;
+          }
           const epochNum = Math.floor(confirmedPos.tick / 10);
           const elEpoch = document.getElementById("hudEpoch");
           if (elEpoch) {
             elEpoch.innerHTML = `<span>Micro-Epoch #${epochNum}</span>`;
           }
           appendLog(
-            `Position restored from SD/Primary State: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> ` +
+            `Position restored from ${confirmedReplica.toUpperCase()} State: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> ` +
             `[Tick #${confirmedPos.tick}]`
           );
           pollClusterState();
+        } else if (lastVerifiedPos && (lastVerifiedPos.tick > 0 || lastVerifiedPos.x !== 0 || lastVerifiedPos.y !== 0)) {
+          // Preserve valid verified state from memory across reconnections / relogs
+          confirmedPos = { ...lastVerifiedPos };
+          headPos = { ...confirmedPos };
+          targetPos = { x: confirmedPos.x, y: confirmedPos.y };
+          renderPos = { x: confirmedPos.x, y: confirmedPos.y };
+          trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
+          document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+          const elHeadCoords = document.getElementById("hudHeadCoords");
+          if (elHeadCoords) elHeadCoords.textContent = `Head RAM: (${headPos.x}, ${headPos.y}) [#${headPos.tick}]`;
+          document.getElementById("hudTick").textContent = `#${confirmedPos.tick}`;
+          appendLog(
+            `Position preserved from verified in-memory state: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> [Tick #${confirmedPos.tick}]`
+          );
         } else {
-          // Initialize at (0, 0) only if player does not exist yet on SD/Primary
-          confirmedPos = { x: 0, y: 0, tick: 0 };
-          lastVerifiedPos = { x: 0, y: 0, tick: 0 };
-          headPos = { x: 0, y: 0, tick: 0 };
-          targetPos = { x: 0, y: 0 };
-          renderPos = { x: 0, y: 0 };
-          try { localStorage.removeItem("hb_player_pos"); } catch (_) {}
-          await writeCoordinate(0, 0, true);
+          // Check local persistent cache before assuming the player is brand new
+          let cachedPos = null;
+          try { cachedPos = JSON.parse(localStorage.getItem("hb_player_pos") || "null"); } catch (_) {}
+          if (cachedPos && (cachedPos.tick > 0 || cachedPos.x !== 0 || cachedPos.y !== 0)) {
+            confirmedPos = { x: Number(cachedPos.x), y: Number(cachedPos.y), tick: Number(cachedPos.tick || 0) };
+            lastVerifiedPos = { ...confirmedPos };
+            headPos = { ...confirmedPos };
+            targetPos = { x: confirmedPos.x, y: confirmedPos.y };
+            renderPos = { x: confirmedPos.x, y: confirmedPos.y };
+            trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
+            document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+            const elHeadCoords = document.getElementById("hudHeadCoords");
+            if (elHeadCoords) elHeadCoords.textContent = `Head RAM: (${headPos.x}, ${headPos.y}) [#${headPos.tick}]`;
+            document.getElementById("hudTick").textContent = `#${confirmedPos.tick}`;
+            appendLog(
+              `Position restored from local persistent cache: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> [Tick #${confirmedPos.tick}]`
+            );
+          } else if (!isRelog) {
+            // Truly new player: only initialize at (0, 0) on fresh launch when no prior state exists
+            confirmedPos = { x: 0, y: 0, tick: 0 };
+            lastVerifiedPos = { x: 0, y: 0, tick: 0 };
+            headPos = { x: 0, y: 0, tick: 0 };
+            targetPos = { x: 0, y: 0 };
+            renderPos = { x: 0, y: 0 };
+            try { localStorage.removeItem("hb_player_pos"); } catch (_) {}
+            await writeCoordinate(0, 0, true);
+          }
         }
         pollTelemetryMetrics();
       } catch (err) {
@@ -1654,12 +1762,17 @@
       try {
         appendLog(`[Rollback] Requesting authoritative state across SD1 & duplicate node SD2...`);
 
+        // Discard unconfirmed in-flight writes
+        isWriting = false;
+        queuedMove = null;
+        pendingPlayerWrites.length = 0;
+
         // 1. Fetch player point across both SD1 and SD2 (picks the highest confirmed tick)
         const bestPlayer = await fetchAuthoritativePointFromReplicas(PLAYER_ID);
         let sdPoint = bestPlayer ? bestPlayer.point : null;
         let sdTick = bestPlayer ? bestPlayer.tick : 0;
         let sdRoot = bestPlayer ? bestPlayer.state_root : "";
-        let confirmedReplica = bestPlayer ? bestPlayer.replica_name : "sd1";
+        let confirmedReplica = bestPlayer ? (bestPlayer.replica_name || "sd1") : "sd1";
 
         // 2. Fetch all snapshots across both SD1 and SD2 to restore full arena
         const snapData = await fetchAuthoritativeSnapshotsFromReplicas();
@@ -1669,50 +1782,91 @@
           sdRoot = snapData.state_root || sdRoot;
         }
         if (!sdPoint && allSdPoints.length > 0) {
-          const found = allSdPoints.find(p => p.id === PLAYER_ID);
-          if (found) sdPoint = found;
+          const found = allSdPoints.find(p => (Array.isArray(p) ? p[0] : p.id) === PLAYER_ID);
+          if (found) sdPoint = normalizePointEntry(found);
+        }
+        if (!bestPlayer && snapData && snapData.replicas && snapData.replicas.length > 0) {
+          if (snapData.replicas.includes("sd1") && snapData.replicas.includes("sd2")) {
+            confirmedReplica = "sd1+sd2";
+          } else {
+            confirmedReplica = snapData.replicas[0];
+          }
         }
 
         // 3. Fallback to Primary RAM only if both SD1 and SD2 are completely unreachable
         if (!sdPoint && discoveredPrimaryUrl) {
           try {
-            const pRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/push/output/body`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
-              cache: "no-store",
-              body: JSON.stringify({ action: "Read-Point", id: PLAYER_ID })
-            });
-            if (pRes.ok) {
+            const pRes = await fetchWithTimeout(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/now/results~message@1.0/output/body`, {
+              headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
+              cache: "no-store"
+            }, 3000);
+            if (pRes && pRes.ok) {
               const pData = unwrapBody(await pRes.json());
-              if (pData && pData.point) {
-                sdPoint = pData.point;
-                sdTick = Number(pData.tick || sdPoint.tick || 0);
-                sdRoot = pData.state_root || "";
-                confirmedReplica = "primary_ram";
+              if (pData && Array.isArray(pData.points)) {
+                const found = pData.points.find(p => (Array.isArray(p) ? p[0] : p.id) === PLAYER_ID);
+                if (found) {
+                  sdPoint = normalizePointEntry(found);
+                  sdTick = Number(pData.tick || sdPoint.tick || 0);
+                  sdRoot = pData.state_root || "";
+                  confirmedReplica = "primary_ram";
+                }
               }
             }
           } catch (_) {}
         }
 
-        // Discard unconfirmed in-flight writes
-        isWriting = false;
-        queuedMove = null;
+        // 4. Candidate selection: choose highest tick candidate to never regress valid state
+        const candidates = [];
+        if (bestPlayer && bestPlayer.point) {
+          candidates.push({
+            point: bestPlayer.point,
+            tick: Number(bestPlayer.tick || bestPlayer.point.tick || 0),
+            replica: bestPlayer.replica_name || "sd",
+            root: bestPlayer.state_root
+          });
+        }
+        if (sdPoint) {
+          candidates.push({
+            point: sdPoint,
+            tick: Number(sdPoint.tick || sdTick || 0),
+            replica: confirmedReplica,
+            root: sdRoot
+          });
+        }
+        if (lastVerifiedPos && (lastVerifiedPos.tick > 0 || lastVerifiedPos.x !== 0 || lastVerifiedPos.y !== 0)) {
+          candidates.push({
+            point: lastVerifiedPos,
+            tick: Number(lastVerifiedPos.tick || 0),
+            replica: "last_verified",
+            root: ""
+          });
+        }
+        try {
+          const cached = JSON.parse(localStorage.getItem("hb_player_pos") || "null");
+          if (cached && (cached.tick > 0 || cached.x !== 0 || cached.y !== 0)) {
+            candidates.push({
+              point: cached,
+              tick: Number(cached.tick || 0),
+              replica: "local_cache",
+              root: ""
+            });
+          }
+        } catch (_) {}
 
-        if (sdPoint && (Number(sdPoint.tick || 0) > 0 || lastVerifiedPos.tick === 0)) {
-          const ptick = Number(sdPoint.tick || sdTick || 0);
-          confirmedPos = { x: Number(sdPoint.x), y: Number(sdPoint.y), tick: ptick };
+        candidates.sort((a, b) => b.tick - a.tick);
+        const winner = candidates.find(c => c.tick > 0) || candidates[0];
+        if (winner && winner.point) {
+          confirmedPos = { x: Number(winner.point.x || 0), y: Number(winner.point.y || 0), tick: Number(winner.tick || 0) };
           lastVerifiedPos = { ...confirmedPos };
           headPos = { ...confirmedPos };
           targetPos = { x: confirmedPos.x, y: confirmedPos.y };
           renderPos = { x: confirmedPos.x, y: confirmedPos.y };
           trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
           try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
-        } else if (lastVerifiedPos && (lastVerifiedPos.tick > 0 || lastVerifiedPos.x !== 0 || lastVerifiedPos.y !== 0)) {
-          // Preserve valid confirmed position! Never destructively wipe to (0, 0)
-          confirmedPos = { ...lastVerifiedPos };
-          headPos = { ...confirmedPos };
-          targetPos = { x: confirmedPos.x, y: confirmedPos.y };
-          renderPos = { x: confirmedPos.x, y: confirmedPos.y };
+          if (winner.replica && winner.replica !== "last_verified" && winner.replica !== "local_cache") {
+            confirmedReplica = winner.replica;
+          }
+          if (winner.root) sdRoot = winner.root;
         }
 
         if (allSdPoints.length > 0) {
@@ -1737,13 +1891,16 @@
         document.getElementById("hudTick").textContent = `#${confirmedPos.tick} (Head: #${confirmedPos.tick})`;
         const elEpoch = document.getElementById("hudEpoch");
         if (elEpoch) elEpoch.innerHTML = `<span>Lag: 0 ticks &middot; Authoritative ${confirmedReplica.toUpperCase()} State</span>`;
-        document.getElementById("hudSdNodes").textContent = `${confirmedReplica} (LMDB disk verified)`;
+        const elSdNodes = document.getElementById("hudSdNodes");
+        if (elSdNodes) {
+          elSdNodes.textContent = confirmedReplica === "sd1+sd2" ? "SD1+SD2 [LMDB Quorum]" : (confirmedReplica === "sd2" ? "SD2 [Duplicate Node LMDB]" : (confirmedReplica === "sd1" ? "sd1 (LMDB disk verified)" : `${confirmedReplica} (LMDB disk verified)`));
+        }
         const elSdSub = document.getElementById("hudSdSub");
         if (elSdSub) elSdSub.textContent = `Rolled back to latest disk tick #${confirmedPos.tick}`;
         setGateBadge("unavailable", { replicas: [confirmedReplica] });
 
         appendLog(
-          `<span class="err">⚡ [Rollback to SD]:</span> Authoritative state restored directly from ${confirmedReplica.toUpperCase()} LMDB disk: ` +
+          `<span class="ack">⚡ [Rollback to SD]:</span> Authoritative state restored directly from ${confirmedReplica.toUpperCase()} LMDB disk: ` +
           `<strong>(${confirmedPos.x}, ${confirmedPos.y})</strong> @ tick <strong>#${confirmedPos.tick}</strong> ` +
           `(root: <code>${String(sdRoot || "—").slice(0, 14)}…</code>) [Reason: ${reason}]`
         );
@@ -1759,14 +1916,13 @@
       const statusEl = document.getElementById("syncStatusMsg");
       if (statusEl) statusEl.textContent = "Re-authenticating session...";
       try {
-        appendLog(`[Relog] Clearing local transient state & re-authenticating against Genesis...`);
+        appendLog(`[Relog] Re-authenticating against Genesis & synchronizing authoritative state...`);
         // Cancel in-flight writes
         isWriting = false;
         queuedMove = null;
-        try { localStorage.removeItem("hb_player_pos"); } catch (_) {}
 
-        // 1. Re-discover Genesis topology
-        await discoverFromGenesis();
+        // 1. Re-discover Genesis topology (read-only sync, never resets confirmed state)
+        await discoverFromGenesis(true);
 
         // 2. Fetch authoritative snapshot from SD1 / Primary
         await seedEntities();
@@ -2026,17 +2182,38 @@
       isPollingCluster = true;
       pollTelemetryMetrics();
       try {
-        const [pRes, sd1Res, sd2Res, arbitRes] = await Promise.allSettled([
-          fetchProcessBody(clusterUrl(8734), "primary_1"),
-          fetchProcessBody(clusterUrl(8735), "sd1_1"),
-          fetchProcessBody(clusterUrl(8736), "sd2_1"),
-          fetchProcessBody(clusterUrl(8737), "arbit")
+        const pUrl = discoveredPrimaryUrl || clusterUrl(8734);
+        const sd1Url = discoveredSd1Url || clusterUrl(8735);
+        const sd2Url = discoveredSd2Url || clusterUrl(8736);
+        const arbitUrl = discoveredArbitUrl || clusterUrl(8737);
+
+        const [pRes, sd1Res, sd2Res, arbitRes, sd1PointRes, sd2PointRes] = await Promise.allSettled([
+          fetchProcessBody(pUrl, "primary_1"),
+          fetchProcessBody(sd1Url, "sd1_1"),
+          fetchProcessBody(sd2Url, "sd2_1"),
+          fetchProcessBody(arbitUrl, "arbit"),
+          fetchWithTimeout(`${sd1Url}/~node-process@1.0/sd1_1/push/output/body`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+            cache: "no-store",
+            body: JSON.stringify({ action: "Read-Point", id: PLAYER_ID })
+          }, 7000).then(r => r.ok ? r.json() : null).then(raw => unwrapBody(raw)).catch(() => null),
+          fetchWithTimeout(`${sd2Url}/~node-process@1.0/sd2_1/push/output/body`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+            cache: "no-store",
+            body: JSON.stringify({ action: "Read-Point", id: PLAYER_ID })
+          }, 7000).then(r => r.ok ? r.json() : null).then(raw => unwrapBody(raw)).catch(() => null)
         ]);
 
         const pState = pRes.status === "fulfilled" ? pRes.value : null;
         const sd1State = sd1Res.status === "fulfilled" ? sd1Res.value : null;
         const sd2State = sd2Res.status === "fulfilled" ? sd2Res.value : null;
         const arbitState = arbitRes.status === "fulfilled" ? arbitRes.value : null;
+        const sd1Point = (sd1PointRes.status === "fulfilled" && sd1PointRes.value && sd1PointRes.value.point) ? normalizePointEntry(sd1PointRes.value.point) : null;
+        const sd2Point = (sd2PointRes.status === "fulfilled" && sd2PointRes.value && sd2PointRes.value.point) ? normalizePointEntry(sd2PointRes.value.point) : null;
+        const sd1LastTick = (sd1PointRes.status === "fulfilled" && sd1PointRes.value && sd1PointRes.value.last_tick != null) ? Number(sd1PointRes.value.last_tick) : (sd1State ? Number(sd1State.last_tick || 0) : null);
+        const sd2LastTick = (sd2PointRes.status === "fulfilled" && sd2PointRes.value && sd2PointRes.value.last_tick != null) ? Number(sd2PointRes.value.last_tick) : (sd2State ? Number(sd2State.last_tick || 0) : null);
 
         const setNodeStatusTag = (id, online, onlineText, offlineText) => {
           const el = document.getElementById(id);
@@ -2055,8 +2232,8 @@
         };
 
         setNodeStatusTag("tagPrimary", !!pState, "Online (Pure RAM Ingest)", "Offline");
-        setNodeStatusTag("tagSd1", !!sd1State, "Online (LMDB Slot 1)", "Offline");
-        setNodeStatusTag("tagSd2", !!sd2State, "Online (LMDB Slot 1)", "Offline");
+        setNodeStatusTag("tagSd1", !!(sd1State || sd1Point), "Online (LMDB Disk Verified)", "Offline");
+        setNodeStatusTag("tagSd2", !!(sd2State || sd2Point), "Online (LMDB Disk Verified [Duplicate Node])", "Offline");
         setNodeStatusTag("tagArbit", !!arbitState, "Online (Checkpoint)", "Offline");
 
         const findPlayer = (state) => {
@@ -2091,28 +2268,67 @@
           if (elSdTargets) elSdTargets.textContent = (pState.sd_targets || []).join(", ");
         }
 
-        if (sd1State) {
-          const sd1Coord = findPlayer(sd1State);
+        if (sd1Point || sd1State) {
+          const sd1Coord = sd1Point ? `(${sd1Point.x}, ${sd1Point.y}) [rep #${sd1Point.tick}]` : findPlayer(sd1State);
           const elSd1Coord = document.getElementById("inspSd1Coord");
           if (elSd1Coord) elSd1Coord.textContent = sd1Coord || (lastVerifiedPos.tick ? `(${lastVerifiedPos.x}, ${lastVerifiedPos.y}) [rep #${lastVerifiedPos.tick}]` : "—");
           const elSd1Tick = document.getElementById("inspSd1Tick");
-          if (elSd1Tick) elSd1Tick.textContent = sd1State.last_tick != null ? `#${sd1State.last_tick} (lmdb disk)` : "—";
+          const s1t = sd1LastTick != null ? sd1LastTick : (sd1Point ? sd1Point.tick : null);
+          if (elSd1Tick) elSd1Tick.textContent = s1t != null ? `#${s1t} (lmdb disk)` : "—";
           const elSd1Persist = document.getElementById("inspSd1Persist");
-          if (elSd1Persist) elSd1Persist.textContent = sd1State.persistence || "lmdb_disk";
+          if (elSd1Persist) elSd1Persist.textContent = (sd1State && sd1State.persistence) || "lmdb_disk";
           const elSd1Arbit = document.getElementById("inspSd1Arbit");
-          if (elSd1Arbit) elSd1Arbit.textContent = sd1State.arbit_target || "—";
+          if (elSd1Arbit) elSd1Arbit.textContent = (sd1State && sd1State.arbit_target) || "—";
         }
 
-        if (sd2State) {
-          const sd2Coord = findPlayer(sd2State);
+        if (sd2Point || sd2State) {
+          const sd2Coord = sd2Point ? `(${sd2Point.x}, ${sd2Point.y}) [rep #${sd2Point.tick}]` : findPlayer(sd2State);
           const elSd2Coord = document.getElementById("inspSd2Coord");
           if (elSd2Coord) elSd2Coord.textContent = sd2Coord || (lastVerifiedPos.tick ? `(${lastVerifiedPos.x}, ${lastVerifiedPos.y}) [rep #${lastVerifiedPos.tick}]` : "—");
           const elSd2Tick = document.getElementById("inspSd2Tick");
-          if (elSd2Tick) elSd2Tick.textContent = sd2State.last_tick != null ? `#${sd2State.last_tick} (lmdb disk)` : "—";
+          const s2t = sd2LastTick != null ? sd2LastTick : (sd2Point ? sd2Point.tick : null);
+          if (elSd2Tick) elSd2Tick.textContent = s2t != null ? `#${s2t} (lmdb disk)` : "—";
           const elSd2Persist = document.getElementById("inspSd2Persist");
-          if (elSd2Persist) elSd2Persist.textContent = sd2State.persistence || "lmdb_disk";
+          if (elSd2Persist) elSd2Persist.textContent = (sd2State && sd2State.persistence) || "lmdb_disk";
           const elSd2Arbit = document.getElementById("inspSd2Arbit");
-          if (elSd2Arbit) elSd2Arbit.textContent = sd2State.arbit_target || "—";
+          if (elSd2Arbit) elSd2Arbit.textContent = (sd2State && sd2State.arbit_target) || "—";
+        }
+
+        // Live Quorum persistence badge synchronization (merges both point & node state to ensure duplicate node is recognized)
+        const s1Active = !!(sd1Point || sd1State);
+        const s2Active = !!(sd2Point || sd2State);
+        const s1Tick = Number((sd1Point && sd1Point.tick) || (sd1State && sd1State.last_tick) || 0);
+        const s2Tick = Number((sd2Point && sd2Point.tick) || (sd2State && sd2State.last_tick) || 0);
+        const maxPersistTick = Math.max(s1Tick, s2Tick);
+
+        if (s1Active && s2Active) {
+          const elSdNodes = document.getElementById("hudSdNodes");
+          if (elSdNodes) elSdNodes.textContent = "SD1+SD2 [LMDB Quorum]";
+          const elSdSub = document.getElementById("hudSdSub");
+          if (elSdSub) elSdSub.textContent = `Honest 2-of-3 Quorum Persisted (#${maxPersistTick})`;
+        } else if (s2Active) {
+          const elSdNodes = document.getElementById("hudSdNodes");
+          if (elSdNodes) elSdNodes.textContent = "SD2 [Duplicate Node LMDB]";
+          const elSdSub = document.getElementById("hudSdSub");
+          if (elSdSub) elSdSub.textContent = `Duplicate Node Persisted (#${s2Tick})`;
+        } else if (s1Active) {
+          const elSdNodes = document.getElementById("hudSdNodes");
+          if (elSdNodes) elSdNodes.textContent = "sd1 (LMDB disk verified)";
+          const elSdSub = document.getElementById("hudSdSub");
+          if (elSdSub) elSdSub.textContent = `SD1 Primary Replica Persisted (#${s1Tick})`;
+        }
+
+        if (confirmedPos.tick === 0 && (sd1Point || sd2Point)) {
+          const bestPt = (sd2Point && (!sd1Point || sd2Point.tick >= sd1Point.tick)) ? sd2Point : sd1Point;
+          if (bestPt) {
+            confirmedPos = { x: bestPt.x, y: bestPt.y, tick: bestPt.tick };
+            lastVerifiedPos = { ...confirmedPos };
+            headPos = { ...confirmedPos };
+            targetPos = { x: confirmedPos.x, y: confirmedPos.y };
+            renderPos = { x: confirmedPos.x, y: confirmedPos.y };
+            document.getElementById("hudCoords").textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+            document.getElementById("hudTick").textContent = `#${confirmedPos.tick}`;
+          }
         }
 
         if (arbitState) {

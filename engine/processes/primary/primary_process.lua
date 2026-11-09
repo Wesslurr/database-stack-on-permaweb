@@ -485,9 +485,9 @@ end
 -- Pull the authoritative state from one replica. Returns true when the pull
 -- succeeded. Used for cold start and for recovery when a replica reports that
 -- it is ahead of us (a replica must never be overwritten by a stale primary).
-local function hydrate_from(target)
+local function hydrate_from(target, cached_raw)
     if not target then return false end
-    local raw = relay_call(sd_endpoint(target, "push"), "POST", '{"action":"Hydrate"}')
+    local raw = cached_raw or relay_call(sd_endpoint(target, "push"), "POST", '{"action":"Hydrate"}')
     if not raw then return false end
     local tick_str = string.match(raw, '"last_tick"%s*:%s*(%d+)')
     local root_str = string.match(raw, '"state_root"%s*:%s*"(0x%x+)"')
@@ -526,6 +526,7 @@ end
 local function hydrate_from_latest_replica()
     if not (Topology and Topology.sd_targets and #Topology.sd_targets > 0) then return false end
     local best_target = nil
+    local best_raw = nil
     local highest_tick = -1
     for _, target in ipairs(Topology.sd_targets) do
         local raw = relay_call(sd_endpoint(target, "push"), "POST", '{"action":"Hydrate"}')
@@ -535,11 +536,12 @@ local function hydrate_from_latest_replica()
             if t > highest_tick then
                 highest_tick = t
                 best_target = target
+                best_raw = raw
             end
         end
     end
-    if best_target then
-        return hydrate_from(best_target)
+    if best_target and best_raw then
+        return hydrate_from(best_target, best_raw)
     end
     return hydrate_from(Topology.sd_targets[1])
 end
@@ -1191,15 +1193,19 @@ local function handle_ack(msg, suffix)
         if cached then
             return 200, cached
         end
+        recompute_head()
+        local lag = math.max(0, (HeadTick or Tick) - Tick)
         return 200, string.format(
-            '{"status":"ignored","reason":"unknown_batch","batch_id":"%s","tick":%d,"state_root":"%s"}',
-            json_safe(batch_id), Tick, StateRoot
+            '{"status":"ignored","reason":"unknown_batch","batch_id":"%s","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"state_root":"%s","head_root":"%s","replicated_root":"%s","active_entity_count":%d,"compacted_total":%d%s}',
+            json_safe(batch_id), Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, StateRoot, count_entities(), CompactedCount or 0, suffix or ""
         )
     end
     if p.done then
+        recompute_head()
+        local lag = math.max(0, (HeadTick or Tick) - Tick)
         return 200, string.format(
-            '{"status":"duplicate_ack","batch_id":"%s","tick":%d,"state_root":"%s"}',
-            json_safe(batch_id), Tick, StateRoot
+            '{"status":"duplicate_ack","batch_id":"%s","tick":%d,"head_tick":%d,"replicated_tick":%d,"replication_lag":%d,"state_root":"%s","head_root":"%s","replicated_root":"%s","active_entity_count":%d,"compacted_total":%d%s}',
+            json_safe(batch_id), Tick, HeadTick or Tick, Tick, lag, StateRoot, HeadRoot or StateRoot, StateRoot, count_entities(), CompactedCount or 0, suffix or ""
         )
     end
     if claimed_root ~= p.root or claimed_tick ~= p.tick_to then
@@ -1591,22 +1597,23 @@ function compute(process, message, opts)
         -- overwrite it: pull its state and discard the superseded batch.
         local peer_tick = tonumber(msg.last_tick or (msg.query and msg.query.last_tick))
         local peer_signer = msg.sd_signer or (msg.query and msg.query.sd_signer)
+        local peer_role = msg.role or (msg.query and msg.query.role)
         local target = nil
         if Topology and Topology.sd_targets then
             for _, t in ipairs(Topology.sd_targets) do
-                if peer_signer and (peer_signer == t.role or peer_signer == t.process) then
+                if (peer_role and (peer_role == t.role or peer_role == t.process))
+                    or (peer_signer and (peer_signer == t.role or peer_signer == t.process)) then
                     target = t
                 end
             end
             target = target or Topology.sd_targets[1]
         end
         if peer_tick and peer_tick > Tick then
-            local hydrated = false
-            if target then
+            -- Authoritative hydration: always pull from whichever replica (SD1 or duplicate SD2)
+            -- reports the highest confirmed tick!
+            local hydrated = hydrate_from_latest_replica()
+            if not hydrated and target then
                 hydrated = hydrate_from(target)
-            end
-            if not hydrated then
-                hydrated = hydrate_from_latest_replica()
             end
             if hydrated then
                 PendingBatches = {}

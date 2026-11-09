@@ -111,9 +111,10 @@ NODES=(
 for NODE_SPEC in "${NODES[@]}"; do
     IFS=":" read -r SESSION_NAME PORT CONFIG_PATH <<< "$NODE_SPEC"
     
-    # Start tmux session running HyperBEAM node with log persistence
-    CMD="export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME 2>&1 | tee \"$PROJECT_ROOT/logs/${SESSION_NAME}.log\""
-    tmux new-session -d -s "$SESSION_NAME" "bash -c '$CMD'"
+    # Start tmux session running HyperBEAM node with interactive PTY and log persistence
+    tmux new-session -d -s "$SESSION_NAME" -c "$HB_SRC"
+    tmux pipe-pane -t "$SESSION_NAME" -o "cat >> \"$PROJECT_ROOT/logs/${SESSION_NAME}.log\""
+    tmux send-keys -t "$SESSION_NAME" "export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME" C-m
     echo "  [STARTED] Node '$SESSION_NAME' on port $PORT (config: $(basename "$CONFIG_PATH"))"
     # Brief pause to let node initialize its VM
     sleep 3
