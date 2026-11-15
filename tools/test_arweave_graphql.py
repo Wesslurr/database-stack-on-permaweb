@@ -3,7 +3,7 @@ import json
 
 q = {
     "query": """{
-  transactions(tags: [{ name: "App-Name", values: ["HyperStack"] }]) {
+  transactions(tags: [{ name: "app-name", values: ["HyperStack"] }]) {
     edges {
       node {
         id

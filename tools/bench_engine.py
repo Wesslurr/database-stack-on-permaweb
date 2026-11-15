@@ -353,7 +353,7 @@ def flush_step(writers, per_writer, primary, ts_base):
                             and nb.get("ack") == "replicated":
                         tcode = 200
                         break
-                    time.sleep(0.02)
+                    time.sleep(0.002)
             with lock:
                 results.append((tcode, (time.perf_counter() - t0) * 1000.0))
 
@@ -515,7 +515,7 @@ def main():
                         break
                     if int(nb.get("tick") or 0) >= target_tick and nb.get("ack") == "replicated":
                         break
-                    time.sleep(0.02)
+                    time.sleep(0.002)
             vals.append((time.perf_counter() - t0) * 1000.0)
             codes.append(fcode)
         result["paths"]["write_confirm"] = stats(vals, codes)

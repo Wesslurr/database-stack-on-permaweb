@@ -9,11 +9,11 @@ wait_for_apt() {
     done
 }
 
-echo "=== [Codespace Setup] Installing Erlang/OTP 26, Rebar3, C/C++ Build Tools ==="
+echo "=== [Codespace Setup] Installing Erlang/OTP 27, Rebar3, C/C++ Build Tools ==="
 wait_for_apt
 sudo apt-get update
 wait_for_apt
-sudo apt-get install -y software-properties-common curl git tmux build-essential cmake libtool autoconf automake jq
+sudo apt-get install -y software-properties-common curl git tmux psmisc procps build-essential cmake libtool autoconf automake jq
 
 # Add RabbitMQ modern Erlang PPA for Ubuntu 22.04 (provides Erlang 27)
 wait_for_apt
@@ -28,6 +28,12 @@ if ! command -v rebar3 &>/dev/null; then
     echo "=== [Codespace Setup] Installing Rebar3 ==="
     sudo curl -fsSL -o /usr/local/bin/rebar3 https://s3.amazonaws.com/rebar3/rebar3
     sudo chmod +x /usr/local/bin/rebar3
+fi
+
+# Ensure Rust wasm32 target is installed
+if command -v rustup &>/dev/null; then
+    echo "=== [Codespace Setup] Adding Rust wasm32-unknown-unknown target ==="
+    rustup target add wasm32-unknown-unknown
 fi
 
 # Ensure Docker daemon is responding before building image
@@ -66,17 +72,25 @@ for F in HyperBEAM/_build/default/lib/cowlib/src/cow_capsule.erl HyperBEAM/_buil
     fi
 done
 
-# Sync custom engine devices & patches into HyperBEAM preloaded tree
-if [ -d "engine/devices/hyperstack" ]; then
-    echo "=== [Codespace Setup] Syncing custom devices (hyperstack@1.0) into HyperBEAM ==="
-    mkdir -p HyperBEAM/src/preloaded/hyperstack
-    cp -rf engine/devices/hyperstack/* HyperBEAM/src/preloaded/hyperstack/
-fi
-if [ -f "engine/devices/patches/dev_lua_lib.patch" ]; then
-    (cd HyperBEAM && patch -p1 -N --dry-run < ../engine/devices/patches/dev_lua_lib.patch >/dev/null 2>&1 && patch -p1 -N < ../engine/devices/patches/dev_lua_lib.patch || true)
+# Build Rust WASM process engines (primary_engine.wasm & sd_engine.wasm)
+if [ -d "engine/processes/primary" ] && [ -d "engine/processes/shared_data" ]; then
+    echo "=== [Codespace Setup] Compiling Rust WASM Engines (primary, shared_data) ==="
+    (cd engine/processes/primary && cargo build --target wasm32-unknown-unknown --release)
+    (cd engine/processes/shared_data && cargo build --target wasm32-unknown-unknown --release)
 fi
 
-# Build configs
+# Sync custom native HyperBEAM preloaded devices before compile
+if [ -f "engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" ] && [ -d "HyperBEAM/src/preloaded/arweave" ]; then
+    cp engine/devices/l1_checkpoint/dev_l1_checkpoint.erl HyperBEAM/src/preloaded/arweave/dev_l1_checkpoint.erl
+fi
+
+# Precompile HyperBEAM BEAM modules once during container setup
+if [ -f "HyperBEAM/rebar.config" ]; then
+    echo "=== [Codespace Setup] Compiling HyperBEAM ==="
+    (cd HyperBEAM && rebar3 compile || true)
+fi
+
+# Build single-world node configurations (genesis, primary, sd1, sd2, arbit)
 echo "=== [Codespace Setup] Building node configurations ==="
 python3 tools/build_configs.py || true
 

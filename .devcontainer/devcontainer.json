@@ -45,6 +45,7 @@
     "vscode": {
       "extensions": [
         "erlang-ls.erlang-ls",
+        "rust-lang.rust-analyzer",
         "ms-python.python"
       ]
     }

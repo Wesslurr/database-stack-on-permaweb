@@ -73,14 +73,10 @@ for F in "$HB_SRC/_build/default/lib/cowlib/src/cow_capsule.erl" "$HB_SRC/_build
 done
 rm -f "$HB_SRC/_build/default/lib/cowlib/ebin/cow_capsule.beam" "$HB_SRC/_build/default/lib/gun/ebin/gun.beam"
 
-# Sync custom engine devices & patches into HyperBEAM preloaded tree
-if [ -d "$PROJECT_ROOT/engine/devices/hyperstack" ]; then
-    echo "  Syncing custom engine devices (hyperstack@1.0) into HyperBEAM..."
-    mkdir -p "$HB_SRC/src/preloaded/hyperstack"
-    cp -rf "$PROJECT_ROOT/engine/devices/hyperstack/"* "$HB_SRC/src/preloaded/hyperstack/"
-fi
-if [ -f "$PROJECT_ROOT/engine/devices/patches/dev_lua_lib.patch" ]; then
-    (cd "$HB_SRC" && patch -p1 -N --dry-run < "$PROJECT_ROOT/engine/devices/patches/dev_lua_lib.patch" >/dev/null 2>&1 && patch -p1 -N < "$PROJECT_ROOT/engine/devices/patches/dev_lua_lib.patch" || true)
+# Sync custom native HyperBEAM preloaded devices before compile
+if [ -f "$PROJECT_ROOT/engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" ]; then
+    cp "$PROJECT_ROOT/engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" \
+       "$HB_SRC/src/preloaded/arweave/dev_l1_checkpoint.erl"
 fi
 
 (
@@ -88,6 +84,18 @@ fi
     rebar3 compile
 )
 echo "  [OK] HyperBEAM compiled."
+
+echo ""
+echo "=== [2.7/4] Compiling Rust WASM Engines (Primary & Shared Data) ==="
+(
+    cd "$PROJECT_ROOT/engine/processes/primary"
+    cargo build --target wasm32-unknown-unknown --release
+)
+(
+    cd "$PROJECT_ROOT/engine/processes/shared_data"
+    cargo build --target wasm32-unknown-unknown --release
+)
+echo "  [OK] Rust WASM engines compiled."
 
 echo ""
 echo "=== [2.8/4] Generating node configurations for current environment ==="
@@ -118,20 +126,6 @@ for NODE_SPEC in "${NODES[@]}"; do
     echo "  [STARTED] Node '$SESSION_NAME' on port $PORT (config: $(basename "$CONFIG_PATH"))"
     # Brief pause to let node initialize its VM
     sleep 3
-done
-
-echo ""
-echo "=== [3.5/4] Starting Arweave L1 Committer Service (:8738) ==="
-fuser -k 8738/tcp >/dev/null 2>&1 || true
-pkill -f "tools/arweave_committer.py" >/dev/null 2>&1 || true
-tmux kill-session -t hb-committer 2>/dev/null || true
-tmux new-session -d -s hb-committer -c "$PROJECT_ROOT" 'python3 tools/arweave_committer.py'
-for attempt in {1..20}; do
-    if curl -s -f "http://127.0.0.1:8738/health" >/dev/null 2>&1; then
-        echo "  [OK] Arweave L1 Committer ready on http://127.0.0.1:8738"
-        break
-    fi
-    sleep 0.5
 done
 
 echo ""
@@ -166,10 +160,6 @@ done
 
 echo ""
 if [ "$ALL_READY" = true ]; then
-    # Advance cluster epoch to guarantee a clean settlement ledger on fresh boot
-    curl -s -X POST http://127.0.0.1:8733/~node-process@1.0/genesis/push/output \
-         -H 'Content-Type: application/json' \
-         -d '{"action":"Advance-Epoch","admin_key":"hyperstack_admin_genesis_key"}' >/dev/null 2>&1 || true
     echo "=========================================================="
     echo "  SUCCESS: All 6 cluster nodes (1 ArLocal + 5 HyperBEAM)   "
     echo "           are live, independent, and healthy!            "

@@ -53,14 +53,15 @@ for F in HyperBEAM/_build/default/lib/cowlib/src/cow_capsule.erl HyperBEAM/_buil
 done
 rm -f HyperBEAM/_build/default/lib/cowlib/ebin/cow_capsule.beam HyperBEAM/_build/default/lib/gun/ebin/gun.beam
 
-# Sync custom engine devices & patches into HyperBEAM preloaded tree
-if [ -d "engine/devices/hyperstack" ]; then
-    echo "=== [Sync] Installing custom engine devices (hyperstack@1.0) into HyperBEAM ==="
-    mkdir -p HyperBEAM/src/preloaded/hyperstack
-    cp -rf engine/devices/hyperstack/* HyperBEAM/src/preloaded/hyperstack/
+# Verify Rust WASM engine sources before cluster startup
+if [ ! -f "engine/processes/primary/src/lib.rs" ] || [ ! -f "engine/processes/shared_data/src/lib.rs" ]; then
+    echo "❌ ERROR: Rust WASM process sources missing in engine/processes/{primary,shared_data}"
+    exit 1
 fi
-if [ -f "engine/devices/patches/dev_lua_lib.patch" ]; then
-    (cd HyperBEAM && patch -p1 -N --dry-run < ../engine/devices/patches/dev_lua_lib.patch >/dev/null 2>&1 && patch -p1 -N < ../engine/devices/patches/dev_lua_lib.patch || true)
+if [ -d "engine/processes/primary" ] && [ -d "engine/processes/shared_data" ]; then
+    echo "=== [Build] Compiling Rust WASM Engines (primary, shared_data) ==="
+    (cd engine/processes/primary && cargo build --target wasm32-unknown-unknown --release)
+    (cd engine/processes/shared_data && cargo build --target wasm32-unknown-unknown --release)
 fi
 
 python3 tools/build_configs.py

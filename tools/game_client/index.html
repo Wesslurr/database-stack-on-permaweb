@@ -443,7 +443,7 @@
         </div>
         <!-- Pure Live Telemetry & Audit Stream (Zero Fluff, 100% Real-time Engine Metrics) -->
         <div class="swarm-telemetry-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; margin-top: 10px; background: #080d1a; padding: 10px 12px; border-radius: 6px; border: 1px solid #1e293b; font-family: monospace; font-size: 0.72rem;">
-          <div><span style="color:#94a3b8;">Elastic Workers:</span> <strong id="telActiveWorkers" style="color:#38bdf8;">1 / 10 (SMP)</strong></div>
+          <div><span style="color:#94a3b8;">Execution Engine:</span> <strong id="telActiveWorkers" style="color:#38bdf8;">1 / 1 (Single-World WASM)</strong></div>
           <div><span style="color:#94a3b8;">Batch Train Size:</span> <strong id="telBatchSize" style="color:#38bdf8;">0 ent/batch</strong></div>
           <div><span style="color:#94a3b8;">L0 RAM Ingest:</span> <strong id="telL0Rtt" style="color:#22d3ee;">— ms</strong></div>
           <div><span style="color:#94a3b8;">L1 Quorum ACK:</span> <strong id="telL1Rtt" style="color:#10b981;">— ms</strong></div>
@@ -626,21 +626,14 @@
     let discoveredArbitUrl = null;
     let discoveredEpoch = null;
 
-    // Local cached position for instant seamless rendering before Genesis discovery resolves
-    const savedPos = (() => {
-      try {
-        const s = localStorage.getItem("hb_player_pos");
-        return s ? JSON.parse(s) : null;
-      } catch (_) { return null; }
-    })();
-
     // Input target (Ghost ring) vs L0 Head (Cyan Ring) vs L1 Confirmed state (Solid Red Circle)
-    let targetPos = savedPos ? { x: Number(savedPos.x || 0), y: Number(savedPos.y || 0) } : { x: 0, y: 0 };
-    let headPos = savedPos ? { x: Number(savedPos.x || 0), y: Number(savedPos.y || 0), tick: Number(savedPos.tick || 0) } : { x: 0, y: 0, tick: 0 };
-    let confirmedPos = savedPos ? { x: Number(savedPos.x || 0), y: Number(savedPos.y || 0), tick: Number(savedPos.tick || 0) } : { x: 0, y: 0, tick: 0 };
-    let lastVerifiedPos = { x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick };
-    let renderPos = { x: confirmedPos.x, y: confirmedPos.y }; // Smooth interpolation towards confirmedPos
-    let trail = [{ x: confirmedPos.x, y: confirmedPos.y, tick: confirmedPos.tick }];
+    // Start cleanly at (0, 0) tick 0 until Genesis/SD discovery verifies authoritative cluster state
+    let targetPos = { x: 0, y: 0 };
+    let headPos = { x: 0, y: 0, tick: 0 };
+    let confirmedPos = { x: 0, y: 0, tick: 0 };
+    let lastVerifiedPos = { x: 0, y: 0, tick: 0 };
+    let renderPos = { x: 0, y: 0 }; // Smooth interpolation towards confirmedPos
+    let trail = [{ x: 0, y: 0, tick: 0 }];
     let confirmedPulse = null;
     let isWriting = false;
     let queuedMove = null;
@@ -744,10 +737,12 @@
         if (!p) return;
         seen.add(p.id);
         if (p.id === PLAYER_ID) {
-          if (Number(p.tick || 0) >= (confirmedPos.tick || 0)) {
-            confirmedPos = { x: Number(p.x), y: Number(p.y), tick: Number(p.tick || 0) };
+          const pTick = Number(p.tick || 0);
+          const hasPendingInput = isWriting || !!queuedMove || pendingPlayerWrites.length > 0;
+          if (pruneMissing || pTick > (confirmedPos.tick || 0)) {
+            confirmedPos = { x: Number(p.x), y: Number(p.y), tick: pTick };
             lastVerifiedPos = { ...confirmedPos };
-            if (headPos.tick <= confirmedPos.tick) {
+            if ((pruneMissing || !hasPendingInput) && headPos.tick <= confirmedPos.tick) {
               headPos = { ...confirmedPos };
               targetPos = { x: confirmedPos.x, y: confirmedPos.y };
             }
@@ -774,36 +769,31 @@
       }
     }
 
-    // Reads are seeded from authoritative state across active workers or SD replicas
+    // Reads are seeded from authoritative state on Primary or SD replicas
     async function seedEntities() {
       try {
-        const workersToFetch = Math.max(1, dynamicActiveWorkers);
-        const promises = [];
-        for (let i = 1; i <= workersToFetch; i++) {
-          promises.push(fetchProcessBody(discoveredPrimaryUrl, `primary_${i}`));
-        }
-        const results = await Promise.all(promises);
+        const data = await fetchProcessBody(discoveredPrimaryUrl, "primary");
         let allPoints = [];
-        results.forEach(data => {
-          if (data && (Array.isArray(data.head_points) || Array.isArray(data.points))) {
-            allPoints = allPoints.concat(data.head_points || data.points);
-          }
-        });
+        if (data && (Array.isArray(data.points) || Array.isArray(data.head_points))) {
+          allPoints = data.points || data.head_points;
+        }
         if (allPoints.length > 0) {
           applyPointsList(allPoints, true);
+          updateDynamicWorkers();
         } else {
           // Robust fallback to SD Snapshots across both SD1 and duplicate node SD2
           try {
             const snapData = await fetchAuthoritativeSnapshotsFromReplicas();
             if (snapData && snapData.points && snapData.points.length > 0) {
               applyPointsList(snapData.points, true);
+              updateDynamicWorkers();
             }
           } catch (_) {}
         }
       } catch (_) {}
     }
 
-    // /now is slot-free. Poll primary_1 for status, live HUD & centralized L1 quorum confirmation.
+    // /now is slot-free. Poll primary for status, live HUD & centralized L1 quorum confirmation.
     let lastNow = { tick: 0, headTick: 0, lag: 0, compacted: 0, root: "—", ack: "none" };
     const pendingSwarmBatches = [];
     const pendingPlayerWrites = [];
@@ -813,16 +803,39 @@
       if (!discoveredPrimaryUrl || isPollingNow) return;
       isPollingNow = true;
       try {
-        const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/now/results~message@1.0/output/body`, {
+        const data = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/now/results~message@1.0/output/body`, {
           headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
           cache: "no-store"
-        });
-        if (!res.ok) return;
-        const data = unwrapBody(await res.json());
+        }).then(r => r.ok ? r.json() : null).then(j => j ? unwrapBody(j) : null).catch(() => null);
+        if (!data) return;
+
+        if (Array.isArray(data.points)) {
+          applyPointsList(data.points, false);
+        }
+        if (Array.isArray(data.head_points)) {
+          data.head_points.forEach(raw => {
+            const pt = normalizePointEntry(raw);
+            if (pt && pt.id !== PLAYER_ID) {
+              const e = entities.get(pt.id);
+              if (e && pt.tick >= (e.htick || 0)) {
+                e.hx = pt.x; e.hy = pt.y; e.htick = pt.tick;
+              }
+            }
+          });
+        }
+
         const repTick = Number(data.replicated_tick ?? data.tick ?? 0);
+        if (repTick > 0) {
+          workerReplicatedTicks["primary"] = Math.max(workerReplicatedTicks["primary"] || 0, repTick);
+        }
         const headTick = Number(data.head_tick ?? repTick);
         const lag = Number(data.replication_lag ?? Math.max(0, headTick - repTick));
         const compacted = Number(data.compacted_total ?? 0);
+        const repList = (Array.isArray(data.replicas) && data.replicas.length)
+          ? data.replicas
+          : ((Array.isArray(data.sd_acked_nodes) && data.sd_acked_nodes.length)
+            ? data.sd_acked_nodes
+            : ((Array.isArray(data.sd_roles) && data.sd_roles.length) ? data.sd_roles : ["sd1", "sd2"]));
         lastNow = { tick: repTick, headTick, lag, compacted, root: data.state_root || "—", ack: data.ack || "none" };
 
         // Zero-overhead centralized L1 Quorum confirmation for player_red (zero extra sockets!)
@@ -832,8 +845,12 @@
           for (const pw of pendingPlayerWrites) {
             if (repTick >= pw.targetTick) {
               const l1Rtt = Math.round(nowPerf - pw.t0);
-              lastVerifiedPos = { x: pw.nx, y: pw.ny, tick: repTick };
-              confirmedPos = { x: pw.nx, y: pw.ny, tick: repTick };
+              const srvPt = data.point ? normalizePointEntry(data.point) : null;
+              const srvMatchesTick = srvPt && srvPt.id === PLAYER_ID && Number(srvPt.tick) === repTick;
+              const confX = srvMatchesTick ? Number(srvPt.x) : pw.nx;
+              const confY = srvMatchesTick ? Number(srvPt.y) : pw.ny;
+              lastVerifiedPos = { x: confX, y: confY, tick: repTick };
+              confirmedPos = { x: confX, y: confY, tick: repTick };
               try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
               trail.push({ x: confirmedPos.x, y: confirmedPos.y, tick: repTick });
               if (trail.length > 18) trail.shift();
@@ -846,21 +863,21 @@
               const elRttSub = document.getElementById("hudRttSub");
               if (elRttSub) elRttSub.textContent = `L0 Accept: ${pw.l0Rtt}ms · L1 DA Quorum: ${l1Rtt}ms`;
               document.getElementById("hudTick").textContent = `#${repTick} (Head: #${Math.max(repTick, headPos.tick)})`;
-              document.getElementById("hudSdNodes").textContent = (data.replicas || ["sd1", "sd2"]).join(" + ");
+              document.getElementById("hudSdNodes").textContent = repList.join(" + ");
               const elSdSub = document.getElementById("hudSdSub");
               if (elSdSub) elSdSub.textContent = `LMDB disk confirmed · 200 replicated`;
 
-              const coordStr = `(${pw.nx}, ${pw.ny}) [rep #${repTick}]`;
+              const coordStr = `(${confirmedPos.x}, ${confirmedPos.y}) [rep #${repTick}]`;
               const el1 = document.getElementById("inspSd1Coord"); if (el1) el1.textContent = coordStr;
               const el2 = document.getElementById("inspSd2Coord"); if (el2) el2.textContent = coordStr;
               const el1T = document.getElementById("inspSd1Tick"); if (el1T) el1T.textContent = `#${repTick} (confirmed)`;
               const el2T = document.getElementById("inspSd2Tick"); if (el2T) el2T.textContent = `#${repTick} (confirmed)`;
-              setGateBadge("confirmed", data, l1Rtt);
+              setGateBadge("confirmed", { ...data, replicas: repList }, l1Rtt);
 
               if (!pw.isInit) {
                 appendLog(
-                  `Move <code>(${pw.nx}, ${pw.ny})</code> &rarr; L0 Head in <strong>${pw.l0Rtt} ms</strong> &middot; ` +
-                  `<span class="ack">L1 Quorum Confirmed [${(data.replicas || ["sd1", "sd2"]).join(", ")}]</span> ` +
+                  `Move <code>(${confirmedPos.x}, ${confirmedPos.y})</code> &rarr; L0 Head in <strong>${pw.l0Rtt} ms</strong> &middot; ` +
+                  `<span class="ack">L1 Quorum Confirmed [${repList.join(", ")}]</span> ` +
                   `Tick #${repTick} in <strong>${l1Rtt} ms</strong> (root: <code>${String(lastNow.root || "—").slice(0, 14)}…</code>)`
                 );
               }
@@ -874,20 +891,23 @@
           pendingPlayerWrites.push(...remainingPlayer);
         }
 
-        // Zero-overhead centralized L1 Quorum confirmation for all swarm batches across SMP workers
+        // Zero-overhead centralized L1 Quorum confirmation for all swarm batches
         if (pendingSwarmBatches.length > 0) {
           const nowPerf = performance.now();
           const remaining = [];
           for (const item of pendingSwarmBatches) {
-            const wRepTick = Math.max(item.wName === "primary_1" ? repTick : 0, workerReplicatedTicks[item.wName] || 0);
+            const wRepTick = Math.max(repTick, workerReplicatedTicks[item.wName] || 0);
             if (wRepTick >= item.targetTick) {
               const l1Rtt = Math.round(nowPerf - item.t0);
               const elL1 = document.getElementById("telL1Rtt"); if (elL1) elL1.textContent = `${l1Rtt} ms`;
-              const elRep = document.getElementById("telReplicas"); if (elRep) elRep.textContent = (data.replicas || ["sd1", "sd2"]).join("+") + " [LMDB]";
+              const elRep = document.getElementById("telReplicas"); if (elRep) elRep.textContent = repList.join("+") + " [LMDB]";
+              swarm.acked += item.batchItems.length;
+              for (let k = 0; k < item.batchItems.length; k++) swarm.ackTimes.push(nowPerf);
+              setGateBadge("confirmed", { ...data, replicas: repList }, l1Rtt);
               item.batchItems.forEach((bItem) => {
                 const e = entities.get(bItem.id);
                 const owner = (e && e.owner && e.owner !== "anonymous") ? e.owner : `sim_${item.wName}_worker`;
-                upsertEntity({ id: bItem.id, x: bItem.x, y: bItem.y, tick: item.targetTick, owner });
+                upsertEntity({ id: bItem.id, x: bItem.x, y: bItem.y, tick: Math.max(item.targetTick, wRepTick), owner });
               });
             } else if (nowPerf - item.t0 > 8000) {
               item.batchItems.forEach((bItem) => {
@@ -902,22 +922,35 @@
           pendingSwarmBatches.push(...remaining);
         }
 
-        if (Array.isArray(data.points)) {
-          for (const raw of data.points) {
-            const p = normalizePointEntry(raw);
-            if (p && p.id === PLAYER_ID && Number(p.tick || 0) >= (confirmedPos.tick || 0)) {
-              lastVerifiedPos = { x: Number(p.x), y: Number(p.y), tick: Number(p.tick || repTick) };
-              confirmedPos = { ...lastVerifiedPos };
-              const elHud = document.getElementById("hudCoords");
-              if (elHud) elHud.textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
-              const elTick = document.getElementById("hudTick");
-              if (elTick) elTick.textContent = `#${confirmedPos.tick} (Head: #${Math.max(confirmedPos.tick, headPos.tick)})`;
-              break;
+        if (data.point && pendingPlayerWrites.length === 0 && !isWriting && !queuedMove) {
+          const p = normalizePointEntry(data.point);
+          if (p && p.id === PLAYER_ID && Number(p.tick || 0) > (confirmedPos.tick || 0)) {
+            lastVerifiedPos = { x: Number(p.x), y: Number(p.y), tick: Number(p.tick || repTick) };
+            confirmedPos = { ...lastVerifiedPos };
+            if (headPos.tick <= confirmedPos.tick) {
+              headPos = { ...confirmedPos };
+              targetPos = { x: confirmedPos.x, y: confirmedPos.y };
             }
+            try { localStorage.setItem("hb_player_pos", JSON.stringify(confirmedPos)); } catch (_) {}
+            const elHud = document.getElementById("hudCoords");
+            if (elHud) elHud.textContent = `(${confirmedPos.x}, ${confirmedPos.y})`;
+            const elTick = document.getElementById("hudTick");
+            if (elTick) elTick.textContent = `#${confirmedPos.tick} (Head: #${Math.max(confirmedPos.tick, headPos.tick)})`;
           }
         }
-        if (Array.isArray(data.head_points) || Array.isArray(data.points)) {
-          applyPointsList(data.head_points || data.points, false);
+        if (Array.isArray(data.points)) {
+          applyPointsList(data.points, false);
+        }
+        if (Array.isArray(data.head_points)) {
+          data.head_points.forEach(raw => {
+            const pt = normalizePointEntry(raw);
+            if (pt && pt.id !== PLAYER_ID) {
+              const e = entities.get(pt.id);
+              if (e && pt.tick >= (e.htick || 0)) {
+                e.hx = pt.x; e.hy = pt.y; e.htick = pt.tick;
+              }
+            }
+          });
         }
         const elTotal = document.getElementById("inspPrimaryTotal");
         if (elTotal) elTotal.textContent = `${data.active_entity_count || 0} in RAM`;
@@ -936,47 +969,27 @@
       }
     }
 
-    // ================= Dynamic Elastic Swarm & Multi-Worker Architecture =================
-    const MAX_PRIMARY_WORKERS = 10;
+    // ================= Dynamic Swarm Pipeline (Single-World Primary Architecture) =================
+    const MAX_PRIMARY_WORKERS = 1;
     let dynamicActiveWorkers = 1;
-    const workerPipelines = {};
-    for (let i = 1; i <= MAX_PRIMARY_WORKERS; i++) {
-      workerPipelines[`primary_${i}`] = {
-        name: `primary_${i}`,
+    const workerPipelines = {
+      primary: {
+        name: "primary",
         queue: [],
         inflight: 0,
         maxInflight: 2,
         lastRtt: 0
-      };
-    }
-
-    function updateDynamicWorkers() {
-      if (!swarm.running) {
-        dynamicActiveWorkers = 1;
-      } else {
-        const botCount = simIds().length;
-        const reqWps = swarm.intervalMs > 0 ? (botCount * 1000 / swarm.intervalMs) : 0;
-        // Elastic SMP auto-scaler for 4-core physical CPU:
-        // Automatically scales workers based on bot count OR incoming write pressure (reqWps):
-        // - 4 workers (SMP saturated): reqWps >= 1200 w/s OR >= 60 bots -> ~3,000+ w/s capacity
-        // - 2 workers: reqWps >= 500 w/s OR >= 25 bots -> ~1,600+ w/s capacity
-        // - 1 worker: light load -> 850+ w/s capacity
-        if (botCount >= 60 || reqWps >= 1200) dynamicActiveWorkers = 4;
-        else if (botCount >= 25 || reqWps >= 500) dynamicActiveWorkers = 2;
-        else dynamicActiveWorkers = 1;
       }
+    };
+
+    function updateDynamicWorkers(_overrideCount = null) {
+      dynamicActiveWorkers = 1;
       const elAct = document.getElementById("telActiveWorkers");
-      if (elAct) elAct.textContent = `${dynamicActiveWorkers} / 4 (SMP)`;
+      if (elAct) elAct.textContent = `1 / 1 (Single-World WASM)`;
     }
 
-    function getWorkerForEntity(entityId) {
-      if (entityId === PLAYER_ID) return "primary_1";
-      let h = 5381;
-      for (let i = 0; i < entityId.length; i++) {
-        h = ((h << 5) + h) + entityId.charCodeAt(i);
-      }
-      const idx = (Math.abs(h) % dynamicActiveWorkers) + 1;
-      return `primary_${idx}`;
+    function getWorkerForEntity(_entityId) {
+      return "primary";
     }
 
     const swarm = {
@@ -1038,7 +1051,7 @@
       nx = Math.max(-BOUNDS_X, Math.min(BOUNDS_X, nx));
       ny = Math.max(-BOUNDS_Y, Math.min(BOUNDS_Y, ny));
       e.tx = nx; e.ty = ny;
-      const nextTargetTick = (Number(e.tick || lastNow.headTick || 0)) + 1;
+      const nextTargetTick = (Number(e.htick || e.tick || 0)) + 1;
       const move = { id: e.id, x: nx, y: ny, target_tick: nextTargetTick, planned_ts: Date.now() };
 
       const wName = getWorkerForEntity(e.id);
@@ -1088,15 +1101,13 @@
 
     function pumpSwarm() {
       updateDynamicWorkers();
-      for (let i = 1; i <= dynamicActiveWorkers; i++) {
-        pumpWorker(`primary_${i}`);
-      }
+      pumpWorker("primary");
     }
 
     function pumpWorker(wName) {
       const wp = workerPipelines[wName];
       if (!wp) return;
-      const maxInflightPerWorker = 2; // Pipelined 2 in-flight writes per worker
+      const maxInflightPerWorker = 2; // Pipelined 2 in-flight writes
       while (wp.inflight < maxInflightPerWorker && wp.queue.length > 0) {
         const batchItems = [];
         while (wp.queue.length > 0 && batchItems.length < 100) {
@@ -1120,7 +1131,7 @@
       const packed_inputs = batchItems.map((item, idx) => {
         const e = entities.get(item.id);
         const owner = (e && e.owner && e.owner !== "anonymous") ? e.owner : `sim_${wName}_worker`;
-        const ttick = item.target_tick || (lastNow.headTick + idx + 1);
+        const ttick = item.target_tick || 0;
         return `${item.id}|${item.x}|${item.y}|${ttick}|${nowTs + idx}|${owner}`;
       }).join(";");
       try {
@@ -1146,8 +1157,6 @@
               e.hy = item.y;
               e.htick = appliedTick;
             }
-            swarm.acked++;
-            swarm.ackTimes.push(performance.now());
           });
           swarm.rttSum += rtt; swarm.rttN++;
           setGateBadge(http === 200 ? "confirmed" : "accepted", body, Math.round(rtt));
@@ -1159,8 +1168,11 @@
 
           if (http === 200) {
             // Immediate L1 Quorum Confirmed (HTTP 200)
+            const nowAck = performance.now();
+            swarm.acked += batchItems.length;
+            for (let k = 0; k < batchItems.length; k++) swarm.ackTimes.push(nowAck);
             const elL1 = document.getElementById("telL1Rtt"); if (elL1) elL1.textContent = `${Math.round(rtt)} ms`;
-            const elRep = document.getElementById("telReplicas"); if (elRep) elRep.textContent = (body.replicas || ["sd1", "sd2"]).join("+") + " [LMDB]";
+            const elRep = document.getElementById("telReplicas"); if (elRep) elRep.textContent = (body.replicas || body.sd_acked_nodes || body.sd_roles || ["sd1", "sd2"]).join("+") + " [LMDB]";
             batchItems.forEach((item) => {
               const e = entities.get(item.id);
               const owner = (e && e.owner && e.owner !== "anonymous") ? e.owner : `sim_${wName}_worker`;
@@ -1222,22 +1234,16 @@
       document.getElementById("stSkipped").textContent = `${swarm.skipped}`;
       if (swarm.rttN > 200) { swarm.rttSum = swarm.rttSum / swarm.rttN * 20; swarm.rttN = 20; }
 
-      // Aggregate Queue & In-Flight across active workers
-      let totalQueued = 0;
-      let totalInflight = 0;
-      for (let i = 1; i <= dynamicActiveWorkers; i++) {
-        const wp = workerPipelines[`primary_${i}`];
-        if (wp) {
-          totalQueued += wp.queue.length;
-          totalInflight += wp.inflight;
-        }
-      }
+      // Aggregate Queue & In-Flight on single-world Primary
+      const wp = workerPipelines["primary"];
+      const totalQueued = wp ? wp.queue.length : 0;
+      const totalInflight = wp ? wp.inflight : 0;
 
       // Update Pure Live Telemetry Grid
       const elQueue = document.getElementById("telQueue");
       if (elQueue) elQueue.textContent = `${totalQueued} queued`;
       const elInflight = document.getElementById("telInflight");
-      if (elInflight) elInflight.textContent = `${totalInflight} / ${dynamicActiveWorkers * 2}`;
+      if (elInflight) elInflight.textContent = `${totalInflight} / 2`;
       const elLag = document.getElementById("telLag");
       if (elLag) elLag.textContent = `${lastNow.lag || 0} ticks`;
       const elComp = document.getElementById("telCompacted");
@@ -1322,7 +1328,12 @@
 
     async function spawnBots(count = 35) {
       if (!discoveredPrimaryUrl) return;
-      appendLog(`Spawning ${count} simulated bots across multi-worker pool...`);
+      appendLog(`Spawning ${count} simulated bots on primary...`);
+
+      for (const id of simIds()) entities.delete(id);
+      pendingSwarmBatches.length = 0;
+      if (workerPipelines["primary"]) workerPipelines["primary"].queue = [];
+
       const items = [];
       const nowTs = Date.now();
       for (let i = 1; i <= count; i++) {
@@ -1332,29 +1343,26 @@
         items.push({ id, x, y, owner: `bot_${i}_signer` });
       }
 
-      updateDynamicWorkers();
-
-      // Partition spawned bots by their assigned worker
-      const workerBatches = {};
-      items.forEach(it => {
-        const wName = getWorkerForEntity(it.id);
-        if (!workerBatches[wName]) workerBatches[wName] = [];
-        workerBatches[wName].push(it);
-      });
+      updateDynamicWorkers(count);
 
       try {
-        await Promise.all(Object.entries(workerBatches).map(async ([wName, wItems]) => {
-          const packed_inputs = wItems.map((it, idx) => `${it.id}|${it.x}|${it.y}|${idx + 1}|${nowTs + idx}|${it.owner}`).join(";");
-          await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/${wName}/push/output~message@1.0`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
-            cache: "no-store",
-            body: JSON.stringify({ action: "Write-Batch", packed_inputs, ts: nowTs, flush: true })
-          });
-          wItems.forEach(it => upsertEntity({ id: it.id, x: it.x, y: it.y, tick: 1, owner: it.owner }));
-        }));
+        const packed_inputs = items.map((it, idx) => `${it.id}|${it.x}|${it.y}|0|${nowTs + idx}|${it.owner}`).join(";");
+        const res = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output~message@1.0`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+          cache: "no-store",
+          body: JSON.stringify({ action: "Write-Batch", packed_inputs, ts: nowTs, flush: true })
+        });
+        const raw = await res.json().catch(() => ({}));
+        const body = unwrapBody(raw);
+        const appliedTick = Number((body && (body.head_tick || body.tick_to || body.tick)) || 1);
+        const repConfirmed = Number((body && (body.confirmed_tick ?? body.tick)) || 0);
+        if (repConfirmed > 0) {
+          workerReplicatedTicks["primary"] = Math.max(workerReplicatedTicks["primary"] || 0, repConfirmed);
+        }
+        items.forEach(it => upsertEntity({ id: it.id, x: it.x, y: it.y, tick: appliedTick, owner: it.owner }));
         seedBotSchedule();
-        appendLog(`<span class="ack">${count} bots spawned and distributed across ${dynamicActiveWorkers} active workers!</span>`);
+        appendLog(`<span class="ack">${count} bots spawned on Primary single-world state!</span>`);
       } catch (e) {
         appendLog(`<span class="err">Failed spawning bots: ${e.message}</span>`);
       }
@@ -1364,12 +1372,11 @@
       for (const id of [...entities.keys()]) {
         if (id !== PLAYER_ID) entities.delete(id);
       }
+      pendingSwarmBatches.length = 0;
       recomputeColors();
       renderLegend();
       swarm.queue = [];
-      for (let i = 1; i <= MAX_PRIMARY_WORKERS; i++) {
-        workerPipelines[`primary_${i}`].queue = [];
-      }
+      if (workerPipelines["primary"]) workerPipelines["primary"].queue = [];
       updateDynamicWorkers();
       appendLog(`Arena cleared. Only <strong>${PLAYER_ID}</strong> remains.`);
     }
@@ -1432,27 +1439,15 @@
       }
     }
 
-    // Robustly query authoritative replicas (SD1 and SD2 duplicate node)
-    // for the target entity shard to find the authoritative point with the HIGHEST confirmed tick.
+    // Robustly query authoritative replicas (SD1 and SD2)
+    // for the target entity to find the authoritative point with the HIGHEST confirmed tick.
     async function fetchAuthoritativePointFromReplicas(id) {
-      const targets = [];
       const sd1 = discoveredSd1Url || clusterUrl(8735);
       const sd2 = discoveredSd2Url || clusterUrl(8736);
-
-      if (id === PLAYER_ID) {
-        // player_red is deterministically routed to worker 1
-        targets.push({ url: sd1, role: "sd1_1", name: "sd1" });
-        targets.push({ url: sd2, role: "sd2_1", name: "sd2" });
-        targets.push({ url: sd1, role: "sd1", name: "sd1" });
-        targets.push({ url: sd2, role: "sd2", name: "sd2" });
-      } else {
-        const wName = getWorkerForEntity(id);
-        const wIdx = wName.replace("primary_", "");
-        targets.push({ url: sd1, role: `sd1_${wIdx}`, name: "sd1" });
-        targets.push({ url: sd2, role: `sd2_${wIdx}`, name: "sd2" });
-        targets.push({ url: sd1, role: "sd1", name: "sd1" });
-        targets.push({ url: sd2, role: "sd2", name: "sd2" });
-      }
+      const targets = [
+        { url: sd1, role: "sd1", name: "sd1" },
+        { url: sd2, role: "sd2", name: "sd2" },
+      ];
 
       // Query both slot-free /now (instant <20ms) and /push with sensible timeout
       const promises = [];
@@ -1544,25 +1539,14 @@
       return best;
     }
 
-    // Query snapshots across both SD1 and SD2 (duplicate node) and merge points by highest tick
+    // Query snapshots across both SD1 and SD2 and merge points by highest tick
     async function fetchAuthoritativeSnapshotsFromReplicas() {
-      const targets = [];
       const sd1 = discoveredSd1Url || clusterUrl(8735);
       const sd2 = discoveredSd2Url || clusterUrl(8736);
-      const workersToFetch = Math.max(4, dynamicActiveWorkers);
-
-      // Prioritize worker 1
-      targets.push({ url: sd1, role: "sd1_1", name: "sd1" });
-      targets.push({ url: sd2, role: "sd2_1", name: "sd2" });
-
-      for (let i = 2; i <= workersToFetch; i++) {
-        targets.push({ url: sd1, role: `sd1_${i}`, name: "sd1" });
-        targets.push({ url: sd2, role: `sd2_${i}`, name: "sd2" });
-      }
-
-      // Add base replicas as fallback
-      targets.push({ url: sd1, role: "sd1", name: "sd1" });
-      targets.push({ url: sd2, role: "sd2", name: "sd2" });
+      const targets = [
+        { url: sd1, role: "sd1", name: "sd1" },
+        { url: sd2, role: "sd2", name: "sd2" },
+      ];
 
       const promises = targets.map(t =>
         fetchWithTimeout(`${t.url}/~node-process@1.0/${t.role}/push/output/body`, {
@@ -1662,6 +1646,7 @@
         // Query database specifically for existing player coordinates on relog/refresh
         let existingPoint = null;
         let confirmedReplica = "sd";
+        let clusterReachable = false;
 
         // 1. Direct targeted Read-Point across BOTH SD1 and duplicate node SD2 (picks newest tick)
         try {
@@ -1669,13 +1654,14 @@
           if (bestCandidate && bestCandidate.point) {
             existingPoint = bestCandidate.point;
             confirmedReplica = bestCandidate.replica_name || "sd";
+            clusterReachable = true;
           }
         } catch (_ignore) {}
 
-        // 2. Fallback check Primary_1 RAM Read-Point
+        // 2. Fallback check Primary RAM Read-Point
         if (!existingPoint && discoveredPrimaryUrl) {
           try {
-            const readRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/push/output/body`, {
+            const readRes = await fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output/body`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
@@ -1689,6 +1675,7 @@
               })
             });
             if (readRes.ok) {
+              clusterReachable = true;
               const parsed = unwrapBody(await readRes.json());
               if (parsed && parsed.status === "ok" && parsed.point) {
                 existingPoint = parsed.point;
@@ -1702,6 +1689,9 @@
         if (!existingPoint) {
           try {
             const snapData = await fetchAuthoritativeSnapshotsFromReplicas();
+            if (snapData && Array.isArray(snapData.replicas) && snapData.replicas.length > 0) {
+              clusterReachable = true;
+            }
             if (snapData && Array.isArray(snapData.points)) {
               const found = snapData.points.find(p => (Array.isArray(p) ? p[0] : p.id) === PLAYER_ID);
               if (found) {
@@ -1746,8 +1736,8 @@
             `[Tick #${confirmedPos.tick}]`
           );
           pollClusterState();
-        } else if (lastVerifiedPos && (lastVerifiedPos.tick > 0 || lastVerifiedPos.x !== 0 || lastVerifiedPos.y !== 0)) {
-          // Preserve valid verified state from memory across reconnections / relogs
+        } else if (!clusterReachable && lastVerifiedPos && (lastVerifiedPos.tick > 0 || lastVerifiedPos.x !== 0 || lastVerifiedPos.y !== 0)) {
+          // Cluster nodes unreachable: preserve verified state from memory across temporary disconnect
           confirmedPos = { ...lastVerifiedPos };
           headPos = { ...confirmedPos };
           targetPos = { x: confirmedPos.x, y: confirmedPos.y };
@@ -1761,10 +1751,11 @@
             `Position preserved from verified in-memory state: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> [Tick #${confirmedPos.tick}]`
           );
         } else {
-          // Check local persistent cache before assuming the player is brand new
           let cachedPos = null;
-          try { cachedPos = JSON.parse(localStorage.getItem("hb_player_pos") || "null"); } catch (_) {}
-          if (cachedPos && (cachedPos.tick > 0 || cachedPos.x !== 0 || cachedPos.y !== 0)) {
+          if (!clusterReachable) {
+            try { cachedPos = JSON.parse(localStorage.getItem("hb_player_pos") || "null"); } catch (_) {}
+          }
+          if (!clusterReachable && cachedPos && (cachedPos.tick > 0 || cachedPos.x !== 0 || cachedPos.y !== 0)) {
             confirmedPos = { x: Number(cachedPos.x), y: Number(cachedPos.y), tick: Number(cachedPos.tick || 0) };
             lastVerifiedPos = { ...confirmedPos };
             headPos = { ...confirmedPos };
@@ -1778,13 +1769,14 @@
             appendLog(
               `Position restored from local persistent cache: <code>(${confirmedPos.x}, ${confirmedPos.y})</code> [Tick #${confirmedPos.tick}]`
             );
-          } else if (!isRelog) {
-            // Truly new player: only initialize at (0, 0) on fresh launch when no prior state exists
+          } else {
+            // Truly new or wiped reachable cluster: initialize cleanly at (0, 0) tick 0
             confirmedPos = { x: 0, y: 0, tick: 0 };
             lastVerifiedPos = { x: 0, y: 0, tick: 0 };
             headPos = { x: 0, y: 0, tick: 0 };
             targetPos = { x: 0, y: 0 };
             renderPos = { x: 0, y: 0 };
+            trail = [{ x: 0, y: 0, tick: 0 }];
             try { localStorage.removeItem("hb_player_pos"); } catch (_) {}
             await writeCoordinate(0, 0, true);
           }
@@ -1838,7 +1830,7 @@
         // 3. Fallback to Primary RAM only if both SD1 and SD2 are completely unreachable
         if (!sdPoint && discoveredPrimaryUrl) {
           try {
-            const pRes = await fetchWithTimeout(`${discoveredPrimaryUrl}/~node-process@1.0/primary_1/now/results~message@1.0/output/body`, {
+            const pRes = await fetchWithTimeout(`${discoveredPrimaryUrl}/~node-process@1.0/primary/now/results~message@1.0/output/body`, {
               headers: { "Accept": "application/json", ...NO_CACHE_HEADERS },
               cache: "no-store"
             }, 3000);
@@ -1904,7 +1896,9 @@
         } catch (_) {}
 
         candidates.sort((a, b) => b.tick - a.tick);
-        const winner = candidates.find(c => c.tick > 0) || candidates[0];
+        const authoritativeCandidates = candidates.filter(c => c.replica !== "last_verified" && c.replica !== "local_cache");
+        const pool = authoritativeCandidates.length > 0 ? authoritativeCandidates : candidates;
+        const winner = pool.find(c => c.tick > 0) || pool[0];
         if (winner && winner.point) {
           confirmedPos = { x: Number(winner.point.x || 0), y: Number(winner.point.y || 0), tick: Number(winner.tick || 0) };
           lastVerifiedPos = { ...confirmedPos };
@@ -1970,6 +1964,7 @@
         // Cancel in-flight writes
         isWriting = false;
         queuedMove = null;
+        pendingPlayerWrites.length = 0;
 
         // 1. Re-discover Genesis topology (read-only sync, never resets confirmed state)
         await discoverFromGenesis(true);
@@ -2102,16 +2097,28 @@
 
         // Centralized zero-overhead SD replication verification in pollNow (zero extra sockets!)
         if (body && body.batch_id) {
-          pendingPlayerWrites.push({
-            batchId: body.batch_id,
-            targetTick: headTick,
-            repTick,
-            t0,
-            l0Rtt,
-            nx: Number(nx),
-            ny: Number(ny),
-            isInit
-          });
+          const prev = pendingPlayerWrites.length > 0 ? pendingPlayerWrites[pendingPlayerWrites.length - 1] : null;
+          if (prev && (prev.batchId === body.batch_id || headTick <= prev.targetTick)) {
+            prev.batchId = body.batch_id;
+            prev.targetTick = Math.max(prev.targetTick, headTick);
+            prev.repTick = repTick;
+            prev.t0 = t0;
+            prev.l0Rtt = l0Rtt;
+            prev.nx = Number(nx);
+            prev.ny = Number(ny);
+            prev.isInit = isInit;
+          } else {
+            pendingPlayerWrites.push({
+              batchId: body.batch_id,
+              targetTick: headTick,
+              repTick,
+              t0,
+              l0Rtt,
+              nx: Number(nx),
+              ny: Number(ny),
+              isInit
+            });
+          }
         }
       } catch (err) {
         setGateBadge("error", {});
@@ -2226,7 +2233,7 @@
     }
 
     let isPollingCluster = false;
-    // Backstage Inspector: polls Primary Worker 1 (:8734), SD1_1 (:8735), SD2_1 (:8736), and Arbit (:8737)
+    // Backstage Inspector: polls Primary (:8734), SD1 (:8735), SD2 (:8736), and Arbit (:8737)
     async function pollClusterState() {
       if (isPollingCluster) return;
       isPollingCluster = true;
@@ -2237,26 +2244,22 @@
         const sd2Url = discoveredSd2Url || clusterUrl(8736);
         const arbitUrl = discoveredArbitUrl || clusterUrl(8737);
 
-        const [pRes, sd1Res, sd2Res, arbitRes, sd1BaseRes, sd2BaseRes] = await Promise.allSettled([
-          fetchProcessBody(pUrl, "primary_1"),
-          fetchProcessBody(sd1Url, "sd1_1"),
-          fetchProcessBody(sd2Url, "sd2_1"),
-          fetchProcessBody(arbitUrl, "arbit"),
+        const [pRes, sd1Res, sd2Res, arbitRes] = await Promise.allSettled([
+          fetchProcessBody(pUrl, "primary"),
           fetchProcessBody(sd1Url, "sd1"),
-          fetchProcessBody(sd2Url, "sd2")
+          fetchProcessBody(sd2Url, "sd2"),
+          fetchProcessBody(arbitUrl, "arbit")
         ]);
 
         const pState = pRes.status === "fulfilled" ? pRes.value : null;
         const sd1State = sd1Res.status === "fulfilled" ? sd1Res.value : null;
         const sd2State = sd2Res.status === "fulfilled" ? sd2Res.value : null;
         const arbitState = arbitRes.status === "fulfilled" ? arbitRes.value : null;
-        const sd1Base = sd1BaseRes.status === "fulfilled" ? sd1BaseRes.value : null;
-        const sd2Base = sd2BaseRes.status === "fulfilled" ? sd2BaseRes.value : null;
 
-        const sd1Point = (sd1State && sd1State.point) ? normalizePointEntry(sd1State.point) : ((sd1Base && sd1Base.point) ? normalizePointEntry(sd1Base.point) : null);
-        const sd2Point = (sd2State && sd2State.point) ? normalizePointEntry(sd2State.point) : ((sd2Base && sd2Base.point) ? normalizePointEntry(sd2Base.point) : null);
-        const sd1LastTick = (sd1State && (sd1State.last_tick != null || sd1State.tick != null)) ? Number(sd1State.last_tick ?? sd1State.tick) : ((sd1Base && (sd1Base.last_tick != null || sd1Base.tick != null)) ? Number(sd1Base.last_tick ?? sd1Base.tick) : null);
-        const sd2LastTick = (sd2State && (sd2State.last_tick != null || sd2State.tick != null)) ? Number(sd2State.last_tick ?? sd2State.tick) : ((sd2Base && (sd2Base.last_tick != null || sd2Base.tick != null)) ? Number(sd2Base.last_tick ?? sd2Base.tick) : null);
+        const sd1Point = (sd1State && sd1State.point) ? normalizePointEntry(sd1State.point) : null;
+        const sd2Point = (sd2State && sd2State.point) ? normalizePointEntry(sd2State.point) : null;
+        const sd1LastTick = (sd1State && (sd1State.last_tick != null || sd1State.tick != null)) ? Number(sd1State.last_tick ?? sd1State.tick) : null;
+        const sd2LastTick = (sd2State && (sd2State.last_tick != null || sd2State.tick != null)) ? Number(sd2State.last_tick ?? sd2State.tick) : null;
 
         const setNodeStatusTag = (id, online, onlineText, offlineText) => {
           const el = document.getElementById(id);
@@ -2275,8 +2278,8 @@
         };
 
         setNodeStatusTag("tagPrimary", !!pState, "Online (Pure RAM Ingest)", "Offline");
-        setNodeStatusTag("tagSd1", !!(sd1State || sd1Base), "Online (LMDB Disk Verified)", "Offline");
-        setNodeStatusTag("tagSd2", !!(sd2State || sd2Base), "Online (LMDB Disk Verified [Duplicate Node])", "Offline");
+        setNodeStatusTag("tagSd1", !!sd1State, "Online (LMDB Disk Verified)", "Offline");
+        setNodeStatusTag("tagSd2", !!sd2State, "Online (LMDB Disk Verified [Duplicate Node])", "Offline");
         setNodeStatusTag("tagArbit", !!arbitState, "Online (Checkpoint)", "Offline");
 
         const findPlayer = (state) => {
@@ -2313,7 +2316,7 @@
           if (elSdTargets) elSdTargets.textContent = (pState.sd_targets || []).join(", ");
         }
 
-        const activeSd1 = sd1State || sd1Base;
+        const activeSd1 = sd1State;
         if (sd1Point || activeSd1) {
           const sd1Coord = sd1Point ? `(${sd1Point.x}, ${sd1Point.y}) [rep #${sd1Point.tick}]` : findPlayer(activeSd1);
           const elSd1Coord = document.getElementById("inspSd1Coord");
@@ -2327,7 +2330,7 @@
           if (elSd1Arbit) elSd1Arbit.textContent = (activeSd1 && activeSd1.arbit_target) || "—";
         }
 
-        const activeSd2 = sd2State || sd2Base;
+        const activeSd2 = sd2State;
         if (sd2Point || activeSd2) {
           const sd2Coord = sd2Point ? `(${sd2Point.x}, ${sd2Point.y}) [rep #${sd2Point.tick}]` : findPlayer(activeSd2);
           const elSd2Coord = document.getElementById("inspSd2Coord");

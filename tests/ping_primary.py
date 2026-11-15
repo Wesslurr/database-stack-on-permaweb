@@ -15,7 +15,7 @@ def ping_primary():
         "flush": True
     }
     req = urllib.request.Request(
-        "http://127.0.0.1:8734/~node-process@1.0/primary_1/push/output~message@1.0",
+        "http://127.0.0.1:8734/~node-process@1.0/primary/push/output~message@1.0",
         data=json.dumps(p).encode(),
         headers={"Content-Type": "application/json"}
     )

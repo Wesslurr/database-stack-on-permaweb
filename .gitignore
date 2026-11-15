@@ -7,9 +7,14 @@ __pycache__/
 # HyperBEAM cluster runtime data
 _build/
 logs/
+cache-mainnet/
+hyperbeam-key.json
 engine/data/*/lmdb/
 engine/data/*/*.log
 engine/data/*/erl_crash.dump
+
+# Rust WASM build artifacts
+engine/processes/*/target/
 
 # Agent and IDE artifacts
 .agent/

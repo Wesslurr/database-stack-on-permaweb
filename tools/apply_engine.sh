@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Rebuild node configs from the Lua sources and restart the HyperBEAM workers.
-# ArLocal is left untouched. Use after editing engine/processes/*.lua.
+# Rebuild Rust WASM engines (primary, shared_data), node configs (genesis, arbit Lua),
+# and restart the HyperBEAM workers. ArLocal is left untouched.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,6 +11,21 @@ HB_SRC="$PROJECT_ROOT/HyperBEAM"
 [ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
 
 python3 "$PROJECT_ROOT/tools/build_configs.py" >/dev/null || exit 1
+
+(
+    cd "$PROJECT_ROOT/engine/processes/primary"
+    cargo build --target wasm32-unknown-unknown --release >/dev/null 2>&1 || true
+)
+(
+    cd "$PROJECT_ROOT/engine/processes/shared_data"
+    cargo build --target wasm32-unknown-unknown --release >/dev/null 2>&1 || true
+)
+
+# Sync custom native HyperBEAM preloaded devices before compile
+if [ -f "$PROJECT_ROOT/engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" ]; then
+    cp "$PROJECT_ROOT/engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" \
+       "$HB_SRC/src/preloaded/arweave/dev_l1_checkpoint.erl"
+fi
 
 # Ensure HyperBEAM is compiled once to avoid shared _build races among workers
 (cd "$HB_SRC" && rebar3 compile >/dev/null 2>&1 || true)

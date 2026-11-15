@@ -1,47 +1,47 @@
 {
   "cluster": {
     "computed_slot_size": {
-      "primary": 602929,
-      "sd1": 363549,
-      "sd2": 363522
+      "primary": 49545,
+      "sd1": 25875,
+      "sd2": 25875
     },
     "lmdb_mb": {
-      "arbit": 1.0,
+      "arbit": 3.0,
       "genesis": 1.0,
       "primary": 1.0,
-      "sd1": 38.0,
-      "sd2": 39.0
+      "sd1": 30.0,
+      "sd2": 26.0
     },
     "roots_equal": true,
     "rss_mb": {
-      "genesis": 118.7,
-      "primary": 545.0,
-      "sd1": 146.2,
-      "sd2": 150.8
+      "genesis": 130.6,
+      "primary": 200.3,
+      "sd1": 188.5,
+      "sd2": 178.6
     },
     "state": {
       "primary": {
         "entities": 153,
         "http": 200,
-        "state_root": "0xd0bd42387a785de9404e1a30c462baf1bcd04d5805a5245d4ef578c52f4c1d4c",
-        "tick": 368
+        "state_root": "0x76d97aeb49a23545d9eed040d9333b5fa7c062f2d33c5986d3c9da5424f02ca2",
+        "tick": 404
       },
       "sd1": {
         "entities": 153,
         "http": 200,
-        "state_root": "0xd0bd42387a785de9404e1a30c462baf1bcd04d5805a5245d4ef578c52f4c1d4c",
-        "tick": 368
+        "state_root": "0x76d97aeb49a23545d9eed040d9333b5fa7c062f2d33c5986d3c9da5424f02ca2",
+        "tick": 404
       },
       "sd2": {
         "entities": 153,
         "http": 200,
-        "state_root": "0xd0bd42387a785de9404e1a30c462baf1bcd04d5805a5245d4ef578c52f4c1d4c",
-        "tick": 368
+        "state_root": "0x76d97aeb49a23545d9eed040d9333b5fa7c062f2d33c5986d3c9da5424f02ca2",
+        "tick": 404
       }
     }
   },
-  "generated_at": "2026-11-07T13:08:23+0700",
-  "git_commit": "c3bcf80",
+  "generated_at": "2026-11-15T10:55:59+0700",
+  "git_commit": "3b3e48c",
   "notes": [
     "keep-alive single connection per node; loopback only",
     "write_202 measures L0 accept, write_confirm measures L1 (poll Batch-Status)",
@@ -50,93 +50,91 @@
   ],
   "paths": {
     "advance": {
-      "max_ms": 585.454,
-      "min_ms": 83.699,
+      "max_ms": 198.814,
+      "min_ms": 46.75,
       "n": 40,
-      "p50_ms": 238.948,
-      "p90_ms": 510.945,
-      "p99_ms": 585.454,
+      "p50_ms": 91.859,
+      "p90_ms": 164.12,
+      "p99_ms": 198.814,
       "status_codes": [
         202
       ]
     },
     "cold_hydrate": {
-      "max_ms": 170.737,
-      "min_ms": 147.678,
+      "max_ms": 69.755,
+      "min_ms": 42.337,
       "n": 20,
-      "p50_ms": 156.344,
-      "p90_ms": 160.254,
-      "p99_ms": 170.737,
+      "p50_ms": 50.696,
+      "p90_ms": 66.094,
+      "p99_ms": 69.755,
       "status_codes": [
         200
       ]
     },
     "now": {
-      "max_ms": 23.115,
-      "min_ms": 11.504,
+      "max_ms": 21.789,
+      "min_ms": 8.687,
       "n": 150,
-      "p50_ms": 12.218,
-      "p90_ms": 13.345,
-      "p99_ms": 18.478,
+      "p50_ms": 10.331,
+      "p90_ms": 12.351,
+      "p99_ms": 20.91,
       "status_codes": [
         200
       ]
     },
     "read_push": {
-      "max_ms": 220.681,
-      "min_ms": 76.496,
+      "max_ms": 224.337,
+      "min_ms": 81.212,
       "n": 60,
-      "p50_ms": 84.12,
-      "p90_ms": 92.618,
-      "p99_ms": 135.432,
-      "response_bytes_p50": 11624,
+      "p50_ms": 86.758,
+      "p90_ms": 99.557,
+      "p99_ms": 111.931,
+      "response_bytes_p50": 11891,
       "status_codes": [
         200
       ]
     },
     "relay_call_sd": {
-      "max_ms": 245.008,
-      "min_ms": 147.897,
+      "max_ms": 51.796,
+      "min_ms": 39.342,
       "n": 60,
-      "p50_ms": 158.394,
-      "p90_ms": 169.191,
-      "p99_ms": 203.476,
-      "response_bytes_p50": 8561,
+      "p50_ms": 42.15,
+      "p90_ms": 45.767,
+      "p99_ms": 48.889,
+      "response_bytes_p50": 0,
       "status_codes": [
         200
       ]
     },
     "sd_direct": {
-      "max_ms": 117.464,
-      "min_ms": 72.669,
+      "max_ms": 242.764,
+      "min_ms": 90.188,
       "n": 60,
-      "p50_ms": 81.578,
-      "p90_ms": 86.696,
-      "p99_ms": 104.067,
-      "response_bytes_p50": 11358,
+      "p50_ms": 100.664,
+      "p90_ms": 126.717,
+      "p99_ms": 142.43,
+      "response_bytes_p50": 11296,
       "status_codes": [
         200
       ]
     },
     "throughput": {
       "flush_serial": {
-        "confirmed_per_s": 0.52,
-        "elapsed_s": 32.5,
+        "confirmed_per_s": 7.81,
+        "elapsed_s": 3.07,
         "latency": {
-          "max_ms": 15964.58,
-          "min_ms": 672.523,
+          "max_ms": 1064.394,
+          "min_ms": 526.436,
           "n": 24,
-          "p50_ms": 1325.795,
-          "p90_ms": 15771.361,
-          "p99_ms": 15964.58,
+          "p50_ms": 969.512,
+          "p90_ms": 1002.398,
+          "p99_ms": 1064.394,
           "status_codes": [
-            200,
-            202
+            200
           ]
         },
         "status_counts": {
-          "200": 17,
-          "202": 7
+          "200": 24
         },
         "writers": 8,
         "writes": 24
@@ -149,109 +147,109 @@
       ],
       "sweep": [
         {
-          "accepted": 62,
-          "accepted_per_s": 9.22,
+          "accepted": 165,
+          "accepted_per_s": 26.16,
           "applied_before": 154,
-          "confirm_ratio": 1.0,
-          "confirmed_inputs": 62,
-          "confirmed_per_s": 8.41,
-          "drain_s": 0.64,
+          "confirm_ratio": 0.0242,
+          "confirmed_inputs": 4,
+          "confirmed_per_s": 0.59,
+          "drain_s": 0.44,
           "drained": true,
           "latency": {
-            "max_ms": 1064.741,
-            "min_ms": 241.135,
-            "n": 62,
-            "p50_ms": 845.417,
-            "p90_ms": 1004.956,
-            "p99_ms": 1063.105,
+            "max_ms": 549.22,
+            "min_ms": 93.737,
+            "n": 165,
+            "p50_ms": 290.764,
+            "p90_ms": 381.714,
+            "p99_ms": 456.144,
             "status_codes": [
               202
             ]
           },
           "offered_per_s": 50.0,
-          "queue_peak": 9,
+          "queue_peak": 8,
           "seconds": 6.0,
           "status_counts": {
-            "202": 62
+            "202": 165
           },
           "writers": 8
         },
         {
-          "accepted": 55,
-          "accepted_per_s": 8.08,
-          "applied_before": 216,
-          "confirm_ratio": 1.0,
-          "confirmed_inputs": 55,
-          "confirmed_per_s": 7.22,
-          "drain_s": 0.81,
+          "accepted": 175,
+          "accepted_per_s": 28.2,
+          "applied_before": 158,
+          "confirm_ratio": 0.0,
+          "confirmed_inputs": 0,
+          "confirmed_per_s": 0.0,
+          "drain_s": 0.46,
           "drained": true,
           "latency": {
-            "max_ms": 1318.662,
-            "min_ms": 264.252,
-            "n": 55,
-            "p50_ms": 931.027,
-            "p90_ms": 1235.232,
-            "p99_ms": 1246.919,
+            "max_ms": 394.826,
+            "min_ms": 64.723,
+            "n": 175,
+            "p50_ms": 278.931,
+            "p90_ms": 357.817,
+            "p99_ms": 389.103,
             "status_codes": [
               202
             ]
           },
           "offered_per_s": 100.0,
-          "queue_peak": 9,
+          "queue_peak": 8,
           "seconds": 6.0,
           "status_counts": {
-            "202": 55
+            "202": 175
           },
           "writers": 8
         },
         {
-          "accepted": 54,
-          "accepted_per_s": 7.91,
-          "applied_before": 271,
-          "confirm_ratio": 1.0,
-          "confirmed_inputs": 54,
-          "confirmed_per_s": 7.17,
-          "drain_s": 0.7,
+          "accepted": 150,
+          "accepted_per_s": 23.34,
+          "applied_before": 158,
+          "confirm_ratio": 0.0933,
+          "confirmed_inputs": 14,
+          "confirmed_per_s": 2.03,
+          "drain_s": 0.46,
           "drained": true,
           "latency": {
-            "max_ms": 1246.259,
-            "min_ms": 270.93,
-            "n": 54,
-            "p50_ms": 978.885,
-            "p90_ms": 1167.668,
-            "p99_ms": 1236.686,
+            "max_ms": 605.2,
+            "min_ms": 91.248,
+            "n": 150,
+            "p50_ms": 339.747,
+            "p90_ms": 434.471,
+            "p99_ms": 550.128,
             "status_codes": [
               202
             ]
           },
           "offered_per_s": 200.0,
-          "queue_peak": 5,
+          "queue_peak": 8,
           "seconds": 6.0,
           "status_counts": {
-            "202": 54
+            "202": 150
           },
           "writers": 8
         }
       ]
     },
     "write_202": {
-      "max_ms": 220.72,
-      "min_ms": 70.15,
+      "max_ms": 108.147,
+      "min_ms": 54.459,
       "n": 60,
-      "p50_ms": 136.677,
-      "p90_ms": 187.534,
-      "p99_ms": 216.989,
+      "p50_ms": 64.208,
+      "p90_ms": 89.81,
+      "p99_ms": 107.853,
       "status_codes": [
         202
       ]
     },
     "write_confirm": {
-      "max_ms": 544.966,
-      "min_ms": 226.977,
+      "max_ms": 406.262,
+      "min_ms": 200.275,
       "n": 40,
-      "p50_ms": 381.246,
-      "p90_ms": 430.624,
-      "p99_ms": 544.966,
+      "p50_ms": 274.05,
+      "p90_ms": 353.503,
+      "p99_ms": 406.262,
       "status_codes": [
         200
       ]

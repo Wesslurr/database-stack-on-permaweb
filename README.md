@@ -1,121 +1,134 @@
-# HyperStack: Real-Time State Engine
+﻿# HyperStack: Real-Time State Engine
 
 > **High-Frequency Real-Time State Engine & Distributed Replication Stack on AO Compute & Arweave Permaweb**
 
 [![Project](https://img.shields.io/badge/Project-HyperStack-orange)](https://github.com/Wesslurr/database-stack-on-permaweb)
-[![Status](https://img.shields.io/badge/Status-Beta%20%2F%20Empirical%20Ceiling%20Reached-brightgreen)](idea.md)
+[![Status](https://img.shields.io/badge/Status-Final%20Milestone%20%2F%20Empirical%20Ceiling%20Verified-brightgreen)](idea.md)
 [![Permaweb](https://img.shields.io/badge/Arweave-Permaweb-black?logo=arweave)](https://arweave.org/)
 [![AO Compute](https://img.shields.io/badge/AO-Compute-blue)](https://ao.g8way.io/)
-[![HyperBEAM](https://img.shields.io/badge/HyperBEAM-Erlang%20OTP%2026-red)](https://github.com/permaweb/hyperbeam)
-[![Tests](https://img.shields.io/badge/Live%20Cluster%20Tests-64%2F64%20Passing-brightgreen)](tests/)
-[![Throughput](https://img.shields.io/badge/Throughput-700%20w%2Fs%20(Single)%20%7C%203%2C000%2B%20w%2Fs%20(SMP%20Turbo)-blueviolet)](#honest-empirical-performance-benchmarks)
-[![Zero-Error](https://img.shields.io/badge/Reliability-50%2C000%2B%20Writes%20%2F%200%20Errors-success)](#honest-empirical-performance-benchmarks)
+[![HyperBEAM](https://img.shields.io/badge/HyperBEAM-Erlang%20OTP%2027-red)](https://github.com/permaweb/hyperbeam)
+[![Tests](https://img.shields.io/badge/Live%20Cluster%20Tests-100%2F100%20Passing%20%2B%2014%20Rust%20Unit-brightgreen)](tests/)
+[![Latency](https://img.shields.io/badge/p50%20Latency-10.3ms%20%2Fnow%20%7C%2064.2ms%20L0%20%7C%20274.1ms%20L1-blueviolet)](#honest-empirical-performance-benchmarks)
+[![Quorum](https://img.shields.io/badge/Quorum-Honest%202--of--3%20Verified%20ACK-success)](#honest-empirical-performance-benchmarks)
 
 ---
 
 > [!IMPORTANT]
-> ### 🏆 Architectural Ceiling & Local Latency Transparency Notice
-> **HyperStack** is an experimental high-frequency state engine and distributed replication stack built natively on **HyperBEAM, AO Compute, and Arweave L1**.
+> ### 🏆 Final Project Milestone & Empirical Transparency Notice
+> **HyperStack** is a completed experimental prototype of a high-frequency real-time state engine and distributed replication stack built natively on **HyperBEAM, AO Compute, Rust WebAssembly, and Arweave L1**.
 >
-> - **Empirical Maximum Achieved:** This implementation represents the **maximum achievable performance ceiling** on this hardware and architecture without compromising the canonical 2-of-3 quorum replication contract or resorting to fake client-side prediction.
-> - **100% Localhost Multi-Node Topology:** Everything runs locally on a single physical host across isolated ports (`:1984`, `:8733`, `:8734`, `:8735`, `:8736`, `:8737`, `:8080`). All measurements represent raw local loopback and inter-process communication without wide-area network (WAN) jitter.
-> - **Zero Guessing / Honest Quorum Contract (Non-Negotiable):** An HTTP `200` with `ack: "replicated"` is returned **only after an authoritative Shared Data replica (SD1 or SD2) commits the write to LMDB disk** and echoes a matching `batch_id`, integer `tick`, and canonical state root. HTTP `202` indicates acceptance into volatile Primary RAM (`Head Tick`). If quorum cannot be reached, the Primary strictly rejects with `503 quorum_unavailable` and state roots remain unchanged.
-> - **Zero VIP Lanes:** Every entity—including the interactive player circle (`player_red`) and automated swarm entities—traverses the exact same canonical batch ingest and replication pipeline.
-> - **Verified Disk State Scale:** Actively verified under live sustained write load up to **>1.6 GB** (`sd1`) and **>1.4 GB** (`sd2`) on raw LMDB disk (`data.mdb`), with 100% cryptographic state root parity across all nodes.
+> - **Final Result Achieved So Far:** This codebase and benchmark baseline represent the **final consolidated architecture and empirical performance ceiling** achieved on this stack without relaxing the honest 2-of-3 quorum persistence contract or faking confirmations on the client.
+> - **100% Localhost Multi-Node Topology:** All 6 cluster nodes (`:1984`, `:8733`, `:8734`, `:8735`, `:8736`, `:8737`) and the interactive client server (`:8080`) run locally on a single physical host over loopback (`127.0.0.1`), measuring raw local IPC/HTTP behavior without WAN latency or packet loss.
+> - **Software-Level SD Quorum Persistence Contract (Zero Guessing):** An HTTP `200` (`ack: "replicated"`) is promoted **only after Primary + authoritative Shared Data replicas (`sd1`, `sd2`) deterministically re-verify the WASM transition, commit the slot to local LMDB (`hb_store_lmdb`, `sync: false`), and match `batch_id`, `tick`, and canonical `state_root`**. HTTP `202` means L0 acceptance into volatile Primary RAM (`hb_store_volatile`) only. Quorum loss strictly returns `503 quorum_unavailable` without mutating confirmed state.
+> - **Zero VIP Lanes:** Both interactive player moves (`player_red`) and automated swarm entities traverse the exact same canonical `Write-Batch` ingest, WASM execution, and 2-of-3 LMDB quorum pipeline.
 
 ---
 
 ## Hardware & Environment Test Specifications
 
-All benchmarks, failure-injection suites, and swarm simulations in this repository were conducted under the following exact specification:
+All raw micro-benchmarks (`tools/bench_baseline.json`), live 120-bot Circle Tests, unit tests, and failure-injection suites were executed on the following sanitized consumer test machine specification (with all personal identifiers, hostnames, paths, network addresses, and hardware serials omitted):
 
-| Parameter | Specification & Environment |
+| Parameter | Verified Test Machine & Runtime Specification |
 | :--- | :--- |
-| **Physical Host Machine** | Windows 11 Physical Host, Intel/AMD 4 Physical CPU Cores (8 Schedulers/Threads), 16 GB+ DDR4/DDR5 RAM |
-| **Virtualization Subsystem** | WSL2 (Ubuntu 22.04 LTS, Linux Kernel 6.6.x x86_64) |
-| **Erlang / OTP Runtime** | Erlang/OTP 26 [`erts-14.2.5.2`], BEAM emulator with 4 active SMP schedulers (`+S 4:4`) |
-| **Storage Engines** | Primary: `hb_store_volatile` (100% Pure RAM L0)<br>SD1 & SD2: Dual LMDB (`data.mdb`, slot-1 page storage)<br>Arbit: LMDB / RocksDB Consensus Store |
-| **Settlement Layer (L1)** | ArLocal Permaweb Gateway (Docker Container on `:1984`) |
-| **Transport & Ingest Protocol** | HTTP/1.1 Cowboy REST Server with TCP Keep-Alive and pipelined streaming |
-| **Client Interface** | Web client (`index.html`) served by `tools/game_client/serve.py` on `:8080` with threaded `/metrics` telemetry |
+| **Physical Host OS** | Microsoft Windows 10 Pro (64-bit) |
+| **Processor (CPU)** | Intel(R) Core(TM) i5-6500 CPU @ 3.20 GHz — **4 Physical Cores / 4 Threads** (x86_64) |
+| **Memory (RAM)** | **8 GB Physical Host RAM** (`7.9 GiB` usable; **`3.8 GiB`** allocated to WSL2 guest) |
+| **Primary Disk** | `256 GB` 2.5" SATA SSD |
+| **Linux Subsystem** | WSL2 (`Ubuntu 26.04 LTS`, Linux Kernel `6.18.58.1-microsoft-standard-WSL2` x86_64) |
+| **Erlang / OTP Runtime** | **Erlang/OTP 27** (`erts-15.2.7.4`), 5 independent BEAM VMs (`+S 4:4 +A 4 +MBas aobf`) |
+| **WASM & Tooling** | Rust `1.98.1` (`wasm32-unknown-unknown`), Python `3.14.4`, Docker `29.1.3`, tmux `3.6` |
+| **Storage Engines** | `primary`: `hb_store_volatile` (pure RAM, `store_ms: 0`)<br>`sd1` & `sd2`: `hb_store_lmdb` (`sync: False`, `snapshot_slots = 20`)<br>`genesis` & `arbit`: `hb_store_lmdb` |
+| **Settlement Layer (L1)** | ArLocal Docker Container (`:1984`) + Native HyperBEAM Device (`~l1-checkpoint@1.0` on `hb-arbit :8737` using `tx@1.0` + `arweave@2.9`) |
+| **Transport & Client** | HTTP/1.1 Cowboy REST + keep-alive proxy (`tools/game_client/serve.py` on `:8080`) |
 
 ---
 
 ## Honest Empirical Performance Benchmarks
 
-### 1. High-Frequency Swarm Telemetry (Empirical Live Test)
+### 1. Raw Micro-Benchmark Latency & Cluster Footprint (`tools/bench_baseline.json`)
 
-Under sustained live entity walk simulation on the 4-core physical machine, the engine achieved the following verified metrics:
+Measured against a fresh single-world cluster (`FRESH=1 ./tools/apply_engine.sh`, commit `3b3e48c`) using HTTP/1.1 persistent keep-alive connections on local loopback (`127.0.0.1`):
+
+| Operation Path | Samples (`n`) | min | p50 | p90 | p99 | max | Architectural Role |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| **`/now` (RAM State Read)** | 150 | 8.69 ms | **10.33 ms** | 12.35 ms | 20.91 ms | 21.79 ms | Direct BEAM ETS live-state fast-path (`dev_process`) |
+| **`write_202` (L0 Ingest Accept)** | 60 | 54.46 ms | **64.21 ms** | 89.81 ms | 107.85 ms | 108.15 ms | Volatile RAM ingress (`store_ms: 0`, ETS `ProcessJson` cache, slim `device-stack`) |
+| **`write_confirm` (L1 LMDB Quorum)** | 40 | 200.28 ms | **274.05 ms** | 353.50 ms | 406.26 ms | 406.26 ms | Full 2-of-3 quorum commit chain (Primary + SD1/SD2 LMDB + `Ack`) |
+| **`advance` (Batch Tick Finalize)** | 40 | 46.75 ms | **91.86 ms** | 164.12 ms | 198.81 ms | 198.81 ms | `Advance-Batch` tick increment + lazy `sync_head_points` |
+| **`relay_call_sd` (Primary → SD1)** | 60 | 39.34 ms | **42.15 ms** | 45.77 ms | 48.89 ms | 51.80 ms | Parallel inter-process actor relay (`dev_push`) |
+| **`cold_hydrate` (State Hydration)** | 20 | 42.34 ms | **50.70 ms** | 66.09 ms | 69.76 ms | 69.76 ms | Full-state hydration read transfer |
+| **`read_push` (Primary Snapshot)** | 60 | 81.21 ms | **86.76 ms** | 99.56 ms | 111.93 ms | 224.34 ms | Full state snapshot read (`11,891 B` p50 response) |
+| **`sd_direct` (Direct SD LMDB Read)** | 60 | 90.19 ms | **100.66 ms** | 126.72 ms | 142.43 ms | 242.76 ms | Raw SD LMDB node read (`11,296 B` p50 response) |
+
+> **Baseline vs. Final Optimization Gains:** Across optimization waves (WASM `ALLOC_MAGIC` header allocator, ETS `ProcessJson` cache, `hb_store_volatile` `store_ms: 0`, lazy `sync_head_points`, parallel `dev_push`, and trimmed `device-stack`), raw latency dropped **`3.22x` on `write_202`** (`207 ms → 64.21 ms`), **`2.26x` on `write_confirm`** (`620 ms → 274.05 ms`), **`2.21x` on `advance`** (`203 ms → 91.86 ms`), and **`3.58x` on `relay_call_sd`** (`151 ms → 42.15 ms`).
+
+### 2. Raw Serial Quorum Floor, Open-Loop Sweep & Node Footprint (`tools/bench_baseline.json`)
 
 ```text
-======================= LIVE SWARM TELEMETRY =======================
-  Simulation Mode             : Continuous Random Walk (Full Ingest Stream)
-  Active Entities             : 35 to 120 Concurrent Entity Bots + Player
-  Move Stream Interval        : 20 ms per entity
-  Single-Worker Saturated ACK : 700.0 writes/second (ACKed)
-  Consecutive Writes / Errors : 51,173 Total ACKed / 0 Errors (100% Success)
-  Coalesced / Skipped Writes  : 0 (Continuous Sequential Queue Streaming)
-  Batch Train Size            : 100 entities/batch (Adaptive Dynamic)
-  Avg Write RTT (L0+L1 Quorum): 374 ms
-  Dual-Watermark Lag          : 0 to 4 ticks (Head vs Replicated)
-  LMDB Quorum Disk Growth     : SD1 > 1.6 GB  |  SD2 > 1.4 GB
-  Verified Disk State Root    : 0x6c4b204afe02dc542507c80194d806c730a46a427850...
+======================= BENCHMARK CLUSTER SUMMARY ==================
+  Topology Mode               : Single-World Rust WASM (`primary`, `sd1`, `sd2`) + Lua (`genesis`, `arbit`)
+  flush_serial (24 writes)    : 7.81 confirmed/s across 8 writers (24/24 HTTP 200, 3.07s elapsed, p50 969.51 ms, min 526.44 ms)
+  Open-Loop Sweep (no flush)  : 50 / 100 / 200 offered/s -> 26.16 / 28.20 / 23.34 accepted/s (202, queue_peak = 8)
+                                Sweep p50 latency: 290.76 ms / 278.93 ms / 339.75 ms (all bursts drained cleanly)
+  Computed Slot Footprint     : primary = 49,545 B  |  sd1 = 25,875 B  |  sd2 = 25,875 B
+  Node RAM RSS                : primary = 200.3 MB  |  sd1 = 188.5 MB  |  sd2 = 178.6 MB  |  genesis = 130.6 MB
+  LMDB Disk Size (post-bench) : sd1 = 30.0 MB | sd2 = 26.0 MB | arbit = 3.0 MB | primary/genesis = 1.0 MB
+  Converged Cluster State     : tick = 404 | entities = 153 | roots_equal = true
+  Canonical State Root        : 0x76d97aeb49a23545d9eed040d9333b5fa7c062f2d33c5986d3c9da5424f02ca2
 ====================================================================
 ```
 
-* **Single BEAM Worker Saturation:** On a single physical core, one BEAM process actor (`primary_1`) comfortably ingests and replicates **700.0 w/s** with 100 ent/batch before CPU saturation.
-* **Elastic Multi-Worker SMP Capacity (4 Schedulers):** When load scales to `reqWps >= 1200` or `botCount >= 60`, the auto-scaler activates all **4 Primary Workers** (`primary_1` .. `primary_4`), distributing load across all physical CPU cores to deliver **2,800 to 3,300+ w/s** aggregate capacity.
-* **Zero Desync Across 50,000+ Writes:** Through over 51,000 continuous mutations, the state roots of Primary, SD1, and SD2 remained cryptographically identical with zero desynchronization.
+* **Zero Desync Under Burst Load:** At completion of all benchmark paths (`tick 404`, `153` entities), `primary`, `sd1`, and `sd2` converged with `roots_equal: true`.
 
-### 2. Micro-Benchmark Path Latency Baseline (`tools/bench_baseline.json`)
+### 3. Live Circle Test Performance & Clarity (120-Bot Stress Run @ `20 ms`)
 
-Measured across 150 consecutive operations with HTTP keep-alive:
+Tested interactively on the live web client (`http://127.0.0.1:8080`) with **120+ moving bots**, **`Move interval: 20 ms`**, **`Step size: 30 px`**, and **`Max in-flight writes: 2`**:
 
-| Operation Path | p50 Latency | p90 Latency | p99 Latency | Architectural Role |
-| :--- | ---: | ---: | ---: | :--- |
-| **`/now` (RAM Point Read)** | **12.0 ms** | 12.4 ms | 12.6 ms | Ultra-fast volatile state lookup (no new slot) |
-| **`write_202` (L0 Ingest Accept)** | **207 ms** | 256 ms | 379 ms | Volatile RAM ingress + Lua dispatch |
-| **`write_confirm` (L1 LMDB Quorum)**| **620 ms** | 663 ms | 703 ms | Full 2-of-3 quorum commit chain (Primary + SD disk) |
-| **`advance` (Batch Tick Finalize)** | **203 ms** | 228 ms | 264 ms | Tick increment and Merkle root calculation |
-| **`read_push` (State Snapshot)** | **80 ms** | 82 ms | 82 ms | Full state slot snapshot read |
-| **`relay_call_sd` (Primary → SD1)** | **151 ms** | 155 ms | 158 ms | Inter-process actor relay communication |
-| **`sd_direct` (Direct SD Read)** | **80 ms** | 85 ms | 89 ms | Raw disk node read floor |
+| Live Circle Test Metric | Observed Result | Engineering Explanation |
+| :--- | :--- | :--- |
+| **Requested Write Rate** | **`9,400.0 w/s`** | Client swarm target cadence across active bot entities (`n * 1000 / 20 ms`). |
+| **Achieved (ACKed) Throughput** | **`300.0 w/s`** | `~3 batches/s × 100 ent/batch`. Browser `pumpWorker()` caps batches at `100` entities (`index.html`), while `Primary` processes 1 quorum batch at a time (`~274–333 ms` cycle). |
+| **Total ACKed / Errors** | **`93,712 / 0`** | **0% error rate** across nearly 100k sustained L1-confirmed entity mutations. |
+| **Coalesced (Skipped)** | **`677,536`** | Client ring-buffer (`wp.queue > 500`) drops superseded moves before sending (`Pipeline Queue: 501 queued`), protecting server `MAX_QUEUE = 4096` (`Compacted Discards: 0`). |
+| **Batch Train Size** | **`100 ent/batch`** | Client UI cap (`batchItems.length < 100`); engine `Primary` itself supports up to `MAX_BATCH_INPUTS = 256` per batch (`~750 w/s` headroom at the same batch rate). |
+| **Avg Write RTT / L0 RAM Ingest** | **`286 ms` avg** (`136–297 ms` L0) | End-to-end browser `Write-Batch` (`flush: true`) round-trip into Primary L0 RAM under 2/2 pipelined load. |
+| **L1 Quorum ACK (UI Polling)** | **`1,694 ms` – `2,098 ms`** | Browser L1 HUD telemetry includes waiting behind `Active In-Flight: 2 / 2` in `Primary`'s serial quorum lock + `pollNow()` (`80 ms`) `/now` confirmation cadence—not raw single-batch latency (`274.05 ms` p50). |
+| **Dual-Watermark & Quorum** | **`#2100 (Head: #2104)` · `Lag: 4 ticks`** | With `2` concurrent client batches and `TICKS_PER_BATCH = 2`: 1 batch is `in_flight` to `sd1+sd2 [LMDB]` (+2 ticks) and 1 batch waits in queue (+2 ticks). |
+
+### 4. What This Final Result Proves
+
+1. **Verifiable Multi-Node WASM State Execution Works on Consumer Hardware:** On a single 4-core/4-thread CPU (`i5-6500`) with only **`3.8 GiB` WSL2 RAM** running 5 HyperBEAM BEAM VMs + ArLocal concurrently, HyperBEAM + Rust WASM delivers **`~10.3 ms` RAM reads**, **`~64.2 ms` L0 ingest**, and **`~274.1 ms` cryptographic 2-of-3 LMDB quorum commits** with **100% state-root parity**.
+2. **Sustained Overload Does Not Break Consistency or Crash Nodes:** Pushing **`9,400.0 w/s`** through the Circle Test produced **`93,712` ACKed writes with `0` errors and `0` server queue discards**, proving client ring-buffer coalescing + `Primary` batching absorbs extreme burst traffic cleanly.
+3. **Clear Software-Level SD Quorum Persistence Contract:** `Primary` executes head writes in volatile RAM (`hb_store_volatile`) while `SD1 + SD2` run deterministic WASM verification and store state slots in **`hb_store_lmdb` (`sync: False`, `snapshot_slots = 20`)**. This protects against single-process/node crashes and forged ACKs (`409`) without paying physical `fsync` stalls on every slot, leaving permanent cryptographic anchoring to the native `hb-arbit` `~l1-checkpoint@1.0` (`tx@1.0` + `arweave@2.9`) → ArLocal L1 pipeline.
+4. **Empirical Architectural Ceiling Is Exactly Identified:** The bottleneck is **not** Rust WASM execution (`~12–20 ms`), nor raw reads (`10.33 ms`). The ceiling (~3–3.6 batches/sec, `300.0 w/s` at `100 ent/batch`) comes from **(a)** `QuorumState::first_pending()` enforcing a strict **1-in-flight batch lock** between `Primary` and `SD`, **(b)** HyperBEAM HTTP/Erlang slot orchestration per quorum hop, and **(c)** **single-world execution (`1/1`)**. Moving past this milestone cleanly points to multi-batch `Primary ↔ SD` pipelining and horizontal multi-world sharding.
 
 ---
 
 ## Architectural Evolution: Why the Architecture Changed
 
-During development, the engine transitioned from a naive single-actor design to a **Multi-Actor Elastic Hybrid Architecture**. Below is the rationale behind each major architectural pivot:
+During profiling and remediation, the stack eliminated runtime bottlenecks and premature 10-world sharding in favor of a **Single-World Rust WASM (`wasm-64@1.0`) + Fast-Path HyperBEAM** architecture:
 
 ```text
 +--------------------------------------------------------------------------------------------------+
 |                                    ARCHITECTURAL EVOLUTION                                       |
 +------------------------------------------------+-------------------------------------------------+
-| OLD ARCHITECTURE (Legacy README Design)        | NEW ARCHITECTURE (Current Production Engine)    |
+| PREVIOUS BOTTLENECKS (Identified & Removed)    | CURRENT PRODUCTION ARCHITECTURE (Verified)      |
 +------------------------------------------------+-------------------------------------------------+
-| 1. Stop-and-Wait Client Ingest:                | 1. Continuous Pipelined Queue Streaming:        |
-|    Client froze on every move until full L1    |    Moves stream sequentially into per-worker     |
-|    quorum round-trip finished. Capped at       |    queues (`wp.queue`). Adaptive batch trains    |
-|    ~40-110 w/s regardless of hardware.         |    (up to 100 ent/batch) deliver 700-3,300+ w/s. |
+| 1. Premature 10-Shard World Loop:              | 1. Consolidated Single-World Topology:          |
+|    `build_configs.py` & `index.html` split state|   One authoritative Primary (`:8734`) paired    |
+|    across `primary_1..10`, `sd1_1..10`,        |   with `sd1` (`:8735`), `sd2` (`:8736`),        |
+|    `sd2_1..10`, fragmenting batches & swarm.   |   `genesis` (`:8733`), and `arbit` (`:8737`).   |
 +------------------------------------------------+-------------------------------------------------+
-| 2. Single-Actor Primary Process:               | 2. Multi-Actor Worker Sharding:                 |
-|    One global Erlang process (`primary`)       |    Primary partitioned into multiple worker      |
-|    processed all messages serially. Mailbox    |    actors (`primary_1` .. `primary_10`), mapping |
-|    congested heavily under swarm load.         |    cleanly to Erlang BEAM SMP schedulers.        |
+| 2. WASM Memory Leaks & Duplicate Payloads:     | 2. Header-Backed WASM Allocator & Slim JSON:    |
+|    No-op `wasm_free` leaked linear memory on   |    16-byte header allocator (`ALLOC_MAGIC`) frees|
+|    every call, plus duplicate `data` fields &  |    inputs/outputs cleanly; `handle_ack` omits   |
+|    O(N) `points` blobs in `handle_ack`.        |    O(N) arrays and adds `http_status` + `epoch`.|
 +------------------------------------------------+-------------------------------------------------+
-| 3. Single-Watermark Tick Progression:          | 3. Dual-Watermark Architecture:                 |
-|    Client tick depended strictly on disk ACK,  |    Sub-millisecond L0 RAM Ingest (`Head Tick`)   |
-|    making UI laggy and unresponsive during     |    decoupled from L1 Quorum Disk Persistence     |
-|    heavy background batch writes.              |    (`Replicated Tick`), verified via LMDB.       |
-+------------------------------------------------+-------------------------------------------------+
-| 4. Windows IPv6 Loopback Delay:                | 4. Deterministic IPv4 Loopback & Reverse Proxy: |
-|    Requests to `localhost` hit Windows IPv6    |    Enforced `127.0.0.1` binding and internal     |
-|    fallback penalty, adding 400ms-2,400ms      |    proxying for ArLocal L1, eliminating DNS      |
-|    DNS resolution latency.                     |    penalties and browser CORS errors.            |
-+------------------------------------------------+-------------------------------------------------+
-| 5. Silent Inspector Polling Freeze:            | 5. Resilient Multi-Tier Cluster Telemetry:      |
-|    Dashboard polling halted during swarm runs, |    Dedicated `serve.py` with threaded `/metrics`,|
-|    and inspector froze on any single error.    |    `Promise.allSettled`, and live status tags.   |
+| 3. Bundler & Cache Cliff Penalties:            | 3. Targeted HyperBEAM Runtime Fast-Paths:       |
+|    Dead `127.0.0.1:1` bundler uploads fired    |    Skipped dead uploads in `dev_scheduler_server`|
+|    on every slot; ETS caches wiped all keys on |    bounded `4096/256` ETS eviction; `dev_process` |
+|    threshold; sequential outbox + HTTP proxy.  |    `/now` ETS fast-path; parallel `dev_push` &  |
+|                                                |    unsigned `dev_json_iface` + keep-alive proxy.|
 +------------------------------------------------+-------------------------------------------------+
 ```
 
@@ -134,21 +147,20 @@ During development, the engine transitioned from a naive single-actor design to 
                                           v
 +------------------------+  Batch Pipeline Trains   +-----------------------------------------------+
 |      GAME CLIENT       | ======================> |              2. PRIMARY NODE (:8734)           |
-| (Red Circle WASD UI)   |                         |  Multi-Actor Sharding across BEAM Schedulers  |
-| * Dual-Watermark HUD   | <====================== |  +-----------------------------------------+  |
-| * Real-time Telemetry  |      Confirmed ACKs     |  | primary_1 | primary_2 | ... | primary_10  |  |
-| * Zero Guessing        |    (verified 200 only)  |  +-----------------------------------------+  |
-+------------------------+                         |  Storage: Volatile RAM (hb_store_volatile)    |
-                                                   +-----------------------------------------------+
+| (Red Circle WASD UI)   |                         |   Single-World Rust WASM (`primary_engine`)   |
+| * Dual-Watermark HUD   | <====================== |   Devices: json-iface@1.0 + wasm-64@1.0       |
+| * Real-time Telemetry  |      Confirmed ACKs     |   Quorum Gate, Epoch Guard & Head/Disk State  |
+| * Zero Guessing        |    (verified 200 only)  |   Storage: Volatile RAM (hb_store_volatile)   |
++------------------------+                         +-----------------------------------------------+
                                                                   |                 |
                                                      Sync Quorum  |                 | Async Hot Standby
                                                      Commit       |                 | Replication
                                                                   v                 v
                                  +------------------------------+   +------------------------------+
                                  |      3A. SHARED DATA 1       |   |      3B. SHARED DATA 2       |
-                                 |  (hb-sd-1 :8735 | RAM+LMDB)  |   |  (hb-sd-2 :8736 | RAM+LMDB)  |
+                                 |  (hb-sd-1 :8735 | Rust WASM) |   |  (hb-sd-2 :8736 | Rust WASM) |
                                  |  Verified disk state root    |   |  Quorum witness & replica    |
-                                 |  Storage: LMDB > 1.6 GB      |   |  Storage: LMDB > 1.4 GB      |
+                                 |  Storage: LMDB (hb_store_lmdb)|  |  Storage: LMDB (hb_store_lmdb)|
                                  +------------------------------+   +------------------------------+
                                                 |
                                                 | Async Checkpoint (every 100 ticks)
@@ -160,7 +172,7 @@ During development, the engine transitioned from a naive single-actor design to 
                                  |   Anti-double-spend ledger & state roots     |
                                  +----------------------------------------------+
                                                         |
-                                                        | Block Finality (GET /mine)
+                                                        | Native ~l1-checkpoint@1.0 (tx@1.0 + arweave@2.9) + GET /mine
                                                         v
                                  +----------------------------------------------+
                                  |            5. ARWEAVE L1 PERMAWEB            |
@@ -181,92 +193,80 @@ During development, the engine transitioned from a naive single-actor design to 
 
 ## Node Topology
 
-The cluster operates across 6 isolated execution environments:
+The cluster operates cleanly across 6 isolated execution nodes with zero external Python signing sidecars:
 
-| Node | Port | Process Name | Role & Storage Mode |
+| Node / Service | Port | Process Name | Role & Storage Mode |
 | :--- | :--- | :--- | :--- |
 | **`arlocal`** | `:1984` | Arweave L1 Gateway | Docker container running native ArLocal permaweb gateway. |
-| **`hb-genesis`** | `:8733` | Genesis Process | Constitutional bootstrap authority; advertises topology and cluster epoch. |
-| **`hb-primary`** | `:8734` | Primary Workers (`primary_1`..`10`)| Multi-actor 2D state engine; volatile RAM (`hb_store_volatile`). |
-| **`hb-sd-1`** | `:8735` | Shared Data Replica 1 | LMDB disk store (`data.mdb` > 1.6 GB); primary quorum confirming replica. |
-| **`hb-sd-2`** | `:8736` | Shared Data Replica 2 | LMDB disk store (`data.mdb` > 1.4 GB); quorum witness and hot standby. |
-| **`hb-arbit`** | `:8737` | Arbit Consensus Process | Consensus gatekeeper, official state root anchor, and L1 block finalizer. |
+| **`hb-genesis`** | `:8733` | `genesis` (Lua `lua@5.3a`) | Constitutional bootstrap authority; advertises topology and cluster epoch on LMDB. |
+| **`hb-primary`** | `:8734` | `primary` (WASM `wasm-64@1.0`) | Single-world 2D state engine; volatile RAM (`hb_store_volatile`), L0 ingress & 2-of-3 quorum coordinator. |
+| **`hb-sd-1`** | `:8735` | `sd1` (WASM `wasm-64@1.0`) | Shared Data Replica 1 on LMDB disk (`hb_store_lmdb`); primary quorum confirming replica. |
+| **`hb-sd-2`** | `:8736` | `sd2` (WASM `wasm-64@1.0`) | Shared Data Replica 2 on LMDB disk (`hb_store_lmdb`); quorum witness and failover replica. |
+| **`hb-arbit`** | `:8737` | `arbit` (Lua `lua@5.3a` + `~l1-checkpoint@1.0`) | Consensus gatekeeper, native Arweave Format 2 TX signer/settler (`tx@1.0` + `arweave@2.9`), and slot pruning coordinator on LMDB. |
 
 ---
 
-## Custom Native AO Device: `hyperstack@1.0`
+## Rust WASM Execution & HyperBEAM Runtime Fast-Paths
 
-In addition to standard AO-Core devices (`~process@1.0`, `~lua@5.3a`, `~wasm64@1.0`, `~patch@1.0`, `~relay@1.0`), HyperStack introduces a custom native Erlang device: **`hyperstack@1.0`** ([`engine/devices/hyperstack/dev_hyperstack.erl`](file:///home/weslur/database/engine/devices/hyperstack/dev_hyperstack.erl)).
+Instead of executing high-frequency game mutations inside an interpreted Lua VM or maintaining an unmaintained custom Erlang NIF device, HyperStack executes deterministic state transitions inside compiled **Rust WebAssembly** modules (`wasm32-unknown-unknown`) on HyperBEAM's native `~json-iface@1.0` + `~wasm-64@1.0` stack (`primary_engine.wasm` & `sd_engine.wasm`), backed by targeted BEAM runtime optimizations.
 
-### 1. Architectural Motivation
-Standard AO Lua smart contracts run inside an isolated deterministic sandbox (`luerl`). While excellent for consensus safety, high-frequency 2D state processing (hundreds of spatial entity moves per second) creates significant overhead if every read/write requires marshaling full state across the VM boundary. 
-
-`hyperstack@1.0` bridges native BEAM concurrency and cryptographic primitives directly into the AO execution pipeline without violating AO-Core determinism.
-
-### 2. Core Capabilities & Primitives
+### 1. Rust WASM Process Architecture ([`engine/processes/`](engine/processes/))
 
 ```text
 +----------------------------------------------------------------------------------------------------+
-|                                 NATIVE DEVICE ARCHITECTURE: hyperstack@1.0                         |
+|                         RUST WASM ENGINE ARCHITECTURE (wasm-64@1.0 + json-iface@1.0)               |
 +----------------------------------------------------------------------------------------------------+
 |                                                                                                    |
-|  1. ZERO-COPY NAMED C-ETS STORAGE                                                                   |
-|     * hyperstack_points  : Concurrent point storage; sub-microsecond point reads (<0.01 ms).       |
-|     * hyperstack_shards  : 32 pre-computed shard hashes for instant Merkle aggregation.            |
-|     * hyperstack_meta    : Dual-watermark ticks (Head vs Replicated) and active sequences.         |
-|     * hyperstack_batches : In-flight batch history for out-of-order reconciliation.                |
+|  1. HEADER-BACKED WASM ALLOCATOR (`ALLOC_MAGIC` 16-Byte Header)                                    |
+|     * `wasm_malloc` / `wasm_free` manage linear WASM memory safely across `handle()` calls.        |
+|     * Frees `proc_ptr`, `msg_ptr`, and prior `LAST_RES_PTR` on every transition—zero memory leak.  |
 |                                                                                                    |
-|  2. C-NIF OPENSSL SHA-256 MERKLE TREE                                                              |
-|     * Computes canonical 32-shard Merkle tree root in < 0.02 ms via native OpenSSL C-NIF.          |
-|     * 100% cryptographic parity with Lua 5.3 FIPS 180-4 reference implementation.                  |
+|  2. SLIM ACK & JSON OUTPUT CONTRACT                                                                |
+|     * Omits redundant wrapper `data` envelopes; returns canonical JSON state directly.             |
+|     * `handle_ack` returns `{status, batch_id, tick, state_root, http_status:200, epoch}` without  |
+|       copying O(N) `points` or `head_points` arrays on every replica confirmation.                 |
 |                                                                                                    |
-|  3. DETERMINISTIC OUT-OF-ORDER TICK SORTING                                                        |
-|     * ERTS C-BIF list sorting orders concurrent inputs deterministically before applying deltas.   |
-|     * Prunes stale ticks outside the lag horizon, preserving strict monotonic ordering.             |
+|  3. DYNAMIC GENESIS TOPOLOGY SYNCHRONIZATION (`SyncTopology`)                                      |
+|     * Primary (`primary/src/ingress.rs`) & SD (`shared_data/src/ingress.rs`) accept live           |
+|       `sd_urls`, `arbit_url`, and `primary_url` topology updates without hardcoded cluster URLs.   |
 |                                                                                                    |
-|  4. DUAL-WATERMARK HONESTY STATE MACHINE                                                           |
-|     * Head Tick       : Optimistic in-memory execution in Primary RAM for 60fps client responsiveness. |
-|     * Replicated Tick : Authoritative disk state root confirmed via 2-of-3 quorum on SD replicas.  |
-|                                                                                                    |
-|  5. PARALLEL FAN-OUT REPLICATION & COMPACTION                                                      |
-|     * Asynchronous fan-out casts to SD replicas with circuit breaker and delta replay buffer.      |
+|  4. HONEST QUORUM, EPOCH GUARD & OUTBOX REPLAY (`primary/src/quorum.rs`)                           |
+|     * Requires matching `batch_id`, integer `tick`, canonical 32-byte `state_root`, and `epoch`.   |
+|     * Rejects forged ACKs with `409 ack_mismatch` / `409 epoch_mismatch`; returns `503` on loss.   |
 |                                                                                                    |
 +----------------------------------------------------------------------------------------------------+
 ```
 
-### 3. HyperPATH Endpoints & Public API
+### 2. Primary Action Contract (`POST /push` via `~json-iface@1.0`)
 
-The device exports public handlers exposed over HTTP/HyperPATH:
+| Action / Path | Role & Description |
+| :--- | :--- |
+| `Write-Point` / `Write-Batch` | Ingests 2D point updates into Primary L0 RAM with client-signer ownership & bounds checks. |
+| `Advance-Batch` | Closes pending batch, advances tick, computes canonical root, and dispatches fan-out to SD1/SD2. |
+| `Ack` | Verifies replica `batch_id`, `tick`, `state_root`, and `epoch`; promotes L1 confirmation on 2-of-3 quorum. |
+| `Sync-Topology` | Dynamically configures `sd_targets`, `arbit_url`, or replica `primary_url` after Genesis discovery. |
+| `Read-Point` / `Read-All` / `Snapshot` | Reads entity state directly from Primary or Replica canonical tables. |
+| `GET /~process@1.0/now/...` | Fast RAM read of current live process state without allocating a new scheduler slot. |
 
-| Endpoint | Method | Role & Description |
-| :--- | :--- | :--- |
-| `POST /~hyperstack@1.0/init_engine` | POST | Initializes named singleton ETS tables and storage owners. |
-| `POST /~hyperstack@1.0/compute_input` | POST | Native ingress pipeline: input parsing, sorting, ETS update, and candidate root. |
-| `GET  /~hyperstack@1.0/get_point?id=...`| GET | Sub-microsecond direct point lookup from ETS. |
-| `GET  /~hyperstack@1.0/get_nearby` | GET | Spatial radius query returning nearby entities within radius `r`. |
-| `GET  /~hyperstack@1.0/get_watermarks` | GET | Returns live `{head_tick, replicated_tick, replication_lag}`. |
-| `POST /~hyperstack@1.0/commit_quorum_sync` | POST | Synchronous 2-of-3 quorum verification pipeline across replicas. |
-| `POST /~hyperstack@1.0/replica_commit` | POST | Replica-side disk commit, shard updating, and root verification. |
-| `GET  /~hyperstack@1.0/candidate_root` | GET | Reads current 32-shard canonical Merkle state root. |
+### 3. Targeted HyperBEAM Runtime Optimizations ([`HyperBEAM/src/`](HyperBEAM/src/))
 
-### 4. Decoupled Source Code Separation & Forge Lifecycle
-
-To maintain complete architectural hygiene:
-- **Zero Submodule Pollution:** Upstream `HyperBEAM` is tracked as an untouched external git submodule (`HyperBEAM/`).
-- **Isolated Custom Source:** All custom device code is version-controlled exclusively inside [`engine/devices/hyperstack/`](file:///home/weslur/database/engine/devices/hyperstack/).
-- **Automated Forge Preload:** During `./start.sh` or `./tools/cluster_up.sh`, custom devices are automatically synced into `HyperBEAM/src/preloaded/hyperstack/`. When `rebar3 compile` executes, HyperBEAM's Forge packager compiles `dev_hyperstack.erl` into `_build/preloaded-store`, generating the signed device specification and implementation archive for `hyperstack@1.0`.
-- **Lua Bridge Patch:** HyperBEAM's Lua VM library is extended via [`engine/devices/patches/dev_lua_lib.patch`](file:///home/weslur/database/engine/devices/patches/dev_lua_lib.patch) to expose `ao.ets_put` and `ao.sha256`, enabling seamless interop between Lua smart contracts and native BEAM tables.
+- **Live `/now` ETS Fast-Path ([`dev_process.erl`](HyperBEAM/src/preloaded/process/dev_process.erl)):** Serves unsigned read-only `/now` queries directly from per-process ETS live state (`dev_process_live_state`) without waiting in scheduler slot resolution.
+- **Unsigned JSON Interface Fast-Path ([`dev_json_iface.erl`](HyperBEAM/src/preloaded/codec/dev_json_iface.erl)):** Encodes unsigned `prep_call/3` JSON payloads directly via `hb_json:encode` with safe fallback to the general path, plus ETS `ProcessJson` caching.
+- **Parallel Push Fan-Out ([`dev_push.erl`](HyperBEAM/src/preloaded/process/dev_push.erl)):** Dispatches multi-target outbox relays concurrently with `spawn_monitor` while preserving deterministic key ordering.
+- **Zero Dead Bundler Uploads ([`dev_scheduler_server.erl`](HyperBEAM/src/preloaded/process/dev_scheduler_server.erl)):** Guards `upload/2` spawns so local non-authority runs skip invalid `127.0.0.1:1` bundler targets.
+- **Bounded ETS Eviction & Volatile Fast-Write ([`dev_scheduler_cache.erl`](HyperBEAM/src/preloaded/process/dev_scheduler_cache.erl), [`lib_process_cache.erl`](HyperBEAM/src/preloaded/process/lib_process_cache.erl), [`lib_process.erl`](HyperBEAM/src/preloaded/process/lib_process.erl)):** Replaces full-table `ets:delete_all_objects` latency cliffs with sliding `(Slot - 4096)` / `256`-entry incremental eviction, and avoids redundant store overhead on volatile nodes.
 
 ---
 
 ## Quick Start Guide
 
 ### Prerequisites
-- Linux or WSL2 (Ubuntu 22.04+ recommended)
-- Erlang/OTP 26+ and Rebar3
+- Linux or WSL2 (Ubuntu 22.04+ / 26.04 LTS)
+- Erlang/OTP 26+ (tested on OTP 27 `erts-15.2.7.4`) and Rebar3
+- Rust toolchain with `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`)
 - Docker (for ArLocal)
-- Python 3.10+
-- tmux
+- Python 3.10+ (standard library for tools/tests/UI proxy)
+- `tmux` and `psmisc` (`fuser`)
 
 ### 1. Clone Repository & Setup
 ```bash
@@ -292,7 +292,14 @@ Open your browser at **`http://127.0.0.1:8080/`**.
 - Run the **Swarm Simulation** (+35 Bots, +100 Bots, or **🚀 120 Bots Turbo**).
 - Observe real-time Round-Trip Time (RTT), Dual-Watermark ticks, and the **Backstage Multi-Tier Inspector** displaying live RAM, CPU, and LMDB disk growth.
 
-### 4. Stop Cluster
+### 4. Hard Reset All Circle Test & Cluster Data (Back to Tick #0)
+To completely wipe all LMDB stores (`genesis`, `primary`, `sd1`, `sd2`, `arbit`), ArLocal chain state, and runtime logs so the Circle Test starts cleanly from Tick `#0` with `0` bots:
+```bash
+python3 tools/reset_hard.py --yes --with-ui
+```
+(Omit `--with-ui` to skip launching `serve.py`, or pass `--no-start` to stop and wipe without restarting nodes. Preserves node `wallet.json` files by default.)
+
+### 5. Stop Cluster
 Gracefully shut down all tmux node sessions and stop ArLocal:
 ```bash
 ./tools/cluster_down.sh
@@ -316,7 +323,7 @@ Verifies ArLocal mining, distinct cryptographic node wallets, and direct HTTP ro
 ./tests/test_e2e_connectivity.sh
 ```
 
-### 3. Destructive Failure-Injection Test (36 Checks)
+### 3. Destructive Failure-Injection Test (36/36 Checks Passing)
 Simulates node crashes via tmux: quorum failure `503`, forged ACKs `409`, SD1 failover to SD2, and delta-log rehydration:
 ```bash
 python3 tests/test_failure_modes.py --yes
@@ -334,32 +341,35 @@ Deliberately corrupts the Primary's ACK root/tick verification and ensures the t
 
 ```text
 ├── engine/
-│   ├── config/              # Compiled node configuration manifests (genesis, primary, sd1, sd2, arbit)
+│   ├── config/              # Single-world node manifests (genesis, primary, sd1, sd2, arbit)
 │   ├── data/                # Wallets, LMDB disk environments (data.mdb), and node logs
-│   ├── devices/             # Custom Native AO Devices & VM Integration Patches
-│   │   ├── hyperstack/      # Native Erlang implementation of hyperstack@1.0
-│   │   │   ├── dev_hyperstack.erl # Zero-copy ETS, C-NIF SHA-256 Merkle & dual-watermark engine
-│   │   │   └── README.md    # Dedicated device specification & handler documentation
-│   │   └── patches/         # HyperBEAM VM integration patches (dev_lua_lib.patch)
-│   └── processes/           # Native Lua processes for Primary, Shared Data, and Arbit
-├── HyperBEAM/               # Upstream HyperBEAM Erlang runtime and AO devices (git submodule)
+│   └── processes/           # Process implementations (Rust WASM + Lua authority scripts)
+│       ├── primary/         # Primary WASM engine (`src/{lib,ingress,quorum,optimistic_state,...}.rs` -> `primary_engine.wasm`)
+│       ├── shared_data/     # Shared Data WASM replica (`src/{lib,ingress,verifier,...}.rs` -> `sd_engine.wasm`)
+│       ├── genesis/         # Genesis constitutional authority Lua process
+│       └── arbit/           # Arbit consensus & finality Lua process
+├── HyperBEAM/               # HyperBEAM Erlang runtime with preloaded runtime fast-paths & `~l1-checkpoint@1.0`
 ├── tests/
 │   ├── _harness.py          # Live-cluster test harness and contract invariants
 │   ├── test_e2e_2d_points.py# 30-check ACK contract E2E test suite
 │   ├── test_e2e_connectivity.sh # 34-check cluster interconnect and wallet suite
 │   ├── test_failure_modes.py# 36-check destructive failure-injection suite
-│   └── mutation_ack.sh      # Mutation test enforcing suite sensitivity
+│   └── mutation_ack.sh      # Mutation test enforcing Primary ACK root/tick verification
 ├── tools/
-│   ├── apply_engine.sh      # Rebuild configs and deploy Lua processes (FRESH=1 wipes stores)
-│   ├── bench_engine.py      # 8-path honest baseline benchmark -> tools/bench_baseline.json
-│   ├── build_configs.py     # Deterministic node configuration builder
-│   ├── cluster_up.sh        # Automated cluster launcher (Docker + Tmux)
+│   ├── apply_engine.sh      # Compile WASM + HyperBEAM, rebuild single-world configs, restart cluster (`FRESH=1` wipes stores)
+│   ├── bench_engine.py      # 8-path latency & throughput baseline benchmark -> tools/bench_baseline.json
+│   ├── build_configs.py     # Deterministic single-world configuration builder
+│   ├── client.py            # HyperStack Python client with 2ms polling & `/now` confirmation fast-path
+│   ├── cluster_up.sh        # Automated cluster launcher (Docker ArLocal + 5 HyperBEAM Tmux nodes)
 │   ├── cluster_down.sh      # Cluster teardown script
+│   ├── reset_hard.py        # Full hard data reset tool (wipes LMDB/ArLocal/logs back to Tick #0)
 │   ├── simulate_gameplay.py # Automated gameplay movement simulator
+│   ├── test_profile_detailed.py # Detailed GET `/now` and POST `/push` latency profiler
 │   ├── test_relog_flow.py   # Client relog and state rehydration test
 │   └── game_client/
-│       ├── index.html       # Interactive Red Circle WASD client & Swarm simulator
-│       └── serve.py         # HTTP server with live node telemetry endpoint (/metrics)
+│       ├── index.html       # Single-world interactive WASD client & Swarm simulator
+│       └── serve.py         # HTTP proxy with persistent keep-alive pool & `/metrics` telemetry
+├── start.sh                 # All-in-one WASM builder, HyperBEAM launcher, and Web UI starter
 ├── idea.md                  # Comprehensive architectural specification and design blueprint
 └── README.md                # Project documentation, benchmarks, and architecture guide
 ```

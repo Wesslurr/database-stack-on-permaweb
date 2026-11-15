@@ -122,23 +122,62 @@ def collect_node_metrics():
     return metrics
 
 
+_thread_local = threading.local()
+
+
+def _get_conn(port):
+    port = int(port)
+    conns = getattr(_thread_local, "conns", None)
+    if conns is None:
+        conns = {}
+        _thread_local.conns = conns
+    conn = conns.get(port)
+    if conn is None:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        conns[port] = conn
+    return conn
+
+
+def _reset_conn(port):
+    port = int(port)
+    conns = getattr(_thread_local, "conns", None)
+    if conns and port in conns:
+        try:
+            conns[port].close()
+        except Exception:
+            pass
+        del conns[port]
+
+
 def proxy_request(handler, port, path, method="GET", body=None, headers=None):
     try:
-        conn = http.client.HTTPConnection("127.0.0.1", int(port), timeout=30)
-        req_headers = {}
+        req_headers = {"Connection": "keep-alive"}
         if headers:
             for k, v in headers.items():
                 if k.lower() not in ("host", "content-length", "connection"):
                     req_headers[k] = v
         if body is not None and len(body) > 0:
             req_headers["Content-Length"] = str(len(body))
-        conn.request(method, path, body=body, headers=req_headers)
-        res = conn.getresponse()
-        res_data = res.read()
+
+        res = None
+        res_data = b""
+        for attempt in range(2):
+            conn = _get_conn(port)
+            try:
+                conn.request(method, path, body=body, headers=req_headers)
+                res = conn.getresponse()
+                res_data = res.read()
+                if res.will_close:
+                    _reset_conn(port)
+                break
+            except (http.client.HTTPException, OSError):
+                _reset_conn(port)
+                if attempt == 1:
+                    raise
 
         handler.send_response(res.status)
         for h, v in res.getheaders():
-            if h.lower() not in ("transfer-encoding", "content-encoding", "access-control-allow-origin"):
+            if h.lower() not in ("transfer-encoding", "content-encoding", "access-control-allow-origin", "connection"):
                 handler.send_header(h, v)
         handler.send_header("Access-Control-Allow-Origin", "*")
         handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -148,7 +187,6 @@ def proxy_request(handler, port, path, method="GET", body=None, headers=None):
             handler.wfile.write(res_data)
         except (BrokenPipeError, ConnectionResetError):
             pass
-        conn.close()
     except Exception as e:
         print(f"[Proxy-Error] {method} port={port} path={path}: {e}", flush=True)
         err_msg = json.dumps({"error": str(e), "target_port": port}).encode("utf-8")

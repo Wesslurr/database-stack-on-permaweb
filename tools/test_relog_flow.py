@@ -37,21 +37,29 @@ def test_relog():
         print("  Discovered Primary URL from Genesis:", primary_url)
 
     # Step B: Client fetches existing position from Primary RAM via Read-Point
-    read_req = urllib.request.Request(
-        f'{primary_url}/~node-process@1.0/primary_1/push/output/body',
-        data=json.dumps({'action': 'Read-Point', 'id': 'player_red'}).encode('utf-8'),
-        headers={'Content-Type': 'application/json', 'Accept': 'application/json'}
-    )
-    with urllib.request.urlopen(read_req) as resp:
-        raw = resp.read().decode('utf-8')
-        r = json.loads(raw)
-        if 'body' in r and isinstance(r['body'], str):
-            r = json.loads(r['body'])
-        print("  Read-Point response:", r.get("status"))
-        pt = r.get("point")
-        print("  Restored Coordinates:", f"({pt['x']}, {pt['y']}) [Tick #{pt['tick']}]")
-        assert pt['x'] == 140 and pt['y'] == 80, "Position mismatch on relog!"
-        print("\n[SUCCESS] Relog correctly retrieved latest player coordinates without resetting to (0, 0)!")
+    r = {}
+    pt = None
+    for _ in range(20):
+        read_req = urllib.request.Request(
+            f'{primary_url}/~node-process@1.0/primary_1/push/output/body',
+            data=json.dumps({'action': 'Read-Point', 'id': 'player_red'}).encode('utf-8'),
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json'}
+        )
+        with urllib.request.urlopen(read_req) as resp:
+            raw = resp.read().decode('utf-8')
+            r = json.loads(raw)
+            if 'body' in r and isinstance(r['body'], str):
+                r = json.loads(r['body'])
+            if r.get("status") == "ok" and r.get("point") is not None:
+                pt = r.get("point")
+                break
+        time.sleep(0.1)
+
+    print("  Read-Point response:", r.get("status"))
+    assert pt is not None, f"Point still not found after polling: {r}"
+    print("  Restored Coordinates:", f"({pt['x']}, {pt['y']}) [Tick #{pt['tick']}]")
+    assert pt['x'] == 140 and pt['y'] == 80, "Position mismatch on relog!"
+    print("\n[SUCCESS] Relog correctly retrieved latest player coordinates without resetting to (0, 0)!")
 
 if __name__ == '__main__':
     test_relog()

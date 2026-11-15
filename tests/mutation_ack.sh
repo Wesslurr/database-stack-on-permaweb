@@ -13,15 +13,15 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FILE="$ROOT/engine/processes/primary/primary_process.lua"
-BACKUP="$(mktemp /tmp/opencode/primary_process.XXXXXX.lua)"
+FILE="$ROOT/engine/processes/primary/src/quorum.rs"
+BACKUP="$(mktemp "${TMPDIR:-/tmp}/quorum.XXXXXX.rs")" || exit 2
 
 if ! git -C "$ROOT" diff --quiet -- "$FILE"; then
     echo "[refuse] $FILE has uncommitted changes; commit or stash them first"
     exit 2
 fi
 
-cp "$FILE" "$BACKUP"
+cp "$FILE" "$BACKUP" || exit 2
 
 restore() {
     cp "$BACKUP" "$FILE"
@@ -36,8 +36,8 @@ import sys
 
 path = sys.argv[1]
 src = open(path).read()
-old = "    if claimed_root ~= p.root or claimed_tick ~= p.tick_to then"
-new = "    if false and (claimed_root ~= p.root or claimed_tick ~= p.tick_to) then"
+old = "        if claimed_root != Some(&p.root) || claimed_tick != Some(p.tick_to) {"
+new = "        if false && (claimed_root != Some(&p.root) || claimed_tick != Some(p.tick_to)) {"
 if src.count(old) != 1:
     sys.exit("mutation anchor not found exactly once")
 open(path, "w").write(src.replace(old, new))

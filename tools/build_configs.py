@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
 =============================================================================
-Genesis-Centric Node Configuration Builder (Cryptographic AO + Low-Latency)
+Genesis-Centric Node Configuration Builder (Canonical AO WASM + Lua L1)
 =============================================================================
 1. Reads the master node list directly from `genesis_process.lua` (Single
    Source of Truth).
-2. Spawns worker processes (`primary`, `sd1`, `sd2`, `arbit`) with ONLY
-   `"genesis-url"` injected into their Process Definition Message.
-3. Injects `"requires-sign": True` into every process definition to enforce
-   AO cryptographic process identity across the cluster.
-4. Enforces Tiered Storage & Low-Latency Execution:
+2. Spawns Primary (`primary_engine.wasm`) and Shared Data replicas
+   (`sd_engine.wasm`) on HyperBEAM's canonical WASM stack (`wasi@1.0`,
+   `json-iface@1.0`, `wasm-64@1.0`, `patch@1.0`, `multipass@1.0`) and
+   constitutional processes (`genesis`, `arbit`) on `lua@5.3a`, each with
+   ONLY `"genesis-url"` injected for worker discovery.
+3. Enforces Tiered Storage & Low-Latency Execution:
    - `primary`: 100% Pure RAM (`hb_store_volatile` ONLY across `store`,
      `match-index`, `priv-store`, `attested-store` — ZERO LMDB disk files).
-   - `sd1` & `sd2`: Dual-Tier `hb_store_volatile` (RAM Latest) + `hb_store_lmdb`
-     (Disk Snapshot `process-snapshot-slots = 5`, aligning fsyncs with the
-     Arbit batch checkpoint interval).
+   - `sd1` & `sd2`: Pure LMDB Disk (`hb_store_lmdb` with periodic snapshots
+     `process-snapshot-slots = 20`).
    - Persistent process workers (`process-workers = true`) and zero mainnet
      hook/console-trace overhead.
    - Primary enforces a 64 KiB HTTP body ceiling (`http_max_body`) so oversized
-     payloads receive a real 413 before Lua allocates memory.
+     payloads receive a real 413 before WASM execution allocates memory.
 =============================================================================
 """
 
@@ -38,9 +38,6 @@ GENESIS_URL = "http://127.0.0.1:8733"
 
 ROLE_TO_SCRIPT = {
     "genesis": os.path.join(PROCESSES_DIR, "genesis", "genesis_process.lua"),
-    "primary": os.path.join(PROCESSES_DIR, "primary", "primary_process.lua"),
-    "sd1": os.path.join(PROCESSES_DIR, "shared_data", "sd_process.lua"),
-    "sd2": os.path.join(PROCESSES_DIR, "shared_data", "sd_process.lua"),
     "arbit": os.path.join(PROCESSES_DIR, "arbit", "arbit_process.lua"),
 }
 
@@ -58,7 +55,7 @@ def parse_genesis_topology(genesis_lua_src: str):
             "name": "genesis",
             "port": urlparse(GENESIS_URL).port,
             "process_name": "genesis",
-            "script_path": ROLE_TO_SCRIPT["genesis"],
+            "script_path": ROLE_TO_SCRIPT.get("genesis"),
         }
     ]
 
@@ -69,7 +66,7 @@ def parse_genesis_topology(genesis_lua_src: str):
                 "name": proc_name,
                 "port": parsed.port,
                 "process_name": proc_name,
-                "script_path": ROLE_TO_SCRIPT[proc_name],
+                "script_path": ROLE_TO_SCRIPT.get(proc_name),
             }
         )
 
@@ -84,26 +81,84 @@ def main():
     os.makedirs(CONFIG_DIR, exist_ok=True)
 
     for node in nodes:
-        with open(node["script_path"], "r", encoding="utf-8") as f:
-            script_body = f.read()
-
         role = node["process_name"]
         is_primary = role == "primary"
 
-        proc_def = {
-            "device": "process@1.0",
-            "execution-device": "lua@5.3a",
-            "scheduler-device": "scheduler@1.0",
-            "push-device": "push@1.0",
-            "node-role": role,
-            "requires-sign": role in ("genesis", "arbit"),
-            "scheduler-commitment-spec": "ans104@1.0" if role in ("genesis", "arbit") else "httpsig@1.0",
-            "scheduler_commitment_spec": "ans104@1.0" if role in ("genesis", "arbit") else "httpsig@1.0",
-            "module": {
-                "content-type": "text/x-lua",
-                "body": script_body,
-            },
-        }
+        if role == "primary":
+            wasm_path = os.path.join(PROJECT_ROOT, "engine", "processes", "primary", "target", "wasm32-unknown-unknown", "release", "primary_engine.wasm")
+            proc_def = {
+                "data-protocol": "ao",
+                "variant": "ao.N.1",
+                "device": "process@1.0",
+                "type": "Process",
+                "device-stack": [
+                    "json-iface@1.0",
+                    "wasm-64@1.0",
+                    "multipass@1.0",
+                ],
+                "execution-device": "stack@1.0",
+                "scheduler-device": "scheduler@1.0",
+                "push-device": "push@1.0",
+                "node-role": role,
+                "requires-sign": False,
+                "scheduler-commitment-spec": "httpsig@1.0",
+                "scheduler_commitment_spec": "httpsig@1.0",
+                "image": wasm_path,
+                "output-prefix": "wasm",
+                "passes": 2,
+                "stack-keys": [
+                    "init",
+                    "compute",
+                    "snapshot",
+                    "normalize",
+                ],
+            }
+        elif role in ("sd1", "sd2"):
+            wasm_path = os.path.join(PROJECT_ROOT, "engine", "processes", "shared_data", "target", "wasm32-unknown-unknown", "release", "sd_engine.wasm")
+            proc_def = {
+                "data-protocol": "ao",
+                "variant": "ao.N.1",
+                "device": "process@1.0",
+                "type": "Process",
+                "device-stack": [
+                    "json-iface@1.0",
+                    "wasm-64@1.0",
+                    "multipass@1.0",
+                ],
+                "execution-device": "stack@1.0",
+                "scheduler-device": "scheduler@1.0",
+                "push-device": "push@1.0",
+                "node-role": role,
+                "requires-sign": False,
+                "scheduler-commitment-spec": "httpsig@1.0",
+                "scheduler_commitment_spec": "httpsig@1.0",
+                "image": wasm_path,
+                "output-prefix": "wasm",
+                "passes": 2,
+                "stack-keys": [
+                    "init",
+                    "compute",
+                    "snapshot",
+                    "normalize",
+                ],
+            }
+        else:
+            with open(node["script_path"], "r", encoding="utf-8") as f:
+                script_body = f.read()
+            proc_def = {
+                "device": "process@1.0",
+                "execution-device": "lua@5.3a",
+                "scheduler-device": "scheduler@1.0",
+                "push-device": "push@1.0",
+                "node-role": role,
+                "requires-sign": True,
+                "scheduler-commitment-spec": "ans104@1.0",
+                "scheduler_commitment_spec": "ans104@1.0",
+                "module": {
+                    "content-type": "text/x-lua",
+                    "body": script_body,
+                },
+            }
 
         # Every worker process receives ONLY the Genesis bootstrap pointer at spawn
         if role != "genesis":
@@ -190,27 +245,38 @@ def main():
             "priv_store": [node_store],
             "attested-store": node_store,
             "attested_store": node_store,
-            "node_processes": (lambda: {
-                **{role: proc_def},
-                **(
-                    {
-                        f"{role}_{w_idx}": dict(proc_def, **{"node-role": f"{role}_{w_idx}"})
-                        for w_idx in range(1, 11)
-                    } if role in ("primary", "sd1", "sd2") else {}
-                )
-            })(),
+            "node_processes": {role: proc_def},
         }
 
-        # Only Arbit & Genesis bundle official checkpoints to the L1 ANS-104
-        # gateway. Primary and SD are transient tiers: their scheduler must not
-        # block each tick on a mainnet upload. A closed local port makes the
-        # scheduler's best-effort upload fail immediately instead.
-        if role in ("arbit", "genesis"):
-            cfg["bundler-ans104"] = l1_gateway
-            cfg["bundler_ans104"] = l1_gateway
-        else:
-            cfg["bundler-ans104"] = "http://127.0.0.1:1"
-            cfg["bundler_ans104"] = "http://127.0.0.1:1"
+        # Route Arbit's native ~arweave@2.9 and /graphql requests directly to
+        # the configured local L1 gateway (ArLocal) instead of Arweave mainnet,
+        # and authorize the native ~l1-checkpoint@1.0 device ONLY on Arbit.
+        if role == "arbit":
+            cfg["l1-checkpoint-enabled"] = True
+            cfg["l1_checkpoint_enabled"] = True
+            cfg["routes"] = [
+                {
+                    "template": "^/arweave",
+                    "nodes": [
+                        {
+                            "match": "^/arweave",
+                            "with": l1_gateway,
+                        }
+                    ],
+                    "parallel": False,
+                    "responses": 1,
+                    "stop-after": True,
+                    "admissible-status": 200,
+                },
+                {
+                    "template": "/graphql",
+                    "nodes": [
+                        {
+                            "prefix": l1_gateway,
+                        }
+                    ],
+                },
+            ]
 
         out_file = os.path.join(CONFIG_DIR, f"{node['name']}.json")
         with open(out_file, "w", encoding="utf-8") as f:

@@ -143,7 +143,7 @@ class StateEngineClient:
         body["http_status"] = code
         return body
 
-    def wait_for_batch(self, batch_id, timeout=15.0, poll=0.02, status_every=0.5):
+    def wait_for_batch(self, batch_id, timeout=15.0, poll=0.002, status_every=0.5):
         """Poll /now for the fast path and Batch-Status for the verdict.
 
         ``/now`` is slot-free and never advances the Primary's request clock,
@@ -154,7 +154,9 @@ class StateEngineClient:
         """
         primary = self._ensure_primary()
         deadline = time.time() + timeout
-        next_status = 0.0
+        # Allow in-flight SD1/SD2 Ack slots to settle via slot-free /now
+        # before sending a competing Batch-Status /push slot.
+        next_status = time.time() + 0.15
         last = None
         while time.time() < deadline:
             now = time.time()
@@ -164,7 +166,10 @@ class StateEngineClient:
                     return last
                 next_status = now + status_every
             code, body, _ = self._now(primary, "primary")
-            if body.get("batch_id") == batch_id and body.get("ack") == "replicated":
+            if code == 200 and isinstance(body, dict) and body.get("batch_id") == batch_id and body.get("ack") == "replicated":
+                if body.get("replicas") and body.get("state_root"):
+                    body["http_status"] = 200
+                    return body
                 return self.batch_status(batch_id)
             time.sleep(poll)
         return last if last is not None else self.batch_status(batch_id)

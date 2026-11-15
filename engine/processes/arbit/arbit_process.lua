@@ -117,6 +117,27 @@ local function response_body(res)
     return tostring(res or "")
 end
 
+local function mine_l1_block(topo)
+    local ok, status, res = pcall(function()
+        return ao.resolve({
+            path = "/~relay@1.0/call",
+            ["relay-path"] = topo.l1_url .. "/mine",
+            ["relay-method"] = "GET",
+            ["cache-control"] = "no-store"
+        })
+    end)
+    if ok and status == "ok" then
+        local body = response_body(res)
+        local height = tonumber(string.match(body, '"height"%s*:%s*(%d+)'))
+            or tonumber(string.match(body, '"current"%s*:%s*(%d+)'))
+            or 0
+        local block_hash = string.match(body, '"indep_hash"%s*:%s*"([^"]+)"')
+            or string.match(body, '"previous_block"%s*:%s*"([^"]+)"')
+        return height, block_hash
+    end
+    return 0, nil
+end
+
 local function commit_to_l1(topo, tick, point_count, state_root, extra)
     if not topo or not topo.l1_url then
         return "", 0, "no_l1_target"
@@ -126,28 +147,28 @@ local function commit_to_l1(topo, tick, point_count, state_root, extra)
         return "", 0, "disabled"
     end
 
-    -- Primary: Dedicated Arweave L1 Committer Service (Real Arweave Format 2 TX + Mining)
-    local committer_url = topo.l1_committer_url or "http://127.0.0.1:8738/commit_checkpoint"
-    local committer_payload = string.format(
-        [[{"action":"commit_checkpoint","official_tick":%d,"point_count":%d,"state_root":"%s","commitment_seq":%d,"diff_seq":%d,"epoch":%d,"shard":"%s"}]],
-        tick, point_count, json_safe(state_root), CommitmentSeq, LastDiffSeq, CurrentEpoch, json_safe(extra and extra.shard or "cluster")
-    )
+    -- Primary: Native HyperBEAM L1 Checkpoint Device (~l1-checkpoint@1.0 -> ~tx@1.0 + ~arweave@2.9)
     local ok_c, status_c, res_c = pcall(function()
         return ao.resolve({
-            path = "/~relay@1.0/call",
-            ["relay-path"] = committer_url,
-            ["relay-method"] = "POST",
-            ["relay-body"] = committer_payload,
-            ["content-type"] = "application/json",
+            path = "/~l1-checkpoint@1.0/commit",
+            method = "POST",
+            ["l1-url"] = tostring(topo.l1_url),
+            ["official-tick"] = tostring(tick),
+            ["state-root"] = tostring(state_root or ""),
+            ["point-count"] = tostring(point_count or 0),
+            ["commitment-seq"] = tostring(CommitmentSeq or 0),
+            ["diff-seq"] = tostring(LastDiffSeq or 0),
+            ["epoch"] = tostring(CurrentEpoch or 1),
+            ["shard"] = tostring((extra and extra.shard) or "cluster"),
+            ["timestamp"] = tostring((extra and extra.timestamp) or tick),
             ["cache-control"] = "no-store"
         })
     end)
-    if ok_c and status_c == "ok" then
-        local body = response_body(res_c)
-        local tx_id = string.match(body, '"tx_id"%s*:%s*"([^"]+)"')
-        local height = tonumber(string.match(body, '"height"%s*:%s*(%d+)')) or 0
-        if tx_id then
-            return tx_id, height, "finalized"
+    if ok_c and status_c == "ok" and type(res_c) == "table" then
+        local tx_id = res_c.tx_id
+        local height = tonumber(res_c.height) or 0
+        if type(tx_id) == "string" and #tx_id > 0 then
+            return tx_id, height, tostring(res_c.status or "finalized")
         end
     end
 
@@ -175,22 +196,9 @@ local function commit_to_l1(topo, tick, point_count, state_root, extra)
         return "", 0, "pending"
     end
 
-    -- Default: ArLocal local block finality
-    local ok, status, res = pcall(function()
-        return ao.resolve({
-            path = "/~relay@1.0/call",
-            ["relay-path"] = topo.l1_url .. "/mine",
-            ["relay-method"] = "GET",
-            ["cache-control"] = "no-store"
-        })
-    end)
-    if ok and status == "ok" then
-        local body = response_body(res)
-        local height = tonumber(string.match(body, '"height"%s*:%s*(%d+)'))
-            or tonumber(string.match(body, '"current"%s*:%s*(%d+)'))
-            or 0
-        local block_hash = string.match(body, '"indep_hash"%s*:%s*"([^"]+)"')
-            or string.match(body, '"previous_block"%s*:%s*"([^"]+)"')
+    -- Fallback: ArLocal local block finality
+    local height, block_hash = mine_l1_block(topo)
+    if height > 0 or block_hash then
         if block_hash then
             return string.format("arlocal_block_%d_%s", height, block_hash), height, "finalized"
         end
@@ -356,11 +364,19 @@ function compute(process, message, opts)
         local diff_seq = tonumber(msg.diff_seq or (msg.query and msg.query.diff_seq) or 0)
         local msg_epoch = tonumber(msg.epoch or (msg.query and msg.query.epoch) or CurrentEpoch)
 
-        -- Epoch fencing
+        -- Epoch fencing: if no checkpoints have been settled yet (OfficialTick == 0),
+        -- align CurrentEpoch to the incoming valid epoch (>= 1) so fresh clusters do not deadlock.
         if msg_epoch < CurrentEpoch then
-            local err_res = string.format([[{"status":"error_stale_epoch","tier":"arbit_consensus","epoch":%d,"current_epoch":%d}]], msg_epoch, CurrentEpoch)
-            process.results = { output = { body = err_res, arbit_signer = arbit_signer } }
-            return process
+            if OfficialTick == 0 and msg_epoch >= 1 then
+                CurrentEpoch = msg_epoch
+                LastDiffSeq = 0
+                CommitmentSeq = 0
+                PrevStateRoot = "0x0000000000000000000000000000000000000000000000000000000000000000"
+            else
+                local err_res = string.format([[{"status":"error_stale_epoch","tier":"arbit_consensus","epoch":%d,"current_epoch":%d}]], msg_epoch, CurrentEpoch)
+                process.results = { output = { body = err_res, arbit_signer = arbit_signer } }
+                return process
+            end
         elseif msg_epoch > CurrentEpoch then
             CurrentEpoch = msg_epoch
             OfficialTick = 0
