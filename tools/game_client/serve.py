@@ -44,7 +44,7 @@ def docker_stats_worker():
         try:
             doc_out = subprocess.check_output(
                 ["docker", "stats", "--no-stream", "--format", "{{.Name}}:{{.MemUsage}}:{{.CPUPerc}}", "arlocal"],
-                text=True, timeout=5
+                text=True, stderr=subprocess.DEVNULL, timeout=5
             ).strip()
             parts = doc_out.split(":")
             if len(parts) >= 3:
