@@ -30,24 +30,61 @@ echo "=== [1/4] Ensuring clean state before launch ==="
 "$PROJECT_ROOT/tools/cluster_down.sh" >/dev/null 2>&1 || true
 sleep 1
 
+mkdir -p "$PROJECT_ROOT/logs"
+
 echo ""
 echo "=== [2/4] Starting ArLocal (Arweave L1) ==="
+ARLOCAL_DOCKER_STARTED=false
 if docker info >/dev/null 2>&1; then
     if ! docker image inspect ao-localnet-arlocal:latest >/dev/null 2>&1; then
         echo "  [Auto-Fetch] Image ao-localnet-arlocal:latest not found locally."
-        echo "  Pulling official prebuilt textury/arlocal:latest from Docker Hub..."
-        docker pull textury/arlocal:latest || true
-        docker tag textury/arlocal:latest ao-localnet-arlocal:latest 2>/dev/null || true
-        echo "  [OK] Image ao-localnet-arlocal:latest ready."
+        echo "  Pulling textury/arlocal:latest (timeout 25s)..."
+        if timeout 25 docker pull textury/arlocal:latest && docker tag textury/arlocal:latest ao-localnet-arlocal:latest 2>/dev/null; then
+            echo "  [OK] Image ao-localnet-arlocal:latest ready."
+        else
+            echo "  [WARN] Docker pull failed or timed out; switching to local Node.js ArLocal fallback."
+        fi
     fi
-    docker rm -f arlocal >/dev/null 2>&1 || true
-    docker run -d --rm --name arlocal -p 1984:1984 ao-localnet-arlocal:latest >/dev/null
-    echo "  [OK] ArLocal container started on port 1984."
-elif command -v npx >/dev/null 2>&1; then
-    echo "  [Fallback] Docker daemon inactive, launching ArLocal via npx..."
+
+    if docker image inspect ao-localnet-arlocal:latest >/dev/null 2>&1; then
+        docker rm -f arlocal >/dev/null 2>&1 || true
+        if docker run -d --rm --name arlocal -p 1984:1984 ao-localnet-arlocal:latest >/dev/null; then
+            ARLOCAL_DOCKER_STARTED=true
+            echo "  [OK] ArLocal container started on port 1984."
+        fi
+    fi
+fi
+
+if [ "$ARLOCAL_DOCKER_STARTED" != true ]; then
+    ARLOCAL_BIN=""
+    if command -v arlocal >/dev/null 2>&1; then
+        ARLOCAL_BIN="$(command -v arlocal)"
+    elif [ -x "$PROJECT_ROOT/tools/.arlocal/node_modules/.bin/arlocal" ]; then
+        ARLOCAL_BIN="$PROJECT_ROOT/tools/.arlocal/node_modules/.bin/arlocal"
+    else
+        NODE_MAJOR=$(node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || echo "0")
+        if [ "$NODE_MAJOR" -lt 18 ] 2>/dev/null; then
+            echo "  [Install] Installing Node.js 20 LTS for local ArLocal..."
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+        fi
+        echo "  [Install] Installing arlocal into tools/.arlocal..."
+        npm install --no-audit --no-fund --prefix "$PROJECT_ROOT/tools/.arlocal" arlocal
+        ARLOCAL_BIN="$PROJECT_ROOT/tools/.arlocal/node_modules/.bin/arlocal"
+    fi
+
+    tmux kill-session -t hb-arlocal 2>/dev/null || true
     fuser -k 1984/tcp >/dev/null 2>&1 || true
-    nohup npx -y arlocal 1984 > /tmp/arlocal.log 2>&1 &
-    echo "  [OK] ArLocal process spawned via npx."
+    pkill -f "arlocal 1984" >/dev/null 2>&1 || true
+    rm -rf /tmp/arlocal-work
+    mkdir -p /tmp/arlocal-work
+    if command -v tmux >/dev/null 2>&1; then
+        tmux new-session -d -s hb-arlocal "cd /tmp/arlocal-work && \"$ARLOCAL_BIN\" 1984 --dbpath db > \"$PROJECT_ROOT/logs/arlocal.log\" 2>&1"
+        echo "  [OK] ArLocal started in tmux session hb-arlocal on port 1984."
+    else
+        (cd /tmp/arlocal-work && nohup "$ARLOCAL_BIN" 1984 --dbpath db > "$PROJECT_ROOT/logs/arlocal.log" 2>&1 &)
+        echo "  [OK] ArLocal background process spawned on port 1984."
+    fi
 fi
 
 # Wait for ArLocal to be ready

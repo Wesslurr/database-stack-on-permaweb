@@ -6,10 +6,10 @@ Strictly separated from engine/ (located in tools/game_client/).
 """
 
 import http.client
-import http.server
+import http.serve
 import json
 import os
-import socketserver
+import socketserve
 import subprocess
 import threading
 import time
@@ -66,14 +66,38 @@ def docker_stats_worker():
                     "status": "online"
                 }
         except Exception:
-            CACHED_DOCKER_METRICS = {
-                "container": "arlocal",
-                "port": 1984,
-                "rss_mb": 0.0,
-                "mem_str": "—",
-                "cpu_pct": 0.0,
-                "status": "offline"
-            }
+            found_host = False
+            try:
+                ps_out = subprocess.check_output(
+                    ["ps", "-eo", "rss,pcpu,args"], text=True, timeout=2
+                )
+                for line in ps_out.splitlines():
+                    if "arlocal" in line and "1984" in line:
+                        parts = line.strip().split(None, 2)
+                        if len(parts) >= 2:
+                            rss_val = round(float(parts[0]) / 1024.0, 1)
+                            cpu_val = round(float(parts[1]), 1)
+                            CACHED_DOCKER_METRICS = {
+                                "container": "arlocal (node)",
+                                "port": 1984,
+                                "rss_mb": rss_val,
+                                "mem_str": f"{rss_val} MiB",
+                                "cpu_pct": cpu_val,
+                                "status": "online"
+                            }
+                            found_host = True
+                            break
+            except Exception:
+                pass
+            if not found_host:
+                CACHED_DOCKER_METRICS = {
+                    "container": "arlocal",
+                    "port": 1984,
+                    "rss_mb": 0.0,
+                    "mem_str": "—",
+                    "cpu_pct": 0.0,
+                    "status": "offline"
+                }
         time.sleep(5)
 
 
@@ -117,7 +141,7 @@ def collect_node_metrics():
             "lmdb_kb": lmdb_kb,
             "pure_ram": not os.path.exists(mdb_file),
         }
-    # ArLocal (Docker Container) Metrics - Served instantly from background worker
+    # ArLocal (Docker Container) Metrics - Served instantly from background worke
     metrics["arlocal"] = dict(CACHED_DOCKER_METRICS)
     return metrics
 

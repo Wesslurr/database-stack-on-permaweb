@@ -55,6 +55,19 @@ if command -v rustup &>/dev/null; then
     rustup target add wasm32-unknown-unknown
 fi
 
+# Ensure Node.js 20+ and ArLocal npm fallback are installed (for environments where Docker Hub times out)
+NODE_MAJOR=$(node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || echo "0")
+if [ "$NODE_MAJOR" -lt 18 ] 2>/dev/null; then
+    echo "=== [Codespace Setup] Installing Node.js 20 LTS ==="
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    wait_for_apt
+    sudo apt-get install -y nodejs
+fi
+if ! command -v arlocal &>/dev/null && [ ! -x "$PROJECT_ROOT/tools/.arlocal/node_modules/.bin/arlocal" ]; then
+    echo "=== [Codespace Setup] Installing arlocal fallback ==="
+    npm install --no-audit --no-fund --prefix "$PROJECT_ROOT/tools/.arlocal" arlocal || true
+fi
+
 # Ensure Docker daemon is responding before pulling ArLocal image
 echo "=== [Codespace Setup] Checking Docker daemon ==="
 DOCKER_OK=false
@@ -71,15 +84,15 @@ done
 if [ "$DOCKER_OK" = true ]; then
     if ! docker image inspect ao-localnet-arlocal:latest &>/dev/null; then
         echo "=== [Codespace Setup] Fetching official ArLocal Docker image ==="
-        if docker pull textury/arlocal:latest; then
+        if timeout 25 docker pull textury/arlocal:latest; then
             docker tag textury/arlocal:latest ao-localnet-arlocal:latest
             echo "  [OK] ArLocal Docker image ready."
         else
-            echo "  [WARN] Failed to pull textury/arlocal:latest during setup; cluster_up.sh will retry on launch."
+            echo "  [WARN] Failed to pull textury/arlocal:latest (timeout or Docker Hub unavailable); Node.js arlocal fallback will be used."
         fi
     fi
 else
-    echo "  [WARN] Docker daemon not yet ready in postCreateCommand; cluster_up.sh will handle ArLocal on launch."
+    echo "  [WARN] Docker daemon not yet ready in postCreateCommand; cluster_up.sh will use Docker or Node.js arlocal on launch."
 fi
 
 # Initialize unmodified HyperBEAM git submodule

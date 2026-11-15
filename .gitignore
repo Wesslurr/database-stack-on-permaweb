@@ -14,6 +14,8 @@ engine/data/*/wallet.json
 engine/data/*/*.log
 engine/data/*/erl_crash.dump
 engine/data/wasm_store/
+tools/.arlocal/
+.arlocal-db/
 
 # Rust WASM build artifacts
 engine/processes/*/target/
@@ -35,7 +37,7 @@ roadmap.md
 *roadmap*
 
 # Windows WSL Zone Identifiers
-*:Zone.Identifier
+*:Zone.Identifie
 
 # OS metadata
 .DS_Store

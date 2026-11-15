@@ -13,6 +13,9 @@
     },
     "ghcr.io/devcontainers/features/python:1": {
       "version": "3.11"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
     }
   },
   "forwardPorts": [8080, 1984, 8733, 8734, 8735, 8736, 8737],
