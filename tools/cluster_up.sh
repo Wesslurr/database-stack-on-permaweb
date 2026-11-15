@@ -73,17 +73,17 @@ for F in "$HB_SRC/_build/default/lib/cowlib/src/cow_capsule.erl" "$HB_SRC/_build
 done
 rm -f "$HB_SRC/_build/default/lib/cowlib/ebin/cow_capsule.beam" "$HB_SRC/_build/default/lib/gun/ebin/gun.beam"
 
-# Sync custom native HyperBEAM preloaded devices before compile
-if [ -f "$PROJECT_ROOT/engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" ]; then
-    cp "$PROJECT_ROOT/engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" \
-       "$HB_SRC/src/preloaded/arweave/dev_l1_checkpoint.erl"
-fi
+# Remove any legacy preloaded custom device before clean HyperBEAM compile
+rm -f "$HB_SRC/src/preloaded/arweave/dev_l1_checkpoint.erl"
+find "$HB_SRC/_build" -name "dev_l1_checkpoint.beam" -delete 2>/dev/null || true
 
 (
     cd "$HB_SRC"
     rebar3 compile
+    rebar3 device package --device-src ../engine/devices/l1_checkpoint/src --output-dir ../engine/devices/l1_checkpoint/_build/device-packages
+    rebar3 device verify --device-src ../engine/devices/l1_checkpoint/src --output-dir ../engine/devices/l1_checkpoint/_build/device-packages
 )
-echo "  [OK] HyperBEAM compiled."
+echo "  [OK] HyperBEAM compiled & external Forge device verified."
 
 echo ""
 echo "=== [2.7/4] Compiling Rust WASM Engines (Primary & Shared Data) ==="
@@ -108,6 +108,25 @@ epmd -daemon >/dev/null 2>&1 || true
 echo ""
 echo "=== [3/4] Starting 5 Independent HyperBEAM Worker Nodes in Tmux ==="
 
+# If Genesis wallet does not exist yet (e.g. fresh clone or --wipe-wallets), boot
+# hb-genesis first so its wallet is created and build_configs.py can populate
+# arbit's trusted-device-signers before hb-arbit starts.
+if [ ! -f "$PROJECT_ROOT/engine/data/genesis/wallet.json" ]; then
+    tmux new-session -d -s "hb-genesis" -c "$HB_SRC"
+    tmux pipe-pane -t "hb-genesis" -o "cat >> \"$PROJECT_ROOT/logs/hb-genesis.log\""
+    tmux send-keys -t "hb-genesis" "export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && HB_PORT=\"8733\" HB_CONFIG=\"$PROJECT_ROOT/engine/config/genesis.json\" rebar3 shell --sname hb-genesis" C-m
+    echo "  [BOOTSTRAP] Waiting for hb-genesis wallet creation..."
+    for attempt in {1..40}; do
+        ADDR=$(curl -s -f --max-time 1 "http://127.0.0.1:8733/~meta@1.0/info/address" 2>/dev/null || echo "")
+        if [ -n "$ADDR" ] && [ "$ADDR" != "null" ]; then
+            echo "  [BOOTSTRAP] Genesis address ready: $ADDR"
+            break
+        fi
+        sleep 1
+    done
+    python3 "$PROJECT_ROOT/tools/build_configs.py"
+fi
+
 NODES=(
     "hb-genesis:8733:$PROJECT_ROOT/engine/config/genesis.json"
     "hb-primary:8734:$PROJECT_ROOT/engine/config/primary.json"
@@ -118,7 +137,9 @@ NODES=(
 
 for NODE_SPEC in "${NODES[@]}"; do
     IFS=":" read -r SESSION_NAME PORT CONFIG_PATH <<< "$NODE_SPEC"
-    
+    if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        continue
+    fi
     # Start tmux session running HyperBEAM node with interactive PTY and log persistence
     tmux new-session -d -s "$SESSION_NAME" -c "$HB_SRC"
     tmux pipe-pane -t "$SESSION_NAME" -o "cat >> \"$PROJECT_ROOT/logs/${SESSION_NAME}.log\""
@@ -160,6 +181,9 @@ done
 
 echo ""
 if [ "$ALL_READY" = true ]; then
+    echo "=== [4.5/4] Deploying External L1 Checkpoint Device via HyperBEAM Forge ==="
+    python3 "$PROJECT_ROOT/tools/deploy_forge_device.py" --skip-verify
+    echo ""
     echo "=========================================================="
     echo "  SUCCESS: All 6 cluster nodes (1 ArLocal + 5 HyperBEAM)   "
     echo "           are live, independent, and healthy!            "

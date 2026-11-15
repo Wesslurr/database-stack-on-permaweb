@@ -39,6 +39,7 @@ SelectedSd1     = SelectedSd1     or ClusterNodePool.sd_candidates[1]
 SelectedSd2     = SelectedSd2     or ClusterNodePool.sd_candidates[2]
 SelectedArbit   = SelectedArbit   or ClusterNodePool.arbit_candidates[1]
 SelectedL1Url   = SelectedL1Url   or ClusterNodePool.l1_gateway
+L1CheckpointSpecId = L1CheckpointSpecId or ""
 AdminKey        = AdminKey        or "hyperstack_admin_genesis_key"
 AdminSigner     = AdminSigner     or "genesis_admin_signer"
 
@@ -80,9 +81,15 @@ local function is_valid_process_name(name)
     return match ~= nil
 end
 
+local function is_valid_spec_id(spec_id)
+    if type(spec_id) ~= "string" or #spec_id ~= 43 then return false end
+    local match = string.match(spec_id, "^[%w%_%-]+$")
+    return match ~= nil
+end
+
 local function encode_topology_json(genesis_signer)
     return string.format(
-        [[{"status":"ok","requires_sign":true,"epoch":%d,"genesis_signer":"%s","arbit_batch_interval":%d,"primary_url":"%s","primary_process":"%s","max_primary_workers":10,"primary_workers":["primary_1","primary_2","primary_3","primary_4","primary_5","primary_6","primary_7","primary_8","primary_9","primary_10"],"sd1_url":"%s","sd1_process":"%s","sd2_url":"%s","sd2_process":"%s","arbit_url":"%s","arbit_process":"%s","l1_url":"%s","l1_commit_mode":"%s","primary_max_entities":%d,"primary_audit_ring":%d,"sd_snapshot_slots":%d,"sd_diff_slots":%d}]],
+        [[{"status":"ok","requires_sign":true,"epoch":%d,"genesis_signer":"%s","arbit_batch_interval":%d,"primary_url":"%s","primary_process":"%s","max_primary_workers":10,"primary_workers":["primary_1","primary_2","primary_3","primary_4","primary_5","primary_6","primary_7","primary_8","primary_9","primary_10"],"sd1_url":"%s","sd1_process":"%s","sd2_url":"%s","sd2_process":"%s","arbit_url":"%s","arbit_process":"%s","l1_url":"%s","l1_commit_mode":"%s","l1_checkpoint_spec_id":"%s","primary_max_entities":%d,"primary_audit_ring":%d,"sd_snapshot_slots":%d,"sd_diff_slots":%d}]],
         CurrentEpoch,
         json_safe(genesis_signer),
         ArbitBatchInterval,
@@ -91,7 +98,7 @@ local function encode_topology_json(genesis_signer)
         json_safe(SelectedSd2.url), json_safe(SelectedSd2.process),
         json_safe(SelectedArbit.url), json_safe(SelectedArbit.process),
         json_safe(SelectedL1Url),
-        json_safe(L1CommitMode), PrimaryMaxEntities, PrimaryAuditRing, SdSnapshotSlots, SdDiffSlots
+        json_safe(L1CommitMode), json_safe(L1CheckpointSpecId), PrimaryMaxEntities, PrimaryAuditRing, SdSnapshotSlots, SdDiffSlots
     )
 end
 
@@ -175,6 +182,38 @@ function compute(process, message, opts)
         if updated then
             CurrentEpoch = CurrentEpoch + 1
         end
+    elseif action == "Register-Forge-Device" then
+        local caller_key = msg.admin_key or (msg.query and msg.query.admin_key)
+        local caller_signer = msg.caller_signer or (msg.query and msg.query.caller_signer)
+        local is_authorized = false
+
+        if AdminKey and caller_key == AdminKey then
+            is_authorized = true
+        elseif AdminSigner and caller_signer == AdminSigner then
+            is_authorized = true
+        end
+
+        if not is_authorized then
+            local err_res = string.format([[{"status":"error_unauthorized","tier":"genesis_registry","reason":"unauthorized_caller","epoch":%d,"primary_url":"%s"}]], CurrentEpoch, json_safe(SelectedPrimary.url))
+            process.results = {
+                output = {
+                    body = err_res,
+                    epoch = tostring(CurrentEpoch),
+                    genesis_signer = genesis_signer,
+                    primary_url = SelectedPrimary.url
+                }
+            }
+            return process
+        end
+
+        local spec_id = msg.spec_id or msg["spec-id"] or (msg.query and (msg.query.spec_id or msg.query["spec-id"]))
+        if not is_valid_spec_id(spec_id) then
+            local err_res = string.format([[{"status":"error_invalid_spec_id","tier":"genesis_registry","epoch":%d,"primary_url":"%s"}]], CurrentEpoch, json_safe(SelectedPrimary.url))
+            process.results = { output = { body = err_res, epoch = tostring(CurrentEpoch), primary_url = SelectedPrimary.url } }
+            return process
+        end
+
+        L1CheckpointSpecId = spec_id
     end
 
     local res = encode_topology_json(genesis_signer)
@@ -196,6 +235,7 @@ function compute(process, message, opts)
             arbit_process = SelectedArbit.process,
             l1_url = SelectedL1Url,
             l1_commit_mode = L1CommitMode,
+            l1_checkpoint_spec_id = L1CheckpointSpecId,
             primary_max_entities = tostring(PrimaryMaxEntities),
             primary_audit_ring = tostring(PrimaryAuditRing),
             sd_snapshot_slots = tostring(SdSnapshotSlots),

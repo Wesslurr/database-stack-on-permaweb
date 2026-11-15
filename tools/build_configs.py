@@ -22,11 +22,27 @@ Genesis-Centric Node Configuration Builder (Canonical AO WASM + Lua L1)
 =============================================================================
 """
 
+import base64
 import copy
+import hashlib
 import json
 import os
 import re
 from urllib.parse import urlparse
+
+
+def compute_wallet_address(wallet_path: str) -> str:
+    if not os.path.exists(wallet_path):
+        return ""
+    with open(wallet_path, "r", encoding="utf-8") as f:
+        jwk = json.load(f)
+    n_b64 = jwk.get("n", "")
+    if not n_b64:
+        return ""
+    pad = "=" * ((4 - len(n_b64) % 4) % 4)
+    raw_n = base64.urlsafe_b64decode(n_b64 + pad)
+    digest = hashlib.sha256(raw_n).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CONFIG_DIR = os.path.join(PROJECT_ROOT, "engine", "config")
@@ -178,9 +194,21 @@ def main():
 
         # Tiered Storage Policy:
         # - Primary: 100% Pure RAM (`hb_store_volatile` ONLY — zero LMDB disk I/O)
-        # - SD1 / SD2 / Arbit / Genesis: Pure LMDB Disk (`hb_store_lmdb` ONLY — 80% disk, minimal RAM)
+        # - SD1 / SD2 / Genesis: Pure LMDB Disk (`hb_store_lmdb` ONLY — 80% disk, minimal RAM)
+        # - Arbit: Pure LMDB Disk backed by `hb_store_gateway` (peer gateway routes to Genesis
+        #   for dynamic HyperBEAM Forge device hot-loading without preloading custom devices)
         node_store = volatile_store if is_primary else lmdb_store
-        stores = [node_store]
+        if role == "arbit":
+            stores = [
+                node_store,
+                {
+                    "ao-types": 'atom=("store-module")',
+                    "store-module": "hb_store_gateway",
+                    "local-store": node_store,
+                },
+            ]
+        else:
+            stores = [node_store]
         # Aligned snapshot intervals: Primary stays fast in RAM; replicas snapshot periodically on LMDB disk
         if is_primary:
             snapshot_slots = 1000
@@ -231,8 +259,22 @@ def main():
             "http_max_body": http_max_body,
             "cache-control": ["no-store"],
             "cache_control": ["no-store"],
-            # Eliminate default mainnet hooks & stdout debug trace bottlenecks
-            "on": {},
+            # Eliminate default mainnet hooks & stdout debug trace bottlenecks,
+            # while keeping `cache-write` indexing enabled on Genesis so Forge
+            # artifacts written via `/~cache@1.0/write` are discoverable via GraphQL.
+            "on": (
+                {
+                    "cache-write": {
+                        "device": "match@1.0",
+                        "path": "index",
+                        "match-paths": {
+                            "field-target": "recipient~query@1.0",
+                        },
+                    }
+                }
+                if role == "genesis"
+                else {}
+            ),
             "debug-print": ["error"],
             "debug_print": ["error"],
             "debug-print-trace": False,
@@ -248,33 +290,33 @@ def main():
             "node_processes": {role: proc_def},
         }
 
-        # Route Arbit's native ~arweave@2.9 and /graphql requests directly to
-        # the configured local L1 gateway (ArLocal) instead of Arweave mainnet,
-        # and authorize the native ~l1-checkpoint@1.0 device ONLY on Arbit.
+        # Route Arbit's L1 authorizations dynamically via Genesis Process;
+        # ~l1-checkpoint@1.0 resolves l1_url live from Genesis using genesis-url.
+        if role != "genesis":
+            cfg["genesis-url"] = GENESIS_URL
+            cfg["genesis_url"] = GENESIS_URL
+
         if role == "arbit":
+            genesis_wallet_path = os.path.join(DATA_DIR, "genesis", "wallet.json")
+            genesis_addr = compute_wallet_address(genesis_wallet_path)
+            trusted_signers = [genesis_addr] if genesis_addr else []
             cfg["l1-checkpoint-enabled"] = True
             cfg["l1_checkpoint_enabled"] = True
+            cfg["trusted-device-signers"] = trusted_signers
+            cfg["trusted_device_signers"] = trusted_signers
             cfg["routes"] = [
                 {
-                    "template": "^/arweave",
-                    "nodes": [
-                        {
-                            "match": "^/arweave",
-                            "with": l1_gateway,
-                        }
-                    ],
-                    "parallel": False,
-                    "responses": 1,
-                    "stop-after": True,
-                    "admissible-status": 200,
+                    "template": "/graphql",
+                    "node": {
+                        "uri": f"{GENESIS_URL}/~query@1.0/graphql",
+                    },
                 },
                 {
-                    "template": "/graphql",
-                    "nodes": [
-                        {
-                            "prefix": l1_gateway,
-                        }
-                    ],
+                    "template": "^/arweave/raw",
+                    "node": {
+                        "match": "^/arweave/raw/(.*)$",
+                        "with": f"{GENESIS_URL}" + r"/~local-name@1.0/lookup?key=arweave-raw-\1",
+                    },
                 },
             ]
 

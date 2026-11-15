@@ -147,12 +147,24 @@ local function commit_to_l1(topo, tick, point_count, state_root, extra)
         return "", 0, "disabled"
     end
 
-    -- Primary: Native HyperBEAM L1 Checkpoint Device (~l1-checkpoint@1.0 -> ~tx@1.0 + ~arweave@2.9)
+    -- Primary: HyperBEAM Forge L1 Checkpoint Device (hot-loaded via SpecID from Genesis)
+    if (not topo.l1_checkpoint_spec_id or topo.l1_checkpoint_spec_id == "") and (topo.genesis_url or GenesisUrl) then
+        local refreshed = fetch_genesis_topology_once(topo.genesis_url or GenesisUrl)
+        if refreshed then
+            Topology = refreshed
+            topo = refreshed
+        end
+    end
+    local spec_id = topo.l1_checkpoint_spec_id or ""
+    if spec_id == "" then
+        return "", 0, "no_forge_spec_id"
+    end
+
     local ok_c, status_c, res_c = pcall(function()
         return ao.resolve({
-            path = "/~l1-checkpoint@1.0/commit",
+            path = "/~" .. spec_id .. "/commit",
             method = "POST",
-            ["l1-url"] = tostring(topo.l1_url),
+            ["genesis-url"] = tostring(topo.genesis_url or GenesisUrl or ""),
             ["official-tick"] = tostring(tick),
             ["state-root"] = tostring(state_root or ""),
             ["point-count"] = tostring(point_count or 0),
@@ -309,6 +321,7 @@ local function fetch_genesis_topology_once(genesis_url)
         end
         local batch_str = string.match(body_str, '"arbit_batch_interval"%s*:%s*(%d+)') or "5"
         local l1_mode = string.match(body_str, '"l1_commit_mode"%s*:%s*"([^"]+)"')
+        local spec_id = string.match(body_str, '"l1_checkpoint_spec_id"%s*:%s*"([^"]*)"') or ""
         if l1_mode then L1CommitMode = l1_mode end
         if l1_url then
             return {
@@ -316,6 +329,7 @@ local function fetch_genesis_topology_once(genesis_url)
                 epoch = tonumber(epoch_str) or 1,
                 l1_url = l1_url,
                 l1_commit_mode = L1CommitMode,
+                l1_checkpoint_spec_id = spec_id,
                 primary_url = primary_url,
                 sd1_url = sd1_url,
                 sd1_process = sd1_proc,

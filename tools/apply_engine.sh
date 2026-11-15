@@ -21,11 +21,9 @@ python3 "$PROJECT_ROOT/tools/build_configs.py" >/dev/null || exit 1
     cargo build --target wasm32-unknown-unknown --release >/dev/null 2>&1 || true
 )
 
-# Sync custom native HyperBEAM preloaded devices before compile
-if [ -f "$PROJECT_ROOT/engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" ]; then
-    cp "$PROJECT_ROOT/engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" \
-       "$HB_SRC/src/preloaded/arweave/dev_l1_checkpoint.erl"
-fi
+# Remove any legacy preloaded custom device before clean HyperBEAM compile
+rm -f "$HB_SRC/src/preloaded/arweave/dev_l1_checkpoint.erl"
+find "$HB_SRC/_build" -name "dev_l1_checkpoint.beam" -delete 2>/dev/null || true
 
 # Ensure HyperBEAM is compiled once to avoid shared _build races among workers
 (cd "$HB_SRC" && rebar3 compile >/dev/null 2>&1 || true)
@@ -92,4 +90,7 @@ for NODE_SPEC in "${NODES[@]}"; do
         FAILED=1
     fi
 done
+if [ "$FAILED" -eq 0 ]; then
+    python3 "$PROJECT_ROOT/tools/deploy_forge_device.py" --skip-verify || FAILED=1
+fi
 exit $FAILED

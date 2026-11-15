@@ -1,0 +1,9 @@
+{application, l1_checkpoint,
+    [
+        {description, "HyperStack Arweave L1 Checkpoint Device packaged via HyperBEAM Forge"},
+        {vsn, "0.1.0"},
+        {registered, []},
+        {applications, [kernel, stdlib, hb]},
+        {env, []},
+        {modules, []}
+    ]}.

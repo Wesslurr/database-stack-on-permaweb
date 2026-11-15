@@ -16,6 +16,9 @@ engine/data/*/erl_crash.dump
 # Rust WASM build artifacts
 engine/processes/*/target/
 
+# External HyperBEAM Forge device build artifacts
+engine/devices/*/_build/
+
 # Agent and IDE artifacts
 .agent/
 .agents/

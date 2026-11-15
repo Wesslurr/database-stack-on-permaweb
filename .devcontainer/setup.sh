@@ -79,12 +79,8 @@ if [ -d "engine/processes/primary" ] && [ -d "engine/processes/shared_data" ]; t
     (cd engine/processes/shared_data && cargo build --target wasm32-unknown-unknown --release)
 fi
 
-# Sync custom native HyperBEAM preloaded devices before compile
-if [ -f "engine/devices/l1_checkpoint/dev_l1_checkpoint.erl" ] && [ -d "HyperBEAM/src/preloaded/arweave" ]; then
-    cp engine/devices/l1_checkpoint/dev_l1_checkpoint.erl HyperBEAM/src/preloaded/arweave/dev_l1_checkpoint.erl
-fi
-
-# Precompile HyperBEAM BEAM modules once during container setup
+# Precompile HyperBEAM BEAM modules once during container setup (clean, no preloaded custom devices)
+rm -f HyperBEAM/src/preloaded/arweave/dev_l1_checkpoint.erl
 if [ -f "HyperBEAM/rebar.config" ]; then
     echo "=== [Codespace Setup] Compiling HyperBEAM ==="
     (cd HyperBEAM && rebar3 compile || true)
