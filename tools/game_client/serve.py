@@ -6,10 +6,10 @@ Strictly separated from engine/ (located in tools/game_client/).
 """
 
 import http.client
-import http.serve
+import http.server
 import json
 import os
-import socketserve
+import socketserver
 import subprocess
 import threading
 import time
