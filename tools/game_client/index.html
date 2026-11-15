@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>HyperBEAM 2D State Engine — Red Circle WASD Live Client</title>
+  <title>HyperStack — 2D Circle Test</title>
   <style>
     :root {
       --bg: #0b0f17;
@@ -329,19 +329,16 @@
 <body>
   <header>
     <div class="title-group">
-      <h1><span class="dot-red"></span> HyperStack State Engine — Dual-Watermark Red Circle Benchmark</h1>
-      <p><strong>100% Honest Localhost / Codespace Proving Ground:</strong> Primary (:8734) & SD1/SD2 (:8735/:8736) run Rust WASM on unmodified HyperBEAM via external Forge devices (<code>hs-wasm-output@1.0</code> + <code>hs-push@1.0</code>) backed by <code>hb_store_lmdb</code>; Genesis (:8733) provides constitutional discovery & Forge artifact hosting; Arbit (:8737) hot-loads <code>~l1-checkpoint@1.0</code> to anchor checkpoints to Arweave L1 (:1984).
-      To inspect true multi-tier database latency without fake client-side prediction:
-      The <strong>Cyan Ring (◎)</strong> displays instantaneous <strong>L0 Head Accept (HTTP 202)</strong> in Primary RAM (~5–10ms).
-      The <strong>Solid Red Circle (●)</strong> moves <em>strictly after</em> <strong>L1 Quorum Confirmation (HTTP 200 Replicated)</strong> is verified by SD1/SD2 LMDB disk persistence (~80–150ms).
-      If SD quorum is lost (503), the circle stays frozen and L0 automatically rolls back to the last verified checkpoint.</p>
+      <h1><span class="dot-red"></span> HyperStack — 2D Circle Test</h1>
+      <p>Primary (:8734) &amp; SD1/SD2 (:8735/:8736) run Rust WASM via external Forge devices (<code>hs-wasm-output@1.0</code>, <code>hs-push@1.0</code>) on <code>hb_store_lmdb</code>; Genesis (:8733) handles discovery &amp; artifact hosting; Arbit (:8737) loads <code>~l1-checkpoint@1.0</code> for Arweave L1 (:1984).
+      <strong>Cyan ring (◎)</strong> = Primary L0 accept (202); <strong>Red circle (●)</strong> = SD1/SD2 LMDB quorum confirmed (200); rolls back to SD if quorum is lost.</p>
     </div>
     <div class="badge-row">
       <div class="badge" id="genesisBadge">Genesis (:8733): <strong>Connecting...</strong></div>
-      <div class="badge" id="genesisMetricsBadge">Genesis Resource: <strong id="inspGenesisRam">—</strong> | CPU: <strong id="inspGenesisCpu">—</strong></div>
-      <div class="badge" id="primaryBadge">Discovered Primary: <strong>—</strong></div>
+      <div class="badge" id="genesisMetricsBadge">Genesis RSS: <strong id="inspGenesisRam">—</strong> | CPU: <strong id="inspGenesisCpu">—</strong></div>
+      <div class="badge" id="primaryBadge">Primary: <strong>—</strong></div>
       <div class="badge" id="l1Badge">Arweave L1 (:1984): <strong>Connecting...</strong></div>
-      <div class="badge" id="ackGateBadge">Replication Gate: <strong>Strict SD RAM+Disk ACK</strong></div>
+      <div class="badge" id="ackGateBadge">Write Gate: <strong>SD Quorum</strong></div>
       <div class="badge" id="nowBadge">State: <strong>—</strong></div>
     </div>
   </header>
@@ -377,26 +374,26 @@
 
       <!-- Interactive Show/Hide Layer Toggles -->
       <div class="layer-toggles" style="margin: 8px 0; display: flex; gap: 14px; align-items: center; background: #0c1425; padding: 8px 14px; border-radius: 6px; border: 1px solid #1e293b; flex-wrap: wrap;">
-        <span style="font-size: 0.75rem; color: #94a3b8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Visual Layer Controls:</span>
+        <span style="font-size: 0.75rem; color: #94a3b8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Layers:</span>
         <label class="toggle" style="color: #38bdf8; font-weight: 600; cursor: pointer;">
-          <input type="checkbox" id="chkShowL0" checked /> ◎ Show L0 RAM (Head Accept)
+          <input type="checkbox" id="chkShowL0" checked /> ◎ L0 Head (RAM)
         </label>
         <label class="toggle" style="color: #ef4444; font-weight: 600; cursor: pointer;">
-          <input type="checkbox" id="chkShowL1" checked /> ● Show L1 Disk (SD Quorum ACK)
+          <input type="checkbox" id="chkShowL1" checked /> ● L1 Confirmed (SD Quorum)
         </label>
         <label class="toggle" style="color: #cbd5e1; font-weight: 600; cursor: pointer;">
-          <input type="checkbox" id="chkShowTargets" checked /> ◯ Show Input Targets (Dashed)
+          <input type="checkbox" id="chkShowTargets" checked /> ◯ Input Target
         </label>
         <label class="toggle" style="color: #a855f7; font-weight: 600; cursor: pointer;">
-          <input type="checkbox" id="chkShowBotRings" checked /> ✦ Show Bot L0 Head Rings
+          <input type="checkbox" id="chkShowBotRings" checked /> Bot L0 Rings
         </label>
       </div>
 
       <!-- Session Sync & SD Rollback Controls -->
       <div class="sync-bar" style="margin: 8px 0; display: flex; gap: 12px; align-items: center; background: #0c182d; padding: 8px 14px; border-radius: 6px; border: 1px solid #1e3a5f; flex-wrap: wrap;">
-        <span style="font-size: 0.75rem; color: #38bdf8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">Authoritative Database Controls:</span>
-        <button class="btn" id="btnRelog" style="background:#1e293b; border-color:#38bdf8; color:#38bdf8; font-weight:600; padding:4px 12px; font-size:0.75rem; cursor:pointer;">↺ Relog / Sync Database</button>
-        <button class="btn" id="btnRollbackSD" style="background:#27141f; border-color:#f43f5e; color:#f43f5e; font-weight:600; padding:4px 12px; font-size:0.75rem; cursor:pointer;">⚡ Force Rollback from SD (Latest Tick)</button>
+        <span style="font-size: 0.75rem; color: #38bdf8; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;">State Sync:</span>
+        <button class="btn" id="btnRelog" style="background:#1e293b; border-color:#38bdf8; color:#38bdf8; font-weight:600; padding:4px 12px; font-size:0.75rem; cursor:pointer;">↺ Sync State</button>
+        <button class="btn" id="btnRollbackSD" style="background:#27141f; border-color:#f43f5e; color:#f43f5e; font-weight:600; padding:4px 12px; font-size:0.75rem; cursor:pointer;">Rollback to SD</button>
         <span id="syncStatusMsg" style="font-size:0.72rem; color:#94a3b8; font-family:monospace;"></span>
       </div>
 
@@ -406,13 +403,13 @@
       <!-- Swarm Simulation Panel -->
       <div class="swarm-panel">
         <div class="swarm-head">
-          <h3>Swarm Simulation — Random Walk of All Simulated Entities</h3>
+          <h3>Bot Swarm</h3>
           <div class="btn-row">
             <button class="btn primary" id="btnSwarm">▶ Start Swarm</button>
-            <button class="btn" id="btnScatter">✦ Scatter Once</button>
+            <button class="btn" id="btnScatter">Scatter Once</button>
             <button class="btn" id="btnSpawn35">+ 35 Bots</button>
             <button class="btn" id="btnSpawn100">+ 100 Bots</button>
-            <button class="btn" id="btnSpawn120" style="background:linear-gradient(135deg,#0284c7,#2563eb);color:#fff;font-weight:700;">🚀 120 Bots (3,000+ w/s Turbo)</button>
+            <button class="btn" id="btnSpawn120" style="background:linear-gradient(135deg,#0284c7,#2563eb);color:#fff;font-weight:700;">120 Bots (30ms)</button>
             <button class="btn" id="btnClearBots">× Clear Arena</button>
             <label class="toggle"><input type="checkbox" id="chkStagger" checked /> Random per-bot timing</label>
             <label class="toggle"><input type="checkbox" id="chkLabels" /> Show all labels</label>
@@ -441,7 +438,6 @@
           <div class="metric"><div class="label">Total ACKed / Errors</div><div class="val amber" id="stTotal">0 / 0</div></div>
           <div class="metric"><div class="label">Coalesced (skipped)</div><div class="val" id="stSkipped">0</div></div>
         </div>
-        <!-- Pure Live Telemetry & Audit Stream (Zero Fluff, 100% Real-time Engine Metrics) -->
         <div class="swarm-telemetry-grid" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; margin-top: 10px; background: #080d1a; padding: 10px 12px; border-radius: 6px; border: 1px solid #1e293b; font-family: monospace; font-size: 0.72rem;">
           <div><span style="color:#94a3b8;">Execution Engine:</span> <strong id="telActiveWorkers" style="color:#38bdf8;">1 / 1 (Single-World WASM)</strong></div>
           <div><span style="color:#94a3b8;">Batch Train Size:</span> <strong id="telBatchSize" style="color:#38bdf8;">0 ent/batch</strong></div>
@@ -480,10 +476,10 @@
       </div>
     </div>
 
-    <!-- Right Column: Live Backstage Cluster Inspector -->
+    <!-- Right Column: Cluster Node Inspector -->
     <div class="card">
       <div class="card-header">
-        <h2>Backstage Multi-Tier Node Inspector (Live)</h2>
+        <h2>Cluster Inspector</h2>
         <span style="font-size: 0.74rem; color: var(--muted);" id="pollStatus">Polling cluster...</span>
       </div>
 
@@ -491,8 +487,8 @@
         <!-- Tier 1: Primary -->
         <div class="tier-box tier-primary">
           <div class="tier-title">
-            <span>TIER 1 — Primary Process (<code>:8734</code>)</span>
-            <span class="tier-tag" id="tagPrimary">RAM Maximized (hb_store_volatile)</span>
+            <span>Primary (<code>:8734</code>)</span>
+            <span class="tier-tag" id="tagPrimary">hb_store_volatile</span>
           </div>
           <div class="tier-grid">
             <span>Player Coord: <strong id="inspPrimaryCoord">—</strong></span>
@@ -507,8 +503,8 @@
         <!-- Tier 2A: SD1 -->
         <div class="tier-box tier-sd">
           <div class="tier-title">
-            <span>TIER 2A — Shared Data Replica 1 (<code>sd1 :8735</code>)</span>
-            <span class="tier-tag" id="tagSd1">RAM Latest + LMDB Disk Snapshot (slot=1)</span>
+            <span>SD1 Replica (<code>sd1 :8735</code>)</span>
+            <span class="tier-tag" id="tagSd1">RAM + LMDB (slot=1)</span>
           </div>
           <div class="tier-grid">
             <span>Player Backup: <strong id="inspSd1Coord">—</strong></span>
@@ -523,8 +519,8 @@
         <!-- Tier 2B: SD2 -->
         <div class="tier-box tier-sd">
           <div class="tier-title">
-            <span>TIER 2B — Shared Data Replica 2 (<code>sd2 :8736</code>)</span>
-            <span class="tier-tag" id="tagSd2">RAM Latest + LMDB Disk Snapshot (slot=1)</span>
+            <span>SD2 Replica (<code>sd2 :8736</code>)</span>
+            <span class="tier-tag" id="tagSd2">RAM + LMDB (slot=1)</span>
           </div>
           <div class="tier-grid">
             <span>Player Backup: <strong id="inspSd2Coord">—</strong></span>
@@ -539,8 +535,8 @@
         <!-- Tier 3: Arbit -->
         <div class="tier-box tier-arbit">
           <div class="tier-title">
-            <span>TIER 3 — Arbit Consensus Process (<code>arbit :8737</code>)</span>
-            <span class="tier-tag" id="tagArbit">Async Checkpoint via ~relay@1.0/cast</span>
+            <span>Arbit Consensus (<code>arbit :8737</code>)</span>
+            <span class="tier-tag" id="tagArbit">Async via ~relay@1.0/cast</span>
           </div>
           <div class="tier-grid">
             <span>Official Tick: <strong id="inspArbitTick">—</strong></span>
@@ -552,11 +548,11 @@
           </div>
         </div>
 
-        <!-- Tier 4: Arweave L1 Permaweb Ledger -->
+        <!-- Tier 4: Arweave L1 -->
         <div class="tier-box tier-l1">
           <div class="tier-title">
-            <span>TIER 4 — Arweave L1 Permaweb Ledger (<code>arlocal :1984</code>)</span>
-            <span class="tier-tag" id="tagL1" style="background:rgba(217,119,6,0.18); color:var(--amber); border-color:rgba(217,119,6,0.35);">Decentralized Permanent Settlement</span>
+            <span>Arweave L1 (<code>arlocal :1984</code>)</span>
+            <span class="tier-tag" id="tagL1" style="background:rgba(217,119,6,0.18); color:var(--amber); border-color:rgba(217,119,6,0.35);">L1 Settlement</span>
           </div>
           <div class="tier-grid">
             <span>L1 Node Status: <strong id="inspL1Status" style="color:var(--green);">—</strong></span>
@@ -1639,9 +1635,9 @@
 
         const pBadge = document.getElementById("primaryBadge");
         pBadge.className = "badge ok";
-        pBadge.innerHTML = `Discovered Primary: <strong>${discoveredPrimaryUrl}</strong>`;
+        pBadge.innerHTML = `Primary: <strong>${discoveredPrimaryUrl}</strong>`;
 
-        appendLog(`Genesis Discovery <code>${GENESIS_URL}</code> &rarr; Discovered Primary at <strong>${discoveredPrimaryUrl}</strong> | SD1 at <strong>${discoveredSd1Url}</strong>`);
+        appendLog(`Genesis <code>${GENESIS_URL}</code> &rarr; Primary <strong>${discoveredPrimaryUrl}</strong> | SD1 <strong>${discoveredSd1Url}</strong>`);
 
         // Query database specifically for existing player coordinates on relog/refresh
         let existingPoint = null;
@@ -1720,7 +1716,7 @@
           document.getElementById("hudTick").textContent = `#${confirmedPos.tick}`;
           const elSdNodes = document.getElementById("hudSdNodes");
           if (elSdNodes) {
-            elSdNodes.textContent = confirmedReplica === "sd1+sd2" ? "SD1+SD2 [LMDB Quorum]" : (confirmedReplica === "sd2" ? "SD2 [Duplicate Node LMDB]" : `${confirmedReplica} (LMDB disk verified)`);
+            elSdNodes.textContent = confirmedReplica === "sd1+sd2" ? "SD1+SD2 [LMDB Quorum]" : `${confirmedReplica.toUpperCase()} [LMDB]`;
           }
           const elSdSub = document.getElementById("hudSdSub");
           if (elSdSub) {
@@ -1937,16 +1933,16 @@
         if (elEpoch) elEpoch.innerHTML = `<span>Lag: 0 ticks &middot; Authoritative ${confirmedReplica.toUpperCase()} State</span>`;
         const elSdNodes = document.getElementById("hudSdNodes");
         if (elSdNodes) {
-          elSdNodes.textContent = confirmedReplica === "sd1+sd2" ? "SD1+SD2 [LMDB Quorum]" : (confirmedReplica === "sd2" ? "SD2 [Duplicate Node LMDB]" : (confirmedReplica === "sd1" ? "sd1 (LMDB disk verified)" : `${confirmedReplica} (LMDB disk verified)`));
+          elSdNodes.textContent = confirmedReplica === "sd1+sd2" ? "SD1+SD2 [LMDB Quorum]" : `${confirmedReplica.toUpperCase()} [LMDB]`;
         }
         const elSdSub = document.getElementById("hudSdSub");
         if (elSdSub) elSdSub.textContent = `Rolled back to latest disk tick #${confirmedPos.tick}`;
         setGateBadge("unavailable", { replicas: [confirmedReplica] });
 
         appendLog(
-          `<span class="ack">⚡ [Rollback to SD]:</span> Authoritative state restored directly from ${confirmedReplica.toUpperCase()} LMDB disk: ` +
+          `<span class="ack">[Rollback]:</span> Restored from ${confirmedReplica.toUpperCase()} LMDB: ` +
           `<strong>(${confirmedPos.x}, ${confirmedPos.y})</strong> @ tick <strong>#${confirmedPos.tick}</strong> ` +
-          `(root: <code>${String(sdRoot || "—").slice(0, 14)}…</code>) [Reason: ${reason}]`
+          `(root: <code>${String(sdRoot || "—").slice(0, 14)}…</code>) [${reason}]`
         );
         if (statusEl) statusEl.textContent = `Rolled back to tick #${confirmedPos.tick} (${confirmedReplica})`;
       } catch (err) {
@@ -1955,12 +1951,11 @@
       }
     }
 
-    // Clean Relog: Clears transient client state and re-hydrates authoritative state directly from the database
     async function relogSession() {
       const statusEl = document.getElementById("syncStatusMsg");
-      if (statusEl) statusEl.textContent = "Re-authenticating session...";
+      if (statusEl) statusEl.textContent = "Syncing with cluster...";
       try {
-        appendLog(`[Relog] Re-authenticating against Genesis & synchronizing authoritative state...`);
+        appendLog(`[Sync] Refreshing topology from Genesis and pulling SD state...`);
         // Cancel in-flight writes
         isWriting = false;
         queuedMove = null;
@@ -1978,17 +1973,17 @@
         await pollTelemetryMetrics();
 
         appendLog(
-          `<span class="ack">↺ [Relog Success]:</span> Client state re-authenticated & synchronized with SD1/Primary at ` +
+          `<span class="ack">↺ [Synced]:</span> Updated from SD1/Primary at ` +
           `tick <strong>#${confirmedPos.tick}</strong>: <code>(${confirmedPos.x}, ${confirmedPos.y})</code>`
         );
-        if (statusEl) statusEl.textContent = `Relogged @ tick #${confirmedPos.tick}`;
+        if (statusEl) statusEl.textContent = `Synced @ tick #${confirmedPos.tick}`;
       } catch (err) {
-        appendLog(`<span class="err">Relog Error:</span> ${err.message}`);
-        if (statusEl) statusEl.textContent = `Relog error: ${err.message}`;
+        appendLog(`<span class="err">Sync Error:</span> ${err.message}`);
+        if (statusEl) statusEl.textContent = `Sync error: ${err.message}`;
       }
     }
 
-    // ---- Honest ACK helpers -------------------------------------------------
+    // ---- ACK badge helpers --------------------------------------------------
     const ackStats = { accepted: 0, confirmed: 0, failed: 0 };
 
     function setGateBadge(kind, data, rtt) {
@@ -1997,13 +1992,13 @@
       if (kind === "accepted") ackStats.accepted++;
       else if (kind === "confirmed") ackStats.confirmed++;
       else if (kind === "unavailable") ackStats.failed++;
-      const label = kind === "confirmed" ? "confirmed (200 SD Quorum Replicated)"
+      const label = kind === "confirmed" ? "confirmed (200 SD Quorum)"
         : kind === "accepted" ? "accepted (202 Primary RAM, awaiting SD)"
         : kind === "unavailable" ? "503 quorum unavailable (rolled back)"
         : kind === "pending" ? "pending (awaiting SD quorum)"
         : "error";
       el.className = "badge " + (kind === "confirmed" ? "ok" : kind === "accepted" ? "ok" : "warn");
-      el.innerHTML = `Replication Gate: <strong>${label}</strong>` +
+      el.innerHTML = `Write Gate: <strong>${label}</strong>` +
         ` &middot; accepted ${ackStats.accepted} / confirmed ${ackStats.confirmed} / failed ${ackStats.failed}` +
         (rtt != null ? ` &middot; ${rtt} ms` : "") +
         (data && data.replicas ? ` &middot; [${data.replicas.join("+")}]` : "");
@@ -2355,17 +2350,17 @@
           const elSdNodes = document.getElementById("hudSdNodes");
           if (elSdNodes) elSdNodes.textContent = "SD1+SD2 [LMDB Quorum]";
           const elSdSub = document.getElementById("hudSdSub");
-          if (elSdSub) elSdSub.textContent = `Honest 2-of-3 Quorum Persisted (#${maxPersistTick})`;
+          if (elSdSub) elSdSub.textContent = `2-of-3 Quorum Persisted (#${maxPersistTick})`;
         } else if (s2Active) {
           const elSdNodes = document.getElementById("hudSdNodes");
-          if (elSdNodes) elSdNodes.textContent = "SD2 [Duplicate Node LMDB]";
+          if (elSdNodes) elSdNodes.textContent = "SD2 [LMDB]";
           const elSdSub = document.getElementById("hudSdSub");
-          if (elSdSub) elSdSub.textContent = `Duplicate Node Persisted (#${s2Tick})`;
+          if (elSdSub) elSdSub.textContent = `SD2 Persisted (#${s2Tick})`;
         } else if (s1Active) {
           const elSdNodes = document.getElementById("hudSdNodes");
-          if (elSdNodes) elSdNodes.textContent = "sd1 (LMDB disk verified)";
+          if (elSdNodes) elSdNodes.textContent = "SD1 [LMDB]";
           const elSdSub = document.getElementById("hudSdSub");
-          if (elSdSub) elSdSub.textContent = `SD1 Primary Replica Persisted (#${s1Tick})`;
+          if (elSdSub) elSdSub.textContent = `SD1 Persisted (#${s1Tick})`;
         }
 
         if (confirmedPos.tick === 0 && (sd1Point || sd2Point)) {
@@ -2479,7 +2474,7 @@
       ctx.fillStyle = "rgba(148, 163, 184, 0.75)";
       ctx.font = "10px monospace";
       ctx.textAlign = "left";
-      ctx.fillText("HYPERSTACK PIPELINE: Primary(:8734) → SD1/SD2(:8735/6) → Arbit(:8737) → Arweave L1(:1984)", 12, 18);
+      ctx.fillText("Primary(:8734) -> SD1/SD2(:8735/6) -> Arbit(:8737) -> Arweave L1(:1984)", 12, 18);
       ctx.restore();
 
       // ---- Cartesian grid: minor every 10px, major every 50px, labeled every 100px ----
