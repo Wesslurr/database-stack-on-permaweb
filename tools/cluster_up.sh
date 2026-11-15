@@ -5,9 +5,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HB_SRC="$PROJECT_ROOT/HyperBEAM"
-[ -d "$HOME/erlang/27.0/bin" ] && export PATH="$HOME/erlang/27.0/bin:$PATH"
-[ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"
-[ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
+if [ -x /usr/bin/erl ]; then
+    _clean_path=""
+    IFS=':' read -ra _path_parts <<< "$PATH"
+    for _p in "${_path_parts[@]}"; do
+        case "$_p" in
+            "$HOME"/erlang/*/bin) ;;
+            *) [ -n "$_p" ] && _clean_path="${_clean_path:+$_clean_path:}$_p" ;;
+        esac
+    done
+    export PATH="$_clean_path"
+    unset _clean_path _path_parts _p
+fi
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+for _extra in "/usr/local/cargo/bin" "$HOME/.cargo/bin" "$HOME/.local/bin"; do
+    case ":$PATH:" in
+        *":$_extra:"*) ;;
+        *) [ -d "$_extra" ] && export PATH="$_extra:$PATH" ;;
+    esac
+done
+export CFLAGS="${CFLAGS:-} -Wno-error=incompatible-pointer-types"
 
 echo "=== [1/4] Ensuring clean state before launch ==="
 "$PROJECT_ROOT/tools/cluster_down.sh" >/dev/null 2>&1 || true
@@ -57,33 +74,20 @@ if [ ! -f "$HB_SRC/rebar.config" ]; then
 fi
 
 echo ""
-echo "=== [2.5/4] Precompiling HyperBEAM once (avoids shared _build races) ==="
-# In Erlang/OTP 26, maybe expressions (EEP-49) require enabling the feature in erl_opts
-if ! grep -q "feature, maybe_expr" "$HB_SRC/rebar.config" 2>/dev/null; then
-    sed -i 's/{erl_opts, \[/{erl_opts, [\n    {feature, maybe_expr, enable},/' "$HB_SRC/rebar.config"
-fi
-if ! grep -q "add, cowlib" "$HB_SRC/rebar.config" 2>/dev/null; then
-    sed -i 's/{override, gun, \[{deps, \[cowlib\]}\]}/{override, gun, [{deps, [cowlib]}]},\n    {add, cowlib, [{erl_opts, [{feature, maybe_expr, enable}]}]},\n    {add, gun, [{erl_opts, [{feature, maybe_expr, enable}]}]}/' "$HB_SRC/rebar.config"
-fi
-
-for F in "$HB_SRC/_build/default/lib/cowlib/src/cow_capsule.erl" "$HB_SRC/_build/default/lib/gun/src/gun.erl"; do
-    if [ -f "$F" ] && ! grep -q "feature(maybe_expr" "$F"; then
-        sed -i '1s/^/-feature(maybe_expr, enable).\n/' "$F"
-    fi
-done
-rm -f "$HB_SRC/_build/default/lib/cowlib/ebin/cow_capsule.beam" "$HB_SRC/_build/default/lib/gun/ebin/gun.beam"
-
-# Remove any legacy preloaded custom device before clean HyperBEAM compile
-rm -f "$HB_SRC/src/preloaded/arweave/dev_l1_checkpoint.erl"
-find "$HB_SRC/_build" -name "dev_l1_checkpoint.beam" -delete 2>/dev/null || true
-
+echo "=== [2.5/4] Precompiling HyperBEAM & Verifying Forge Devices ==="
 (
     cd "$HB_SRC"
     rebar3 compile
-    rebar3 device package --device-src ../engine/devices/l1_checkpoint/src --output-dir ../engine/devices/l1_checkpoint/_build/device-packages
-    rebar3 device verify --device-src ../engine/devices/l1_checkpoint/src --output-dir ../engine/devices/l1_checkpoint/_build/device-packages
+    for DEV_NAME in l1_checkpoint hs_wasm_output hs_push; do
+        DEV_SRC="../engine/devices/${DEV_NAME}/src"
+        DEV_OUT="../engine/devices/${DEV_NAME}/_build/device-packages"
+        if [ -d "$DEV_SRC" ]; then
+            rebar3 device package --device-src "$DEV_SRC" --output-dir "$DEV_OUT"
+            rebar3 device verify --device-src "$DEV_SRC" --output-dir "$DEV_OUT"
+        fi
+    done
 )
-echo "  [OK] HyperBEAM compiled & external Forge device verified."
+echo "  [OK] HyperBEAM compiled & external Forge devices verified."
 
 echo ""
 echo "=== [2.7/4] Compiling Rust WASM Engines (Primary & Shared Data) ==="
@@ -112,13 +116,13 @@ echo "=== [3/4] Starting 5 Independent HyperBEAM Worker Nodes in Tmux ==="
 # hb-genesis first so its wallet is created and build_configs.py can populate
 # arbit's trusted-device-signers before hb-arbit starts.
 if [ ! -f "$PROJECT_ROOT/engine/data/genesis/wallet.json" ]; then
-    tmux new-session -d -s "hb-genesis" -c "$HB_SRC"
+    tmux new-session -d -s "hb-genesis" -c "$HB_SRC" "bash --noprofile --norc"
     tmux pipe-pane -t "hb-genesis" -o "cat >> \"$PROJECT_ROOT/logs/hb-genesis.log\""
-    tmux send-keys -t "hb-genesis" "export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && HB_PORT=\"8733\" HB_CONFIG=\"$PROJECT_ROOT/engine/config/genesis.json\" rebar3 shell --sname hb-genesis" C-m
+    tmux send-keys -t "hb-genesis" "export PATH=\"$PATH\" ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"8733\" HB_CONFIG=\"$PROJECT_ROOT/engine/config/genesis.json\" erl -sname hb-genesis -config config/app.config -pa _build/default/lib/*/ebin -eval '{ok, _} = application:ensure_all_started(hb).'" C-m
     echo "  [BOOTSTRAP] Waiting for hb-genesis wallet creation..."
     for attempt in {1..40}; do
         ADDR=$(curl -s -f --max-time 1 "http://127.0.0.1:8733/~meta@1.0/info/address" 2>/dev/null || echo "")
-        if [ -n "$ADDR" ] && [ "$ADDR" != "null" ]; then
+        if [ -n "$ADDR" ] && [ "$ADDR" != "null" ] && [ -f "$PROJECT_ROOT/engine/data/genesis/wallet.json" ]; then
             echo "  [BOOTSTRAP] Genesis address ready: $ADDR"
             break
         fi
@@ -140,13 +144,13 @@ for NODE_SPEC in "${NODES[@]}"; do
     if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
         continue
     fi
-    # Start tmux session running HyperBEAM node with interactive PTY and log persistence
-    tmux new-session -d -s "$SESSION_NAME" -c "$HB_SRC"
+    # Start tmux session running precompiled HyperBEAM node (avoids shared _build races)
+    tmux new-session -d -s "$SESSION_NAME" -c "$HB_SRC" "bash --noprofile --norc"
     tmux pipe-pane -t "$SESSION_NAME" -o "cat >> \"$PROJECT_ROOT/logs/${SESSION_NAME}.log\""
-    tmux send-keys -t "$SESSION_NAME" "export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" rebar3 shell --sname $SESSION_NAME" C-m
+    tmux send-keys -t "$SESSION_NAME" "export PATH=\"$PATH\" ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" erl -sname $SESSION_NAME -config config/app.config -pa _build/default/lib/*/ebin -eval '{ok, _} = application:ensure_all_started(hb).'" C-m
     echo "  [STARTED] Node '$SESSION_NAME' on port $PORT (config: $(basename "$CONFIG_PATH"))"
     # Brief pause to let node initialize its VM
-    sleep 3
+    sleep 1
 done
 
 echo ""

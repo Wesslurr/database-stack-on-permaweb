@@ -225,15 +225,9 @@ local function notify_sd_prune(topo, committed_tick, l1_tx_id, arbit_signer)
     local targets = {}
     if topo.sd1_url then
         table.insert(targets, { url = topo.sd1_url, process = topo.sd1_process or "sd1", role = "sd1" })
-        for w = 1, 10 do
-            table.insert(targets, { url = topo.sd1_url, process = "sd1_" .. tostring(w), role = "sd1_" .. tostring(w) })
-        end
     end
     if topo.sd2_url then
         table.insert(targets, { url = topo.sd2_url, process = topo.sd2_process or "sd2", role = "sd2" })
-        for w = 1, 10 do
-            table.insert(targets, { url = topo.sd2_url, process = "sd2_" .. tostring(w), role = "sd2_" .. tostring(w) })
-        end
     end
     local payload = string.format(
         [[{"action":"Prune-Committed-Slots","committed_tick":%d,"l1_tx_id":"%s","arbit_signer":"%s"}]],

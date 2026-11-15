@@ -4,18 +4,18 @@
 %% ar_tx record fields needed to inspect TX#tx.data (element 12 of #tx{})
 %% Avoid hardcoded path to ar.hrl by calling dev_ans104:to and reading TX#tx.data cleanly.
 main(Args) ->
+    ScriptDir = filename:dirname(filename:absname(escript:script_name())),
+    ProjectRoot = filename:dirname(ScriptDir),
+    DefaultDevSrc = filename:join([ProjectRoot, "engine", "devices", "l1_checkpoint", "src"]),
+    DefaultWallet = filename:join([ProjectRoot, "engine", "data", "genesis", "wallet.json"]),
+    DefaultHbRoot = filename:join([ProjectRoot, "HyperBEAM"]),
     {DeviceSrcRaw, WalletRaw, GenesisRaw, HbRootRaw} =
         case Args of
             [D, W, G, H] -> {D, W, G, H};
-            [D, W, G] -> {D, W, G, "/home/weslur/database/HyperBEAM"};
-            [D, W] -> {D, W, "http://127.0.0.1:8733", "/home/weslur/database/HyperBEAM"};
-            [D] -> {D, "/home/weslur/database/engine/data/genesis/wallet.json", "http://127.0.0.1:8733", "/home/weslur/database/HyperBEAM"};
-            [] -> {
-                "/home/weslur/database/engine/devices/l1_checkpoint/src",
-                "/home/weslur/database/engine/data/genesis/wallet.json",
-                "http://127.0.0.1:8733",
-                "/home/weslur/database/HyperBEAM"
-            }
+            [D, W, G] -> {D, W, G, DefaultHbRoot};
+            [D, W] -> {D, W, "http://127.0.0.1:8733", DefaultHbRoot};
+            [D] -> {D, DefaultWallet, "http://127.0.0.1:8733", DefaultHbRoot};
+            [] -> {DefaultDevSrc, DefaultWallet, "http://127.0.0.1:8733", DefaultHbRoot}
         end,
     DeviceSrc = filename:absname(DeviceSrcRaw),
     WalletPath = filename:absname(WalletRaw),

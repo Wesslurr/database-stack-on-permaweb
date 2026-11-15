@@ -3,7 +3,7 @@ import os
 import glob
 import subprocess
 
-PROJECT_ROOT = "/home/weslur/database"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 DATA_DIR = os.path.join(PROJECT_ROOT, "engine", "data")
 NODES = ["genesis", "primary", "sd1", "sd2", "arbit"]
 

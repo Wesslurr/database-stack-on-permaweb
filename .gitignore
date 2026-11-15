@@ -10,8 +10,10 @@ logs/
 cache-mainnet/
 hyperbeam-key.json
 engine/data/*/lmdb/
+engine/data/*/wallet.json
 engine/data/*/*.log
 engine/data/*/erl_crash.dump
+engine/data/wasm_store/
 
 # Rust WASM build artifacts
 engine/processes/*/target/

@@ -1,0 +1,9 @@
+{application, hs_push,
+    [
+        {description, "HyperStack Outbox Relay Push Wrapper Device (delegates to upstream push@1.0 and dispatches resolve-only relay messages)"},
+        {vsn, "0.1.0"},
+        {registered, []},
+        {applications, [kernel, stdlib, hb]},
+        {env, []},
+        {modules, []}
+    ]}.

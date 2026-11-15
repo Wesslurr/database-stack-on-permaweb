@@ -23,11 +23,12 @@ Genesis-Centric Node Configuration Builder (Canonical AO WASM + Lua L1)
 """
 
 import base64
-import copy
 import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 from urllib.parse import urlparse
 
 
@@ -45,9 +46,21 @@ def compute_wallet_address(wallet_path: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+HB_ROOT = os.path.join(PROJECT_ROOT, "HyperBEAM")
 CONFIG_DIR = os.path.join(PROJECT_ROOT, "engine", "config")
 DATA_DIR = os.path.join(PROJECT_ROOT, "engine", "data")
+WASM_STORE_DIR = os.path.join(DATA_DIR, "wasm_store")
 PROCESSES_DIR = os.path.join(PROJECT_ROOT, "engine", "processes")
+DEVICES_DIR = os.path.join(PROJECT_ROOT, "engine", "devices")
+PREPARE_WASM_ESCRIPT = os.path.join(PROJECT_ROOT, "tools", "prepare_wasm_store.escript")
+PRIMARY_WASM_PATH = os.path.join(
+    PROCESSES_DIR, "primary", "target", "wasm32-unknown-unknown", "release", "primary_engine.wasm"
+)
+SD_WASM_PATH = os.path.join(
+    PROCESSES_DIR, "shared_data", "target", "wasm32-unknown-unknown", "release", "sd_engine.wasm"
+)
+HS_WASM_OUTPUT_SRC = os.path.join(DEVICES_DIR, "hs_wasm_output", "src")
+HS_PUSH_SRC = os.path.join(DEVICES_DIR, "hs_push", "src")
 
 GENESIS_SCRIPT_PATH = os.path.join(PROCESSES_DIR, "genesis", "genesis_process.lua")
 GENESIS_URL = "http://127.0.0.1:8733"
@@ -89,74 +102,69 @@ def parse_genesis_topology(genesis_lua_src: str):
     return discovered_nodes, l1_gateway
 
 
+def prepare_wasm_images():
+    """Populate read-only hb_store_fs with WASM binaries and return ImageID map."""
+    os.makedirs(WASM_STORE_DIR, exist_ok=True)
+    hb_ebin = os.path.join(HB_ROOT, "_build", "default", "lib", "hb", "ebin")
+    if not os.path.isdir(hb_ebin):
+        print("[WARN] HyperBEAM/_build missing; WASM ImageIDs left unset until HyperBEAM compiles.")
+        return {"primary": "", "shared_data": ""}
+    if not (os.path.isfile(PRIMARY_WASM_PATH) and os.path.isfile(SD_WASM_PATH)):
+        print("[WARN] Compiled .wasm binaries missing; WASM ImageIDs left unset until cargo build runs.")
+        return {"primary": "", "shared_data": ""}
+
+    escript_bin = shutil.which("escript") or "escript"
+    res = subprocess.run(
+        [
+            escript_bin,
+            PREPARE_WASM_ESCRIPT,
+            WASM_STORE_DIR,
+            HB_ROOT,
+            f"primary={PRIMARY_WASM_PATH}",
+            f"shared_data={SD_WASM_PATH}",
+            f"dev=hs-wasm-output@1.0={HS_WASM_OUTPUT_SRC}",
+            f"dev=hs-push@1.0={HS_PUSH_SRC}",
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"prepare_wasm_store.escript failed ({res.returncode}): {res.stderr or res.stdout}"
+        )
+    lines = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
+    return json.loads(lines[-1])
+
+
 def main():
     with open(GENESIS_SCRIPT_PATH, "r", encoding="utf-8") as f:
         genesis_src = f.read()
 
     nodes, l1_gateway = parse_genesis_topology(genesis_src)
     os.makedirs(CONFIG_DIR, exist_ok=True)
+    wasm_images = prepare_wasm_images()
 
     for node in nodes:
         role = node["process_name"]
         is_primary = role == "primary"
 
-        if role == "primary":
-            wasm_path = os.path.join(PROJECT_ROOT, "engine", "processes", "primary", "target", "wasm32-unknown-unknown", "release", "primary_engine.wasm")
+        if role in ("primary", "sd1", "sd2"):
+            image_key = "primary" if role == "primary" else "shared_data"
             proc_def = {
                 "data-protocol": "ao",
                 "variant": "ao.N.1",
                 "device": "process@1.0",
                 "type": "Process",
-                "device-stack": [
-                    "json-iface@1.0",
-                    "wasm-64@1.0",
-                    "multipass@1.0",
-                ],
-                "execution-device": "stack@1.0",
+                "execution-device": "hs-wasm-output@1.0",
                 "scheduler-device": "scheduler@1.0",
-                "push-device": "push@1.0",
+                "push-device": "hs-push@1.0",
                 "node-role": role,
                 "requires-sign": False,
                 "scheduler-commitment-spec": "httpsig@1.0",
                 "scheduler_commitment_spec": "httpsig@1.0",
-                "image": wasm_path,
+                "image": wasm_images[image_key],
                 "output-prefix": "wasm",
-                "passes": 2,
-                "stack-keys": [
-                    "init",
-                    "compute",
-                    "snapshot",
-                    "normalize",
-                ],
-            }
-        elif role in ("sd1", "sd2"):
-            wasm_path = os.path.join(PROJECT_ROOT, "engine", "processes", "shared_data", "target", "wasm32-unknown-unknown", "release", "sd_engine.wasm")
-            proc_def = {
-                "data-protocol": "ao",
-                "variant": "ao.N.1",
-                "device": "process@1.0",
-                "type": "Process",
-                "device-stack": [
-                    "json-iface@1.0",
-                    "wasm-64@1.0",
-                    "multipass@1.0",
-                ],
-                "execution-device": "stack@1.0",
-                "scheduler-device": "scheduler@1.0",
-                "push-device": "push@1.0",
-                "node-role": role,
-                "requires-sign": False,
-                "scheduler-commitment-spec": "httpsig@1.0",
-                "scheduler_commitment_spec": "httpsig@1.0",
-                "image": wasm_path,
-                "output-prefix": "wasm",
-                "passes": 2,
-                "stack-keys": [
-                    "init",
-                    "compute",
-                    "snapshot",
-                    "normalize",
-                ],
             }
         else:
             with open(node["script_path"], "r", encoding="utf-8") as f:
@@ -168,8 +176,8 @@ def main():
                 "push-device": "push@1.0",
                 "node-role": role,
                 "requires-sign": True,
-                "scheduler-commitment-spec": "ans104@1.0",
-                "scheduler_commitment_spec": "ans104@1.0",
+                "scheduler-commitment-spec": "httpsig@1.0",
+                "scheduler_commitment_spec": "httpsig@1.0",
                 "module": {
                     "content-type": "text/x-lua",
                     "body": script_body,
@@ -180,24 +188,29 @@ def main():
         if role != "genesis":
             proc_def["genesis-url"] = GENESIS_URL
 
-        volatile_store = {
-            "ao-types": 'atom=("store-module")',
-            "store-module": "hb_store_volatile",
-            "name": f"{node['name']}_ram",
-        }
         lmdb_store = {
             "ao-types": 'atom=("store-module")',
             "store-module": "hb_store_lmdb",
             "name": os.path.join(DATA_DIR, node["name"], "lmdb"),
+            "capacity": 4 * 1024 * 1024 * 1024,
             "sync": False,
+            "read-ahead": False,
+            "flush-every": 0,
         }
 
         # Tiered Storage Policy:
-        # - Primary: 100% Pure RAM (`hb_store_volatile` ONLY — zero LMDB disk I/O)
-        # - SD1 / SD2 / Genesis: Pure LMDB Disk (`hb_store_lmdb` ONLY — 80% disk, minimal RAM)
-        # - Arbit: Pure LMDB Disk backed by `hb_store_gateway` (peer gateway routes to Genesis
+        # - Primary / SD1 / SD2 / Genesis: LMDB (`hb_store_lmdb`, `sync: False`) so
+        #   large 1.31 MB WASM snapshots stay in LMDB mmap / OS page cache instead of
+        #   bloating BEAM binary heap and triggering `system_memory_high_watermark`.
+        # - Arbit: LMDB backed by `hb_store_gateway` (peer gateway routes to Genesis
         #   for dynamic HyperBEAM Forge device hot-loading without preloading custom devices)
-        node_store = volatile_store if is_primary else lmdb_store
+        node_store = lmdb_store
+        wasm_fs_store = {
+            "ao-types": 'atom=("store-module")',
+            "store-module": "hb_store_fs",
+            "name": WASM_STORE_DIR,
+            "access": ["read"],
+        }
         if role == "arbit":
             stores = [
                 node_store,
@@ -207,6 +220,8 @@ def main():
                     "local-store": node_store,
                 },
             ]
+        elif role in ("primary", "sd1", "sd2"):
+            stores = [node_store, wasm_fs_store]
         else:
             stores = [node_store]
         # Aligned snapshot intervals: Primary stays fast in RAM; replicas snapshot periodically on LMDB disk
@@ -222,8 +237,7 @@ def main():
         # oversized body must be rejected identically on Primary and replicas.
         http_max_body = 65536
 
-        if not is_primary:
-            os.makedirs(os.path.join(DATA_DIR, node["name"], "lmdb"), exist_ok=True)
+        os.makedirs(os.path.join(DATA_DIR, node["name"], "lmdb"), exist_ok=True)
 
         # Micro-Epoch signing: Genesis and Arbit sign official topology & settlements,
         # while Primary & SD hot path runs ultra-fast in-memory/disk quorum without per-tick RSA bottleneck
@@ -242,23 +256,31 @@ def main():
             # Keep persistent Erlang process workers alive across slots & low-latency scheduling
             "process-workers": True,
             "process_workers": True,
+            "spawn-worker": False,
+            "spawn_worker": False,
+            "process-now-from-cache": True,
+            "process_now_from_cache": True,
+            "http-client": "hackney",
+            "http_client": "hackney",
+            "relay-http-client": "hackney",
+            "relay_http_client": "hackney",
             "scheduling-mode": "local_confirmation",
             "scheduling_mode": "local_confirmation",
             "scheduler-lookahead": False,
             "scheduler_lookahead": False,
-            "scheduler-default-commitment-spec": "ans104@1.0" if is_auth_authority else "httpsig@1.0",
-            "scheduler_default_commitment_spec": "ans104@1.0" if is_auth_authority else "httpsig@1.0",
+            "scheduler-default-commitment-spec": "httpsig@1.0",
+            "scheduler_default_commitment_spec": "httpsig@1.0",
             "force-signed": is_auth_authority,
             "force_signed": is_auth_authority,
             "process-snapshot-slots": snapshot_slots,
             "process_snapshot_slots": snapshot_slots,
             "process-snapshot-time": False,
             "process_snapshot_time": False,
-            # Bounded request envelope + no cache writes for transient traffic.
+            # Bounded request envelope + skip cache lookup/write for transient traffic.
             "http-max-body": http_max_body,
             "http_max_body": http_max_body,
-            "cache-control": ["no-store"],
-            "cache_control": ["no-store"],
+            "cache-control": ["no-cache", "no-store"],
+            "cache_control": ["no-cache", "no-store"],
             # Eliminate default mainnet hooks & stdout debug trace bottlenecks,
             # while keeping `cache-write` indexing enabled on Genesis so Forge
             # artifacts written via `/~cache@1.0/write` are discoverable via GraphQL.
@@ -296,6 +318,14 @@ def main():
             cfg["genesis-url"] = GENESIS_URL
             cfg["genesis_url"] = GENESIS_URL
 
+        if role in ("primary", "sd1", "sd2"):
+            trusted_devs = {
+                "hs-wasm-output@1.0": wasm_images["hs-wasm-output@1.0"],
+                "hs-push@1.0": wasm_images["hs-push@1.0"],
+            }
+            cfg["trusted-devices"] = trusted_devs
+            cfg["trusted_devices"] = trusted_devs
+
         if role == "arbit":
             genesis_wallet_path = os.path.join(DATA_DIR, "genesis", "wallet.json")
             genesis_addr = compute_wallet_address(genesis_wallet_path)
@@ -324,7 +354,7 @@ def main():
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
 
-        storage_desc = "PURE_RAM(hb_store_volatile)" if is_primary else "PURE_LMDB_DISK(hb_store_lmdb)"
+        storage_desc = "PURE_LMDB_DISK(hb_store_lmdb)"
         print(
             f"[Genesis-Spawn] Built {out_file} -> Process '{role}' "
             f"(port {node['port']}, storage={storage_desc}, requires-sign=True, genesis-url={proc_def.get('genesis-url', 'SELF')})"

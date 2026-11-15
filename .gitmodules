@@ -2,4 +2,3 @@
 	path = HyperBEAM
 	url = https://github.com/permaweb/HyperBEAM.git
 	branch = edge
-	ignore = dirty

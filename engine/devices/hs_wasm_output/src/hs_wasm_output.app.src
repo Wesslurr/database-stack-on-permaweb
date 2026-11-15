@@ -1,0 +1,9 @@
+{application, hs_wasm_output,
+    [
+        {description, "HyperStack WASM Output Bridge Device (delegates to upstream json-iface@1.0 and preserves results/output)"},
+        {vsn, "0.1.0"},
+        {registered, []},
+        {applications, [kernel, stdlib, hb]},
+        {env, []},
+        {modules, []}
+    ]}.

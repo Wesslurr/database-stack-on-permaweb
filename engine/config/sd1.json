@@ -11,6 +11,14 @@
   "hosts_block_internal": false,
   "process-workers": true,
   "process_workers": true,
+  "spawn-worker": false,
+  "spawn_worker": false,
+  "process-now-from-cache": true,
+  "process_now_from_cache": true,
+  "http-client": "hackney",
+  "http_client": "hackney",
+  "relay-http-client": "hackney",
+  "relay_http_client": "hackney",
   "scheduling-mode": "local_confirmation",
   "scheduling_mode": "local_confirmation",
   "scheduler-lookahead": false,
@@ -26,9 +34,11 @@
   "http-max-body": 65536,
   "http_max_body": 65536,
   "cache-control": [
+    "no-cache",
     "no-store"
   ],
   "cache_control": [
+    "no-cache",
     "no-store"
   ],
   "on": {},
@@ -45,7 +55,18 @@
       "ao-types": "atom=(\"store-module\")",
       "store-module": "hb_store_lmdb",
       "name": "/home/weslur/database/engine/data/sd1/lmdb",
-      "sync": false
+      "capacity": 4294967296,
+      "sync": false,
+      "read-ahead": false,
+      "flush-every": 0
+    },
+    {
+      "ao-types": "atom=(\"store-module\")",
+      "store-module": "hb_store_fs",
+      "name": "/home/weslur/database/engine/data/wasm_store",
+      "access": [
+        "read"
+      ]
     }
   ],
   "match-index": [
@@ -53,7 +74,10 @@
       "ao-types": "atom=(\"store-module\")",
       "store-module": "hb_store_lmdb",
       "name": "/home/weslur/database/engine/data/sd1/lmdb",
-      "sync": false
+      "capacity": 4294967296,
+      "sync": false,
+      "read-ahead": false,
+      "flush-every": 0
     }
   ],
   "match_index": [
@@ -61,7 +85,10 @@
       "ao-types": "atom=(\"store-module\")",
       "store-module": "hb_store_lmdb",
       "name": "/home/weslur/database/engine/data/sd1/lmdb",
-      "sync": false
+      "capacity": 4294967296,
+      "sync": false,
+      "read-ahead": false,
+      "flush-every": 0
     }
   ],
   "priv-store": [
@@ -69,7 +96,10 @@
       "ao-types": "atom=(\"store-module\")",
       "store-module": "hb_store_lmdb",
       "name": "/home/weslur/database/engine/data/sd1/lmdb",
-      "sync": false
+      "capacity": 4294967296,
+      "sync": false,
+      "read-ahead": false,
+      "flush-every": 0
     }
   ],
   "priv_store": [
@@ -77,20 +107,29 @@
       "ao-types": "atom=(\"store-module\")",
       "store-module": "hb_store_lmdb",
       "name": "/home/weslur/database/engine/data/sd1/lmdb",
-      "sync": false
+      "capacity": 4294967296,
+      "sync": false,
+      "read-ahead": false,
+      "flush-every": 0
     }
   ],
   "attested-store": {
     "ao-types": "atom=(\"store-module\")",
     "store-module": "hb_store_lmdb",
     "name": "/home/weslur/database/engine/data/sd1/lmdb",
-    "sync": false
+    "capacity": 4294967296,
+    "sync": false,
+    "read-ahead": false,
+    "flush-every": 0
   },
   "attested_store": {
     "ao-types": "atom=(\"store-module\")",
     "store-module": "hb_store_lmdb",
     "name": "/home/weslur/database/engine/data/sd1/lmdb",
-    "sync": false
+    "capacity": 4294967296,
+    "sync": false,
+    "read-ahead": false,
+    "flush-every": 0
   },
   "node_processes": {
     "sd1": {
@@ -98,30 +137,26 @@
       "variant": "ao.N.1",
       "device": "process@1.0",
       "type": "Process",
-      "device-stack": [
-        "json-iface@1.0",
-        "wasm-64@1.0",
-        "multipass@1.0"
-      ],
-      "execution-device": "stack@1.0",
+      "execution-device": "hs-wasm-output@1.0",
       "scheduler-device": "scheduler@1.0",
-      "push-device": "push@1.0",
+      "push-device": "hs-push@1.0",
       "node-role": "sd1",
       "requires-sign": false,
       "scheduler-commitment-spec": "httpsig@1.0",
       "scheduler_commitment_spec": "httpsig@1.0",
-      "image": "/home/weslur/database/engine/processes/shared_data/target/wasm32-unknown-unknown/release/sd_engine.wasm",
+      "image": "F5sHAtixilL3DVxye7LEmm0DAJ53ufMJNN3Of0uVTGc",
       "output-prefix": "wasm",
-      "passes": 2,
-      "stack-keys": [
-        "init",
-        "compute",
-        "snapshot",
-        "normalize"
-      ],
       "genesis-url": "http://127.0.0.1:8733"
     }
   },
   "genesis-url": "http://127.0.0.1:8733",
-  "genesis_url": "http://127.0.0.1:8733"
+  "genesis_url": "http://127.0.0.1:8733",
+  "trusted-devices": {
+    "hs-wasm-output@1.0": "rnRX2sw2NBfdjCRzcGeWL7WSZlyGO27kOmc7a2pfIPo",
+    "hs-push@1.0": "yskpYoEK5GJi7D32r5KocqMopDDpo03pZX5S4u7UGiI"
+  },
+  "trusted_devices": {
+    "hs-wasm-output@1.0": "rnRX2sw2NBfdjCRzcGeWL7WSZlyGO27kOmc7a2pfIPo",
+    "hs-push@1.0": "yskpYoEK5GJi7D32r5KocqMopDDpo03pZX5S4u7UGiI"
+  }
 }

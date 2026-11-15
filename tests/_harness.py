@@ -86,15 +86,20 @@ def kill_node(name):
 
 
 def start_node(name):
+    clean_parts = [p for p in os.environ.get("PATH", "").split(":") if p and "/erlang/" not in p]
+    for extra in (os.path.expanduser("~/.cargo/bin"), os.path.expanduser("~/.local/bin")):
+        if os.path.isdir(extra) and extra not in clean_parts:
+            clean_parts.insert(0, extra)
+    clean_path = ":".join(clean_parts)
     cmd = (
-        "[ -d \"$HOME/erlang/27.0/bin\" ] && export PATH=\"$HOME/erlang/27.0/bin:$PATH\"; "
-        "[ -d \"$HOME/.local/bin\" ] && export PATH=\"$HOME/.local/bin:$PATH\"; "
-        "[ -d \"$HOME/.cargo/bin\" ] && export PATH=\"$HOME/.cargo/bin:$PATH\"; "
-        "export ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && "
-        "cd \"%s/HyperBEAM\" && HB_PORT=\"%d\" HB_CONFIG=\"%s\" rebar3 shell --sname %s"
-        % (PROJECT_ROOT, PORTS[name], CONFIG[name], TMUX[name])
+        "export PATH=\"%s\" CFLAGS=\"${CFLAGS:-} -Wno-error=incompatible-pointer-types\" "
+        "ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && "
+        "cd \"%s/HyperBEAM\" && HB_PORT=\"%d\" HB_CONFIG=\"%s\" "
+        "erl -sname %s -config config/app.config -pa _build/default/lib/*/ebin "
+        "-eval '{ok, _} = application:ensure_all_started(hb).'"
+        % (clean_path, PROJECT_ROOT, PORTS[name], CONFIG[name], TMUX[name])
     )
-    subprocess.run(["tmux", "new-session", "-d", "-s", TMUX[name], "bash -c '%s'" % cmd],
+    subprocess.run(["tmux", "new-session", "-d", "-s", TMUX[name], "bash --noprofile --norc -c '%s'" % cmd.replace("'", "'\"'\"'")],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return wait_ready(name)
 

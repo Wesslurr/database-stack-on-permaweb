@@ -330,7 +330,7 @@
   <header>
     <div class="title-group">
       <h1><span class="dot-red"></span> HyperStack State Engine — Dual-Watermark Red Circle Benchmark</h1>
-      <p><strong>100% Honest Localhost Proving Ground:</strong> Primary (:8734) executes in volatile RAM; SD1 (:8735) & SD2 (:8736) maintain persistent LMDB disk quorum; Genesis (:8733) provides constitutional discovery; Arbit (:8737) anchors checkpoints to Arweave L1 (:1984).
+      <p><strong>100% Honest Localhost / Codespace Proving Ground:</strong> Primary (:8734) & SD1/SD2 (:8735/:8736) run Rust WASM on unmodified HyperBEAM via external Forge devices (<code>hs-wasm-output@1.0</code> + <code>hs-push@1.0</code>) backed by <code>hb_store_lmdb</code>; Genesis (:8733) provides constitutional discovery & Forge artifact hosting; Arbit (:8737) hot-loads <code>~l1-checkpoint@1.0</code> to anchor checkpoints to Arweave L1 (:1984).
       To inspect true multi-tier database latency without fake client-side prediction:
       The <strong>Cyan Ring (◎)</strong> displays instantaneous <strong>L0 Head Accept (HTTP 202)</strong> in Primary RAM (~5–10ms).
       The <strong>Solid Red Circle (●)</strong> moves <em>strictly after</em> <strong>L1 Quorum Confirmation (HTTP 200 Replicated)</strong> is verified by SD1/SD2 LMDB disk persistence (~80–150ms).
@@ -2443,7 +2443,7 @@
             if (txid.startsWith("arlocal_block_") || txid.startsWith("http_tx_")) {
               elTx.textContent = txid;
             } else {
-              elTx.innerHTML = `<a href="http://127.0.0.1:1984/tx/${txid}" target="_blank" style="color:var(--cyan); text-decoration:underline; font-weight:bold;">${txid} ↗</a>`;
+              elTx.innerHTML = `<a href="${clusterUrl(1984, `/tx/${txid}`)}" target="_blank" style="color:var(--cyan); text-decoration:underline; font-weight:bold;">${txid} ↗</a>`;
             }
           } else if (arbitState && arbitState.official_tick > 0) {
             elTx.textContent = `Committed to L1 Block #${arbitState.l1_height || 0}`;

@@ -2,6 +2,18 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+for _extra in "/usr/local/cargo/bin" "$HOME/.cargo/bin" "$HOME/.local/bin"; do
+    case ":$PATH:" in
+        *":$_extra:"*) ;;
+        *) [ -d "$_extra" ] && export PATH="$_extra:$PATH" ;;
+    esac
+done
+
 wait_for_apt() {
     while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
         echo "  [Wait] Background apt/dpkg lock is active, waiting 2s..."
@@ -13,7 +25,10 @@ echo "=== [Codespace Setup] Installing Erlang/OTP 27, Rebar3, C/C++ Build Tools 
 wait_for_apt
 sudo apt-get update
 wait_for_apt
-sudo apt-get install -y software-properties-common curl git tmux psmisc procps build-essential cmake libtool autoconf automake jq
+sudo apt-get install -y \
+    software-properties-common curl git tmux psmisc procps \
+    build-essential cmake libtool autoconf automake pkg-config \
+    libssl-dev zip unzip ca-certificates jq
 
 # Add RabbitMQ modern Erlang PPA for Ubuntu 22.04 (provides Erlang 27)
 wait_for_apt
@@ -21,7 +36,11 @@ sudo add-apt-repository -y ppa:rabbitmq/rabbitmq-erlang
 wait_for_apt
 sudo apt-get update
 wait_for_apt
-sudo apt-get install -y erlang-base erlang-dev erlang-parsetools erlang-eunit erlang-asn1 erlang-crypto erlang-public-key erlang-ssl erlang-syntax-tools erlang-tools erlang-inets erlang-edoc erlang-xmerl erlang-os-mon erlang-runtime-tools
+sudo apt-get install -y \
+    erlang-base erlang-dev erlang-parsetools erlang-eunit erlang-asn1 \
+    erlang-crypto erlang-public-key erlang-ssl erlang-syntax-tools \
+    erlang-tools erlang-inets erlang-edoc erlang-xmerl erlang-os-mon \
+    erlang-runtime-tools
 
 # Install Rebar3
 if ! command -v rebar3 &>/dev/null; then
@@ -36,41 +55,36 @@ if command -v rustup &>/dev/null; then
     rustup target add wasm32-unknown-unknown
 fi
 
-# Ensure Docker daemon is responding before building image
+# Ensure Docker daemon is responding before pulling ArLocal image
 echo "=== [Codespace Setup] Checking Docker daemon ==="
-for i in {1..30}; do
+DOCKER_OK=false
+for _i in {1..30}; do
     if docker info >/dev/null 2>&1; then
         echo "  [OK] Docker daemon is ready."
+        DOCKER_OK=true
         break
     fi
     sleep 1
 done
 
-# Fetch official ArLocal Docker image if not present
-if ! docker image inspect ao-localnet-arlocal:latest &>/dev/null; then
-    echo "=== [Codespace Setup] Fetching official ArLocal Docker image ==="
-    docker pull textury/arlocal:latest
-    docker tag textury/arlocal:latest ao-localnet-arlocal:latest
-    echo "  [OK] ArLocal Docker image ready."
-fi
-
-# Initialize git submodule
-echo "=== [Codespace Setup] Initializing HyperBEAM submodule ==="
-git submodule update --init --recursive || true
-
-# Patch rebar.config for Erlang OTP 26/27 EEP-49 maybe expression support
-if [ -f "HyperBEAM/rebar.config" ] && ! grep -q "feature, maybe_expr" "HyperBEAM/rebar.config" 2>/dev/null; then
-    sed -i 's/{erl_opts, \[/{erl_opts, [\n    {feature, maybe_expr, enable},/' "HyperBEAM/rebar.config"
-fi
-if [ -f "HyperBEAM/rebar.config" ] && ! grep -q "add, cowlib" "HyperBEAM/rebar.config" 2>/dev/null; then
-    sed -i 's/{override, gun, \[{deps, \[cowlib\]}\]}/{override, gun, [{deps, [cowlib]}]},\n    {add, cowlib, [{erl_opts, [{feature, maybe_expr, enable}]}]},\n    {add, gun, [{erl_opts, [{feature, maybe_expr, enable}]}]}/' "HyperBEAM/rebar.config"
-fi
-
-for F in HyperBEAM/_build/default/lib/cowlib/src/cow_capsule.erl HyperBEAM/_build/default/lib/gun/src/gun.erl; do
-    if [ -f "$F" ] && ! grep -q "feature(maybe_expr" "$F"; then
-        sed -i '1s/^/-feature(maybe_expr, enable).\n/' "$F"
+# Pre-fetch ArLocal Docker image if Docker daemon is ready
+if [ "$DOCKER_OK" = true ]; then
+    if ! docker image inspect ao-localnet-arlocal:latest &>/dev/null; then
+        echo "=== [Codespace Setup] Fetching official ArLocal Docker image ==="
+        if docker pull textury/arlocal:latest; then
+            docker tag textury/arlocal:latest ao-localnet-arlocal:latest
+            echo "  [OK] ArLocal Docker image ready."
+        else
+            echo "  [WARN] Failed to pull textury/arlocal:latest during setup; cluster_up.sh will retry on launch."
+        fi
     fi
-done
+else
+    echo "  [WARN] Docker daemon not yet ready in postCreateCommand; cluster_up.sh will handle ArLocal on launch."
+fi
+
+# Initialize unmodified HyperBEAM git submodule
+echo "=== [Codespace Setup] Initializing HyperBEAM submodule ==="
+git submodule update --init --recursive
 
 # Build Rust WASM process engines (primary_engine.wasm & sd_engine.wasm)
 if [ -d "engine/processes/primary" ] && [ -d "engine/processes/shared_data" ]; then
@@ -79,15 +93,26 @@ if [ -d "engine/processes/primary" ] && [ -d "engine/processes/shared_data" ]; t
     (cd engine/processes/shared_data && cargo build --target wasm32-unknown-unknown --release)
 fi
 
-# Precompile HyperBEAM BEAM modules once during container setup (clean, no preloaded custom devices)
-rm -f HyperBEAM/src/preloaded/arweave/dev_l1_checkpoint.erl
+# Precompile unmodified HyperBEAM & verify external HyperBEAM Forge devices
 if [ -f "HyperBEAM/rebar.config" ]; then
-    echo "=== [Codespace Setup] Compiling HyperBEAM ==="
-    (cd HyperBEAM && rebar3 compile || true)
+    echo "=== [Codespace Setup] Compiling HyperBEAM & Packaging External Forge Devices ==="
+    export CFLAGS="${CFLAGS:-} -Wno-error=incompatible-pointer-types"
+    (
+        cd HyperBEAM
+        rebar3 compile
+        for DEV_NAME in l1_checkpoint hs_wasm_output hs_push; do
+            DEV_SRC="../engine/devices/${DEV_NAME}/src"
+            DEV_OUT="../engine/devices/${DEV_NAME}/_build/device-packages"
+            if [ -d "$DEV_SRC" ]; then
+                rebar3 device package --device-src "$DEV_SRC" --output-dir "$DEV_OUT"
+                rebar3 device verify --device-src "$DEV_SRC" --output-dir "$DEV_OUT"
+            fi
+        done
+    )
 fi
 
-# Build single-world node configurations (genesis, primary, sd1, sd2, arbit)
+# Generate workspace-local node configs & populate engine/data/wasm_store
 echo "=== [Codespace Setup] Building node configurations ==="
-python3 tools/build_configs.py || true
+python3 tools/build_configs.py
 
 echo "=== [Codespace Setup] Complete! Ready to launch with ./start.sh ==="

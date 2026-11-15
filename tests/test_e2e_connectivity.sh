@@ -82,7 +82,7 @@ for NODE_SPEC in "${NODES[@]}"; do
     echo "--- Testing Node: $SESSION ($ROLE) on port $PORT ---"
     
     # 1. Check ~meta@1.0/info responsiveness
-    META_INFO=$(curl -s --max-time 3 "http://127.0.0.1:$PORT/~meta@1.0/info" || echo "")
+    META_INFO=$(curl -s --max-time 3 -H "Accept: application/json" "http://127.0.0.1:$PORT/~meta@1.0/info" || echo "")
     assert_not_empty "Node $SESSION ~meta@1.0/info responds" "$META_INFO"
     
     # 2. Check Arweave address (43 chars base64url)

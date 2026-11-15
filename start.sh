@@ -7,6 +7,25 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+if [ -x /usr/bin/erl ]; then
+    _clean_path=""
+    IFS=':' read -ra _path_parts <<< "$PATH"
+    for _p in "${_path_parts[@]}"; do
+        case "$_p" in
+            "$HOME"/erlang/*/bin) ;;
+            *) [ -n "$_p" ] && _clean_path="${_clean_path:+$_clean_path:}$_p" ;;
+        esac
+    done
+    export PATH="$_clean_path"
+    unset _clean_path _path_parts _p
+fi
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+for _extra in "/usr/local/cargo/bin" "$HOME/.cargo/bin" "$HOME/.local/bin"; do
+    case ":$PATH:" in
+        *":$_extra:"*) ;;
+        *) [ -d "$_extra" ] && export PATH="$_extra:$PATH" ;;
+    esac
+done
 
 echo "=========================================================="
 echo "      🚀 HyperStack Real-Time Engine Auto-Launcher        "
@@ -43,15 +62,7 @@ fi
 
 # 2. Launch cluster
 echo "=== [2/3] Launching Multi-Node HyperBEAM Cluster ==="
-if [ -f "HyperBEAM/rebar.config" ] && ! grep -q "feature, maybe_expr" "HyperBEAM/rebar.config" 2>/dev/null; then
-    sed -i 's/{erl_opts, \[/{erl_opts, [\n    {feature, maybe_expr, enable},/' "HyperBEAM/rebar.config"
-fi
-for F in HyperBEAM/_build/default/lib/cowlib/src/cow_capsule.erl HyperBEAM/_build/default/lib/gun/src/gun.erl; do
-    if [ -f "$F" ] && ! grep -q "feature(maybe_expr" "$F"; then
-        sed -i '1s/^/-feature(maybe_expr, enable).\n/' "$F"
-    fi
-done
-rm -f HyperBEAM/_build/default/lib/cowlib/ebin/cow_capsule.beam HyperBEAM/_build/default/lib/gun/ebin/gun.beam
+export CFLAGS="${CFLAGS:-} -Wno-error=incompatible-pointer-types"
 
 # Verify Rust WASM engine sources before cluster startup
 if [ ! -f "engine/processes/primary/src/lib.rs" ] || [ ! -f "engine/processes/shared_data/src/lib.rs" ]; then

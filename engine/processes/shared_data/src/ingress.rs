@@ -132,13 +132,21 @@ impl Ingress {
 
     pub fn parse_request(json_str: &str, max_entities: usize) -> Result<(SdAction, Option<u64>, String), &'static str> {
         let val: serde_json::Value = serde_json::from_str(json_str).map_err(|_| "Invalid JSON")?;
-        
+        let owned_inner: Option<serde_json::Value>;
         let root = if let Some(body_obj) = val.get("body").or_else(|| val.get("Data")).or_else(|| val.get("data")) {
             if body_obj.is_object() {
                 body_obj
             } else if let Some(s) = body_obj.as_str() {
-                // Nested JSON in body string
-                return Self::parse_request(s, max_entities);
+                if let Ok(inner) = serde_json::from_str::<serde_json::Value>(s) {
+                    if inner.is_object() {
+                        owned_inner = Some(inner);
+                        owned_inner.as_ref().unwrap()
+                    } else {
+                        &val
+                    }
+                } else {
+                    &val
+                }
             } else {
                 &val
             }

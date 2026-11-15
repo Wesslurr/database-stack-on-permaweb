@@ -89,14 +89,14 @@ def collect_node_metrics():
 
     for node in NODES:
         name = node["name"]
-        sname_token = f"--sname {node['sname']}"
+        sname_tokens = (f"-sname {node['sname']} ", f"--sname {node['sname']} ")
         rss_mb = 0.0
         vsz_mb = 0.0
         cpu_pct = 0.0
         pid = None
 
         for line in ps_out.splitlines():
-            if sname_token in line and "tmux" not in line:
+            if "beam.smp" in line and any(tok in f"{line} " for tok in sname_tokens):
                 parts = line.split(None, 4)
                 if len(parts) >= 4:
                     pid = int(parts[0])
@@ -229,7 +229,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             parts = raw.split("/", 1)
             port = parts[0]
             subpath = "/" + parts[1] if len(parts) > 1 else "/"
-            return proxy_request(self, port, subpath, method="GET")
+            return proxy_request(self, port, subpath, method="GET", headers=dict(self.headers))
 
         if self.path.startswith("/metrics"):
             payload = json.dumps({"status": "ok", "nodes": collect_node_metrics()}).encode("utf-8")
