@@ -224,9 +224,9 @@ def main():
             stores = [node_store, wasm_fs_store]
         else:
             stores = [node_store]
-        # Aligned snapshot intervals: Primary stays fast in RAM; replicas snapshot periodically on LMDB disk
+        # Aligned snapshot intervals with HSZ1/HSCK1 compressed checkpoints:
         if is_primary:
-            snapshot_slots = 1000
+            snapshot_slots = 25
         elif role in ("sd1", "sd2"):
             snapshot_slots = 20  # Aligned with SdSnapshotSlots in genesis
         elif role == "arbit":

@@ -54,28 +54,29 @@ else
     echo "=== [1/3] Erlang OTP $OTP_VER & Rebar3 runtime verified. ==="
 fi
 
-# 1.5. Ensure required Erlang OTP modules (os_mon, runtime_tools)
+# 1.5. Ensure required Erlang OTP modules (os_mon, runtime_tools) and Rust wasm32 target
 if ! erl -noshell -eval 'case application:load(os_mon) of ok -> halt(0); {error, {already_loaded, _}} -> halt(0); _ -> halt(1) end.' 2>/dev/null; then
     echo "=== [1.5/3] Installing missing Erlang OTP modules (erlang-os-mon, erlang-runtime-tools) ==="
     sudo apt-get update && sudo apt-get install -y erlang-os-mon erlang-runtime-tools
 fi
+if command -v rustup &>/dev/null && ! rustup target list --installed 2>/dev/null | grep -q "^wasm32-unknown-unknown$"; then
+    echo "=== [1.6/3] Installing Rust wasm32-unknown-unknown target ==="
+    rustup target add wasm32-unknown-unknown
+fi
 
-# 2. Launch cluster
+# 2. Launch cluster (compiles HyperBEAM, Forge devices, Rust WASM, and generates configs in order)
 echo "=== [2/3] Launching Multi-Node HyperBEAM Cluster ==="
 export CFLAGS="${CFLAGS:-} -Wno-error=incompatible-pointer-types"
 
-# Verify Rust WASM engine sources before cluster startup
+if [ ! -f "HyperBEAM/rebar.config" ]; then
+    echo "=== [Setup] Initializing HyperBEAM git submodule ==="
+    git submodule update --init --recursive
+fi
 if [ ! -f "engine/processes/primary/src/lib.rs" ] || [ ! -f "engine/processes/shared_data/src/lib.rs" ]; then
     echo "❌ ERROR: Rust WASM process sources missing in engine/processes/{primary,shared_data}"
     exit 1
 fi
-if [ -d "engine/processes/primary" ] && [ -d "engine/processes/shared_data" ]; then
-    echo "=== [Build] Compiling Rust WASM Engines (primary, shared_data) ==="
-    (cd engine/processes/primary && cargo build --target wasm32-unknown-unknown --release)
-    (cd engine/processes/shared_data && cargo build --target wasm32-unknown-unknown --release)
-fi
 
-python3 tools/build_configs.py
 ./tools/cluster_up.sh
 
 # 3. Serve game client

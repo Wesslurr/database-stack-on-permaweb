@@ -146,6 +146,14 @@ mkdir -p "$PROJECT_ROOT/logs"
 # Ensure epmd is running for distributed node naming
 epmd -daemon >/dev/null 2>&1 || true
 
+# Match scheduler threads to host vCPUs (clamped 2..4) and disable busy-wait
+# spinlocks so 5 BEAM VMs do not starve each other on 2-4 core Codespaces/WSL.
+HOST_CPUS=$(nproc 2>/dev/null || echo 4)
+SCHED_THREADS="$HOST_CPUS"
+[ "$SCHED_THREADS" -gt 4 ] && SCHED_THREADS=4
+[ "$SCHED_THREADS" -lt 2 ] && SCHED_THREADS=2
+NODE_ERL_FLAGS="+S ${SCHED_THREADS}:${SCHED_THREADS} +sbwt none +sbwtdcpu none +sbwtdio none +A 8 +MBas aobf"
+
 echo ""
 echo "=== [3/4] Starting 5 Independent HyperBEAM Worker Nodes in Tmux ==="
 
@@ -155,7 +163,7 @@ echo "=== [3/4] Starting 5 Independent HyperBEAM Worker Nodes in Tmux ==="
 if [ ! -f "$PROJECT_ROOT/engine/data/genesis/wallet.json" ]; then
     tmux new-session -d -s "hb-genesis" -c "$HB_SRC" "bash --noprofile --norc"
     tmux pipe-pane -t "hb-genesis" -o "cat >> \"$PROJECT_ROOT/logs/hb-genesis.log\""
-    tmux send-keys -t "hb-genesis" "export PATH=\"$PATH\" ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"8733\" HB_CONFIG=\"$PROJECT_ROOT/engine/config/genesis.json\" erl -sname hb-genesis -config config/app.config -pa _build/default/lib/*/ebin -eval '{ok, _} = application:ensure_all_started(hb).'" C-m
+    tmux send-keys -t "hb-genesis" "export PATH=\"$PATH\" ERL_FLAGS=\"$NODE_ERL_FLAGS\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"8733\" HB_CONFIG=\"$PROJECT_ROOT/engine/config/genesis.json\" erl -sname hb-genesis -config config/app.config -pa _build/default/lib/*/ebin -eval '{ok, _} = application:ensure_all_started(hb).'" C-m
     echo "  [BOOTSTRAP] Waiting for hb-genesis wallet creation..."
     for attempt in {1..40}; do
         ADDR=$(curl -s -f --max-time 1 "http://127.0.0.1:8733/~meta@1.0/info/address" 2>/dev/null || echo "")
@@ -184,7 +192,7 @@ for NODE_SPEC in "${NODES[@]}"; do
     # Start tmux session running precompiled HyperBEAM node (avoids shared _build races)
     tmux new-session -d -s "$SESSION_NAME" -c "$HB_SRC" "bash --noprofile --norc"
     tmux pipe-pane -t "$SESSION_NAME" -o "cat >> \"$PROJECT_ROOT/logs/${SESSION_NAME}.log\""
-    tmux send-keys -t "$SESSION_NAME" "export PATH=\"$PATH\" ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" erl -sname $SESSION_NAME -config config/app.config -pa _build/default/lib/*/ebin -eval '{ok, _} = application:ensure_all_started(hb).'" C-m
+    tmux send-keys -t "$SESSION_NAME" "export PATH=\"$PATH\" ERL_FLAGS=\"$NODE_ERL_FLAGS\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" erl -sname $SESSION_NAME -config config/app.config -pa _build/default/lib/*/ebin -eval '{ok, _} = application:ensure_all_started(hb).'" C-m
     echo "  [STARTED] Node '$SESSION_NAME' on port $PORT (config: $(basename "$CONFIG_PATH"))"
     # Brief pause to let node initialize its VM
     sleep 1

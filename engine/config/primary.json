@@ -27,8 +27,8 @@
   "scheduler_default_commitment_spec": "httpsig@1.0",
   "force-signed": false,
   "force_signed": false,
-  "process-snapshot-slots": 1000,
-  "process_snapshot_slots": 1000,
+  "process-snapshot-slots": 25,
+  "process_snapshot_slots": 25,
   "process-snapshot-time": false,
   "process_snapshot_time": false,
   "http-max-body": 65536,
@@ -144,7 +144,7 @@
       "requires-sign": false,
       "scheduler-commitment-spec": "httpsig@1.0",
       "scheduler_commitment_spec": "httpsig@1.0",
-      "image": "Uiuz6LaRTg8EJU3Q12G0y1IM5A0iBwdClTADCszEQPI",
+      "image": "jg6wG8YY9pqBfo7MvfJVUVg0kR3uAC598cmxcFNqJDY",
       "output-prefix": "wasm",
       "genesis-url": "http://127.0.0.1:8733"
     }
@@ -152,11 +152,11 @@
   "genesis-url": "http://127.0.0.1:8733",
   "genesis_url": "http://127.0.0.1:8733",
   "trusted-devices": {
-    "hs-wasm-output@1.0": "rnRX2sw2NBfdjCRzcGeWL7WSZlyGO27kOmc7a2pfIPo",
-    "hs-push@1.0": "yskpYoEK5GJi7D32r5KocqMopDDpo03pZX5S4u7UGiI"
+    "hs-wasm-output@1.0": "xbJMtaTeoXFWFGc6T-1qdHAQifDwNlXlIWxkBOY6lrk",
+    "hs-push@1.0": "7CfUld7PAUmoqMmmwcmQtv3KdMVZlZuRysXw0hlpGT4"
   },
   "trusted_devices": {
-    "hs-wasm-output@1.0": "rnRX2sw2NBfdjCRzcGeWL7WSZlyGO27kOmc7a2pfIPo",
-    "hs-push@1.0": "yskpYoEK5GJi7D32r5KocqMopDDpo03pZX5S4u7UGiI"
+    "hs-wasm-output@1.0": "xbJMtaTeoXFWFGc6T-1qdHAQifDwNlXlIWxkBOY6lrk",
+    "hs-push@1.0": "7CfUld7PAUmoqMmmwcmQtv3KdMVZlZuRysXw0hlpGT4"
   }
 }

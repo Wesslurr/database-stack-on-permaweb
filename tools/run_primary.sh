@@ -16,6 +16,6 @@ fi
 [ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"
 [ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
 export CFLAGS="${CFLAGS:-} -Wno-error=incompatible-pointer-types"
-export ERL_FLAGS="+S 4:4 +A 4 +MBas aobf"
+export ERL_FLAGS="+S 4:4 +sbwt none +sbwtdcpu none +sbwtdio none +A 8 +MBas aobf"
 cd "$PROJECT_ROOT/HyperBEAM"
 HB_PORT="8734" HB_CONFIG="$PROJECT_ROOT/engine/config/primary.json" erl -sname hb-primary -config config/app.config -pa _build/default/lib/*/ebin -eval '{ok, _} = application:ensure_all_started(hb).'

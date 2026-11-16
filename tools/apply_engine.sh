@@ -93,8 +93,9 @@ epmd -daemon >/dev/null 2>&1 || true
 
 for NODE_SPEC in "${NODES[@]}"; do
     IFS=":" read -r SESSION_NAME PORT CONFIG_PATH <<< "$NODE_SPEC"
-    CMD="export PATH=\"$PATH\" ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" erl -sname $SESSION_NAME -config config/app.config -pa _build/default/lib/*/ebin -eval '{ok, _} = application:ensure_all_started(hb).'"
-    tmux new-session -d -s "$SESSION_NAME" "bash --noprofile --norc -c '$CMD'"
+    CMD="export PATH=\"$PATH\" ERL_FLAGS=\"+S 4:4 +sbwt none +sbwtdcpu none +sbwtdio none +A 8 +MBas aobf\" && cd \"$HB_SRC\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"$PORT\" HB_CONFIG=\"$CONFIG_PATH\" erl -sname $SESSION_NAME -config config/app.config -pa _build/default/lib/*/ebin -eval '{ok, _} = application:ensure_all_started(hb).'"
+    printf -v ESCAPED_CMD '%q' "$CMD"
+    tmux new-session -d -s "$SESSION_NAME" "bash --noprofile --norc -c $ESCAPED_CMD"
     sleep 1
 done
 

@@ -42,6 +42,41 @@ pub enum SdAction {
 pub struct Ingress;
 
 impl Ingress {
+    pub fn parse_packed_delta(packed: &str) -> (BTreeMap<String, (f64, f64, String, Option<u64>)>, Vec<String>) {
+        let mut delta = BTreeMap::new();
+        let mut order = Vec::new();
+        for entry in packed.split(';') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let mut parts = entry.splitn(5, '|');
+            let id = match parts.next() {
+                Some(s) if !s.is_empty() => s.to_owned(),
+                _ => continue,
+            };
+            let x = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let y = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+            let third = parts.next().unwrap_or("");
+            let fourth = parts.next();
+            let (owner, tick) = match fourth {
+                Some(t_str) => (
+                    if third.is_empty() { "anonymous".to_owned() } else { third.to_owned() },
+                    t_str.parse::<u64>().ok(),
+                ),
+                None => (
+                    if third.is_empty() { "anonymous".to_owned() } else { third.to_owned() },
+                    None,
+                ),
+            };
+            if !delta.contains_key(&id) {
+                order.push(id.clone());
+            }
+            delta.insert(id, (x, y, owner, tick));
+        }
+        (delta, order)
+    }
+
     pub fn parse_delta(val: &serde_json::Value) -> (BTreeMap<String, (f64, f64, String, Option<u64>)>, Vec<String>) {
         let mut delta = BTreeMap::new();
         let mut order = Vec::new();
@@ -230,11 +265,14 @@ impl Ingress {
                 let tick_to = get_u64("tick_to");
                 let state_root = get_str("state_root");
 
-                let delta_val = root.get("delta")
-                    .or_else(|| root.get("query").and_then(|q| q.get("delta")))
-                    .unwrap_or(&serde_json::Value::Null);
-
-                let (delta, order) = Self::parse_delta(delta_val);
+                let (delta, order) = if let Some(packed_str) = get_str("packed_delta").or_else(|| get_str("packed-delta")) {
+                    Self::parse_packed_delta(&packed_str)
+                } else {
+                    let delta_val = root.get("delta")
+                        .or_else(|| root.get("query").and_then(|q| q.get("delta")))
+                        .unwrap_or(&serde_json::Value::Null);
+                    Self::parse_delta(delta_val)
+                };
 
                 SdAction::Commit {
                     batch_id,

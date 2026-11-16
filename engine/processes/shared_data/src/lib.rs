@@ -121,28 +121,34 @@ impl SdEngine {
                 match outcome {
                     CommitOutcome::Committed { status, body, batch_id, tick, state_root, drained } => {
                         let target_primary = self.target_primary();
-                        // Emit Quorum Ack to Primary via ~relay@1.0/cast
-                        let ack_body = format!(
-                            r#"{{"action":"Ack","batch_id":"{}","tick":{},"state_root":"{}","sd_signer":"{}","role":"{}","epoch":{}}}"#,
-                            json_safe(&batch_id), tick, json_safe(&state_root), json_safe(&self.sd_signer), json_safe(&self.node_role), self.state.current_epoch
-                        );
-                        let ack_msg = format!(
-                            r#"{{"resolve":"~relay@1.0/cast","relay-path":"{}/~node-process@1.0/{}/push","relay-method":"POST","relay-body":"{}","content-type":"application/json","cache-control":"no-store"}}"#,
-                            self.primary_url, target_primary, json_safe(&ack_body)
-                        );
-                        outbox.push(ack_msg);
-
-                        // Drained batches also emit Acks
-                        for d in drained {
-                            let d_ack_body = format!(
+                        if drained.is_empty() {
+                            let ack_body = format!(
                                 r#"{{"action":"Ack","batch_id":"{}","tick":{},"state_root":"{}","sd_signer":"{}","role":"{}","epoch":{}}}"#,
-                                json_safe(&d.batch_id), d.tick, json_safe(&d.state_root), json_safe(&self.sd_signer), json_safe(&self.node_role), self.state.current_epoch
+                                json_safe(&batch_id), tick, json_safe(&state_root), json_safe(&self.sd_signer), json_safe(&self.node_role), self.state.current_epoch
                             );
-                            let d_ack_msg = format!(
+                            let ack_msg = format!(
                                 r#"{{"resolve":"~relay@1.0/cast","relay-path":"{}/~node-process@1.0/{}/push","relay-method":"POST","relay-body":"{}","content-type":"application/json","cache-control":"no-store"}}"#,
-                                self.primary_url, target_primary, json_safe(&d_ack_body)
+                                self.primary_url, target_primary, json_safe(&ack_body)
                             );
-                            outbox.push(d_ack_msg);
+                            outbox.push(ack_msg);
+                        } else {
+                            let mut acks = Vec::with_capacity(1 + drained.len());
+                            acks.push(format!(
+                                r#"{{"batch_id":"{}","tick":{},"state_root":"{}","sd_signer":"{}","role":"{}","epoch":{}}}"#,
+                                json_safe(&batch_id), tick, json_safe(&state_root), json_safe(&self.sd_signer), json_safe(&self.node_role), self.state.current_epoch
+                            ));
+                            for d in drained {
+                                acks.push(format!(
+                                    r#"{{"batch_id":"{}","tick":{},"state_root":"{}","sd_signer":"{}","role":"{}","epoch":{}}}"#,
+                                    json_safe(&d.batch_id), d.tick, json_safe(&d.state_root), json_safe(&self.sd_signer), json_safe(&self.node_role), self.state.current_epoch
+                                ));
+                            }
+                            let batch_ack_body = format!(r#"{{"action":"Ack-Batch","acks":[{}]}}"#, acks.join(","));
+                            let batch_ack_msg = format!(
+                                r#"{{"resolve":"~relay@1.0/cast","relay-path":"{}/~node-process@1.0/{}/push","relay-method":"POST","relay-body":"{}","content-type":"application/json","cache-control":"no-store"}}"#,
+                                self.primary_url, target_primary, json_safe(&batch_ack_body)
+                            );
+                            outbox.push(batch_ack_msg);
                         }
 
                         // Checkpoint trigger
@@ -635,5 +641,44 @@ mod tests {
         assert_eq!(status, 200);
         assert!(body.contains("bot_close"));
         assert!(!body.contains("bot_far"));
+    }
+
+    #[test]
+    fn test_packed_delta_and_drained_ack_batch() {
+        let mut engine = SdEngine::new();
+        let mut d1 = BTreeMap::new();
+        d1.insert("bot_1".to_owned(), pack_entity(10.0, 15.0, 2, "alice"));
+        let r1 = engine.state.shards.candidate_root(&d1, 2);
+
+        let mut tmp_shards = engine.state.shards.clone();
+        tmp_shards.commit(&d1, 2);
+        let mut d2 = BTreeMap::new();
+        d2.insert("bot_1".to_owned(), pack_entity(20.5, 30.25, 4, "alice"));
+        let r2 = tmp_shards.candidate_root(&d2, 4);
+
+        // Future batch arrives first via packed_delta -> deferred (202)
+        let req2 = format!(
+            "{{\"action\":\"Commit\",\"batch_id\":\"b-2-4\",\"tick_from\":2,\"tick_to\":4,\"state_root\":\"{}\",\"packed_delta\":\"bot_1|20.500000|30.250000|alice\"}}",
+            r2
+        );
+        let (st2, b2, out2) = engine.handle_request(&req2);
+        assert_eq!(st2, 202);
+        assert!(b2.contains("\"status\":\"deferred\""));
+        assert!(out2.is_empty());
+
+        // Base batch arrives -> commits both and emits single Ack-Batch outbox message!
+        let req1 = format!(
+            "{{\"action\":\"Commit\",\"batch_id\":\"b-0-2\",\"tick_from\":0,\"tick_to\":2,\"state_root\":\"{}\",\"packed_delta\":\"bot_1|10.000000|15.000000|alice\"}}",
+            r1
+        );
+        let (st1, b1, out1) = engine.handle_request(&req1);
+        assert_eq!(st1, 200);
+        assert!(b1.contains("\"status\":\"committed\""));
+        assert_eq!(engine.state.last_tick, 4);
+        assert_eq!(engine.state.state_root, r2);
+        assert_eq!(out1.len(), 1);
+        assert!(out1[0].contains("Ack-Batch"));
+        assert!(out1[0].contains("b-0-2"));
+        assert!(out1[0].contains("b-2-4"));
     }
 }

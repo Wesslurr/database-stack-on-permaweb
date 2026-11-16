@@ -16,6 +16,15 @@ pub struct IngressPointItem {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct AckItem {
+    pub batch_id: String,
+    pub tick: Option<i64>,
+    pub state_root: Option<String>,
+    pub role: String,
+    pub epoch: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum IngressAction {
     Input {
         item: IngressPointItem,
@@ -35,6 +44,9 @@ pub enum IngressAction {
         state_root: Option<String>,
         role: String,
         epoch: Option<u64>,
+    },
+    AckBatch {
+        acks: Vec<AckItem>,
     },
     Reject {
         batch_id: String,
@@ -331,6 +343,50 @@ fn parse_message_value(
                 role,
                 epoch,
             }
+        }
+
+        "Ack-Batch" => {
+            let mut acks = Vec::new();
+            if let Some(arr) = msg
+                .get("acks")
+                .or_else(|| outer.get("acks"))
+                .and_then(|v| v.as_array())
+            {
+                for item in arr {
+                    if let Some(obj) = item.as_object() {
+                        let batch_id = obj
+                            .get("batch_id")
+                            .or_else(|| obj.get("batch-id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        if batch_id.is_empty() {
+                            continue;
+                        }
+                        let tick = obj.get("tick").and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())));
+                        let state_root = obj
+                            .get("state_root")
+                            .or_else(|| obj.get("state-root"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        let role = obj
+                            .get("role")
+                            .or_else(|| obj.get("sd_signer"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("replica")
+                            .to_string();
+                        let epoch = obj.get("epoch").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())));
+                        acks.push(AckItem {
+                            batch_id,
+                            tick,
+                            state_root,
+                            role,
+                            epoch,
+                        });
+                    }
+                }
+            }
+            IngressAction::AckBatch { acks }
         }
 
         "Reject" => {

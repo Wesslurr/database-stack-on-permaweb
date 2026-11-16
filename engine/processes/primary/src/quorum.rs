@@ -7,6 +7,7 @@ use crate::optimistic_state::{OptimisticState, TICKS_PER_BATCH};
 use crate::prelude::*;
 
 pub const ACK_DEADLINE_REQUESTS: u64 = 512;
+pub const MAX_INFLIGHT_BATCHES: usize = 4;
 pub const MAX_PENDING_BATCHES: usize = 64;
 pub const MAX_COMMITTED_HISTORY: usize = 256;
 pub const MAX_REPAIR_BATCHES: usize = 256;
@@ -45,6 +46,7 @@ pub struct PendingBatch {
     pub done: bool,
     pub expired: bool,
     pub acked_by: Vec<String>,
+    pub early_acked_role: Option<String>,
     pub cast_stage: usize,
     pub next_cast: u64,
     pub suffix: String,
@@ -184,7 +186,7 @@ impl QuorumState {
     }
 
     pub fn sync_head(&self, state: &mut OptimisticState) {
-        if let Some(p) = self.first_pending() {
+        if let Some(p) = self.latest_pending() {
             state.recompute_head(Some(p.tick_to), Some(&p.root));
         } else {
             state.recompute_head(None, None);
@@ -192,9 +194,10 @@ impl QuorumState {
     }
 
     pub fn sync_head_with_points(&self, state: &mut OptimisticState) {
-        if let Some(p) = self.first_pending() {
+        if let Some(p) = self.latest_pending() {
             state.recompute_head(Some(p.tick_to), Some(&p.root));
-            state.sync_head_points(Some(&p.delta));
+            let merged = self.merged_pending_delta();
+            state.sync_head_points(Some(&merged));
         } else {
             state.recompute_head(None, None);
             state.sync_head_points(None);
@@ -202,11 +205,39 @@ impl QuorumState {
     }
 
     pub fn first_pending(&self) -> Option<&PendingBatch> {
-        self.pending.values().find(|p| !p.done)
+        self.pending_order
+            .iter()
+            .find_map(|id| self.pending.get(id).filter(|p| !p.done))
+    }
+
+    pub fn latest_pending(&self) -> Option<&PendingBatch> {
+        self.pending_order
+            .iter()
+            .rev()
+            .find_map(|id| self.pending.get(id).filter(|p| !p.done))
+    }
+
+    pub fn merged_pending_delta(&self) -> BTreeMap<String, String> {
+        let mut combined = BTreeMap::new();
+        for id in &self.pending_order {
+            if let Some(p) = self.pending.get(id) {
+                if !p.done {
+                    for (k, v) in &p.delta {
+                        combined.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        combined
     }
 
     pub fn first_pending_mut(&mut self) -> Option<&mut PendingBatch> {
-        self.pending.values_mut().find(|p| !p.done)
+        let head_id = self
+            .pending_order
+            .iter()
+            .find(|id| self.pending.get(*id).map(|p| !p.done).unwrap_or(false))
+            .cloned();
+        head_id.and_then(move |id| self.pending.get_mut(&id))
     }
 
     pub fn pending_count(&self) -> usize {
@@ -276,7 +307,8 @@ impl QuorumState {
         }
     }
 
-    /// Builds the Commit payload for replica broadcasting.
+    /// Builds the Commit payload for replica broadcasting (compact `packed_delta` wire format
+    /// when ids/owners avoid delimiters, falling back to JSON arrays otherwise).
     pub fn commit_payload(
         batch_id: &str,
         tick_from: i64,
@@ -286,6 +318,35 @@ impl QuorumState {
         order: &[String],
         epoch: u64,
     ) -> String {
+        let can_pack = order.iter().all(|id| {
+            !id.contains('|') && !id.contains(';') && {
+                delta
+                    .get(id)
+                    .and_then(|p| unpack_entity(p))
+                    .map(|e| !e.owner.contains('|') && !e.owner.contains(';'))
+                    .unwrap_or(true)
+            }
+        });
+        if can_pack {
+            let mut packed_items = Vec::with_capacity(order.len());
+            for id in order {
+                if let Some(packed) = delta.get(id) {
+                    if let Some(e) = unpack_entity(packed) {
+                        packed_items.push(format!("{}|{:.6}|{:.6}|{}", id, e.x, e.y, e.owner));
+                    }
+                }
+            }
+            return format!(
+                r#"{{"action":"Commit","batch_id":"{}","tick_from":{},"tick_to":{},"state_root":"{}","packed_delta":"{}","epoch":{}}}"#,
+                json_safe(batch_id),
+                tick_from,
+                tick_to,
+                state_root,
+                json_safe(&packed_items.join(";")),
+                epoch
+            );
+        }
+
         let mut items = Vec::new();
         for id in order {
             if let Some(packed) = delta.get(id) {
@@ -311,7 +372,7 @@ impl QuorumState {
         )
     }
 
-    /// Opens/closes a batch and computes the candidate state root.
+    /// Opens/closes a batch and computes the candidate state root with sliding-window pipelining.
     pub fn start_batch(
         &mut self,
         state: &mut OptimisticState,
@@ -338,47 +399,64 @@ impl QuorumState {
             return (200, body, None);
         }
 
-        if let Some(in_flight) = self.first_pending() {
-            state.recompute_head(Some(in_flight.tick_to), Some(&in_flight.root));
-            let lag = (state.head_tick - state.tick).max(0);
-            let q_batch_id = state
-                .open_batch_id
-                .clone()
-                .unwrap_or_else(|| in_flight.batch_id.clone());
-            let body = format!(
-                r#"{{"status":"queued","ack":"accepted","batch_id":"{}","pending_batch":"{}","queued":{},"tick":{},"head_tick":{},"tick_to":{},"confirmed_tick":{},"lag_ticks":{},"state_root":"{}","head_root":"{}","active_entity_count":{},"point":{}{}}}"#,
-                json_safe(&q_batch_id),
-                json_safe(&in_flight.batch_id),
-                state.queue.len(),
-                state.tick,
-                state.head_tick,
-                state.head_tick,
-                state.tick,
-                lag,
-                state.state_root,
-                state.head_root,
-                state.count_entities(),
-                state.player_red_json(),
-                status_suffix
-            );
-            return (202, body, None);
+        if self.pending_count() >= MAX_INFLIGHT_BATCHES {
+            if let Some(latest) = self.latest_pending().cloned() {
+                state.recompute_head(Some(latest.tick_to), Some(&latest.root));
+                let lag = (state.head_tick - state.tick).max(0);
+                let q_batch_id = state
+                    .open_batch_id
+                    .clone()
+                    .unwrap_or_else(|| latest.batch_id.clone());
+                let body = format!(
+                    r#"{{"status":"queued","ack":"accepted","batch_id":"{}","pending_batch":"{}","queued":{},"tick":{},"head_tick":{},"tick_to":{},"confirmed_tick":{},"lag_ticks":{},"state_root":"{}","head_root":"{}","active_entity_count":{},"point":{}{}}}"#,
+                    json_safe(&q_batch_id),
+                    json_safe(&latest.batch_id),
+                    state.queue.len(),
+                    state.tick,
+                    state.head_tick,
+                    state.head_tick,
+                    state.tick,
+                    lag,
+                    state.state_root,
+                    state.head_root,
+                    state.count_entities(),
+                    state.player_red_json(),
+                    status_suffix
+                );
+                return (202, body, None);
+            }
         }
 
-        let tick_from = state.tick;
+        let tick_from = self
+            .latest_pending()
+            .map(|p| p.tick_to)
+            .unwrap_or(state.tick);
         let batch_entries = core::mem::take(&mut state.queue);
-        let tick_to = state.tick + TICKS_PER_BATCH;
-        let seq_from = batch_entries[0].seq;
-        let seq_to = batch_entries[batch_entries.len() - 1].seq;
+        let batch_inputs = core::mem::take(&mut state.queued_inputs).max(batch_entries.len());
+        let tick_to = tick_from + TICKS_PER_BATCH;
+        let seq_from = batch_entries.iter().map(|e| e.seq).min().unwrap_or(0);
+        let seq_to = batch_entries.iter().map(|e| e.seq).max().unwrap_or(seq_from);
 
         if batch_entries.len() > 1 {
             state.compacted_count += batch_entries.len() - 1;
+        }
+
+        let mut base_points_with_pending = state.points.clone();
+        for id in &self.pending_order {
+            if let Some(p) = self.pending.get(id) {
+                if !p.done {
+                    for (k, v) in &p.delta {
+                        base_points_with_pending.insert(k.clone(), v.clone());
+                    }
+                }
+            }
         }
 
         let delta_res = build_delta(
             &batch_entries,
             tick_to,
             &state.entity_last_tick,
-            &state.points,
+            &base_points_with_pending,
         );
         state.out_of_order_dropped += delta_res.out_of_order_dropped;
         for (id, t) in delta_res.temp_last_tick {
@@ -398,7 +476,11 @@ impl QuorumState {
             .take()
             .unwrap_or_else(|| make_batch_id(seq_from, seq_to, tick_from, &digest));
 
-        let new_root = state.shards.candidate_root(&delta_res.delta, tick_to);
+        let mut combined_delta = self.merged_pending_delta();
+        for (k, v) in &delta_res.delta {
+            combined_delta.insert(k.clone(), v.clone());
+        }
+        let new_root = state.shards.candidate_root(&combined_delta, tick_to);
 
         let epoch = self.topology.as_ref().map(|t| t.epoch).unwrap_or(1);
         let mut relay_messages = Vec::new();
@@ -428,7 +510,7 @@ impl QuorumState {
             delta: delta_res.delta,
             order: delta_res.order,
             entries: batch_entries,
-            inputs: (seq_to - seq_from + 1) as usize,
+            inputs: batch_inputs,
             created: self.request_clock,
             created_ts: opened_ts,
             deadline: self.request_clock + ACK_DEADLINE_REQUESTS,
@@ -437,6 +519,7 @@ impl QuorumState {
             done: false,
             expired: false,
             acked_by: Vec::new(),
+            early_acked_role: None,
             cast_stage: self
                 .topology
                 .as_ref()
@@ -636,7 +719,66 @@ impl QuorumState {
             }
         }
 
-        // Apply batch
+        let is_head = self
+            .first_pending()
+            .map(|head| head.batch_id == batch_id)
+            .unwrap_or(false);
+
+        if !is_head {
+            if let Some(p_mut) = self.pending.get_mut(batch_id) {
+                p_mut.early_acked_role = Some(role.to_string());
+                if !p_mut.acked_by.iter().any(|r| r == role) {
+                    p_mut.acked_by.push(role.to_string());
+                }
+            }
+            let p_snapshot = self.pending.get(batch_id).cloned();
+            if let Some(p_snap) = p_snapshot {
+                let body = Self::pending_body(&p_snap, state, status_suffix, "pending_earlier_batch");
+                return (202, body, None);
+            }
+        }
+
+        let mut last_body = self.apply_confirmed_batch(batch_id, role, state, status_suffix);
+
+        // Drain any subsequent front batches that already passed root/tick/epoch verification early
+        loop {
+            let next_ready = self.first_pending().and_then(|head| {
+                head.early_acked_role
+                    .as_ref()
+                    .map(|early_role| (head.batch_id.clone(), early_role.clone()))
+            });
+            match next_ready {
+                Some((next_bid, next_role)) => {
+                    last_body = self.apply_confirmed_batch(&next_bid, &next_role, state, status_suffix);
+                }
+                None => break,
+            }
+        }
+
+        // If queue has accumulated items and pipeline has room, start next batch
+        let next_relay = if !state.queue.is_empty() && self.pending_count() < MAX_INFLIGHT_BATCHES {
+            let (_, _, relay) = self.start_batch(state, status_suffix);
+            relay
+        } else {
+            None
+        };
+
+        (200, last_body, next_relay)
+    }
+
+    fn apply_confirmed_batch(
+        &mut self,
+        batch_id: &str,
+        role: &str,
+        state: &mut OptimisticState,
+        _status_suffix: &str,
+    ) -> String {
+        let mut p = match self.pending.remove(batch_id) {
+            Some(batch) => batch,
+            None => return String::new(),
+        };
+        self.pending_order.retain(|id| id != batch_id);
+
         for (id, packed) in &p.delta {
             state.points.insert(id.clone(), packed.clone());
         }
@@ -650,13 +792,16 @@ impl QuorumState {
         }
 
         p.done = true;
-        p.acked_by.push(role.to_string());
+        if !p.acked_by.iter().any(|r| r == role) {
+            p.acked_by.push(role.to_string());
+        }
         state.applied_inputs += p.inputs;
         self.last_batch = Some((batch_id.to_string(), p.tick_to, p.root.clone()));
 
-        // Add to repair batches for the other replica
         let mut acked_map = BTreeMap::new();
-        acked_map.insert(role.to_string(), true);
+        for r in &p.acked_by {
+            acked_map.insert(r.clone(), true);
+        }
         self.repair.push(RepairBatch {
             batch_id: p.batch_id.clone(),
             tick_from: p.tick_from,
@@ -708,17 +853,7 @@ impl QuorumState {
         );
 
         self.remember_committed(batch_id.to_string(), body.clone());
-        self.pending.remove(batch_id);
-
-        // If queue has accumulated items, start next batch
-        let next_relay = if !state.queue.is_empty() {
-            let (_, _, relay) = self.start_batch(state, status_suffix);
-            relay
-        } else {
-            None
-        };
-
-        (200, body, next_relay)
+        body
     }
 
     pub fn pending_body(
@@ -751,13 +886,18 @@ impl QuorumState {
     }
 
     pub fn pump_repair(&mut self, state: &OptimisticState) -> Option<Vec<(String, String)>> {
+        self.pump_repair_with_ts(state, None)
+    }
+
+    pub fn pump_repair_with_ts(
+        &mut self,
+        state: &OptimisticState,
+        now_ts: Option<i64>,
+    ) -> Option<Vec<(String, String)>> {
         let topo = match &self.topology {
             Some(t) => t,
             None => return None,
         };
-        if self.repair.is_empty() {
-            return None;
-        }
 
         let mut relays = Vec::new();
         let clock = self.request_clock;
@@ -808,10 +948,122 @@ impl QuorumState {
             true
         });
 
+        // Recover any unconfirmed pending batches whose Commit relay was lost or deferred,
+        // without clearing `expired` so Batch-Status still honestly reports 503 if quorum is down.
+        let mut resent_pending = 0usize;
+        for bid in &self.pending_order {
+            if resent_pending >= 2 {
+                break;
+            }
+            if let Some(p) = self.pending.get_mut(bid) {
+                if p.done {
+                    continue;
+                }
+                let time_due = match (now_ts, p.last_sent_ts) {
+                    (Some(now), Some(last)) if now > 1_000_000_000_000 && last > 1_000_000_000_000 => {
+                        now.saturating_sub(last) >= 350
+                    }
+                    _ => clock.saturating_sub(p.last_sent) >= 6,
+                };
+                if time_due && clock.saturating_sub(p.last_sent) >= 2 {
+                    p.last_sent = clock;
+                    if let Some(now) = now_ts {
+                        p.last_sent_ts = Some(now);
+                    }
+                    let payload = Self::commit_payload(
+                        &p.batch_id,
+                        p.tick_from,
+                        p.tick_to,
+                        &p.root,
+                        &p.delta,
+                        &p.order,
+                        epoch,
+                    );
+                    for target in &topo.sd_targets {
+                        let role_key = if !target.role.is_empty() { &target.role } else { &target.process };
+                        if !p.acked_by.iter().any(|r| r == role_key) {
+                            let url = format!("{}/~node-process@1.0/{}/push", target.url, target.process);
+                            relays.push((url, payload.clone()));
+                        }
+                    }
+                    resent_pending += 1;
+                }
+            }
+        }
+
         if relays.is_empty() {
             None
         } else {
             Some(relays)
         }
+    }
+
+    pub fn relays_for_behind_replica(
+        &mut self,
+        role: &str,
+        sd_tick: i64,
+        now_ts: Option<i64>,
+    ) -> Vec<(String, String)> {
+        let topo = match &self.topology {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let clock = self.request_clock;
+        let epoch = topo.epoch;
+        let mut targets: Vec<SdTarget> = topo
+            .sd_targets
+            .iter()
+            .filter(|t| t.role == role || t.process == role)
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            targets = topo.sd_targets.clone();
+        }
+        let mut relays = Vec::new();
+
+        for rec in &mut self.repair {
+            if rec.tick_to > sd_tick && clock.saturating_sub(rec.cast_at) >= 2 {
+                rec.cast_at = clock;
+                let payload = Self::commit_payload(
+                    &rec.batch_id,
+                    rec.tick_from,
+                    rec.tick_to,
+                    &rec.root,
+                    &rec.delta,
+                    &rec.order,
+                    epoch,
+                );
+                for t in &targets {
+                    let url = format!("{}/~node-process@1.0/{}/push", t.url, t.process);
+                    relays.push((url, payload.clone()));
+                }
+            }
+        }
+
+        for bid in &self.pending_order {
+            if let Some(p) = self.pending.get_mut(bid) {
+                if !p.done && p.tick_to > sd_tick && clock.saturating_sub(p.last_sent) >= 2 {
+                    p.last_sent = clock;
+                    if let Some(now) = now_ts {
+                        p.last_sent_ts = Some(now);
+                    }
+                    let payload = Self::commit_payload(
+                        &p.batch_id,
+                        p.tick_from,
+                        p.tick_to,
+                        &p.root,
+                        &p.delta,
+                        &p.order,
+                        epoch,
+                    );
+                    for t in &targets {
+                        let url = format!("{}/~node-process@1.0/{}/push", t.url, t.process);
+                        relays.push((url, payload.clone()));
+                    }
+                }
+            }
+        }
+
+        relays
     }
 }

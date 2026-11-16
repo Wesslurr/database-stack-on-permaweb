@@ -264,18 +264,31 @@ impl PrimaryEngine {
                     return (503, body, None);
                 }
 
-                let default_signer = parsed
-                    .client_signer
-                    .as_deref()
-                    .unwrap_or(ANONYMOUS);
+                let mut batch_new_ids = alloc::collections::BTreeSet::new();
+                let mut hit_entity_limit = false;
+                let mut accepted_in_batch = 0usize;
+                let mut skipped_unauthorized = 0usize;
+                let mut dup_batch_id: Option<String> = None;
 
                 for item in items {
                     let existing = self.state.points.get(&item.id).map(|s| s.as_str());
                     let existing_entity: Option<Entity> = existing.and_then(unpack_entity);
                     let owner_ok = match existing_entity {
-                        Some(ref e) => e.owner == ANONYMOUS || e.owner == item.owner || item.owner == default_signer,
+                        Some(ref e) => e.owner == ANONYMOUS || e.owner == item.owner,
                         None => true,
                     };
+                    if !owner_ok {
+                        skipped_unauthorized += 1;
+                        continue;
+                    }
+
+                    let is_new_entity = existing_entity.is_none()
+                        && !batch_new_ids.contains(&item.id)
+                        && !self.state.queue.iter().any(|q| q.id == item.id);
+                    if is_new_entity && (self.state.count_entities() + batch_new_ids.len()) >= self.max_entities {
+                        hit_entity_limit = true;
+                        continue;
+                    }
 
                     if !item.id.is_empty()
                         && item.id.len() <= crate::guards::MAX_ID_LENGTH
@@ -284,8 +297,27 @@ impl PrimaryEngine {
                         && item.y == item.y
                         && num::fabs(item.x) <= crate::guards::MAX_COORD
                         && num::fabs(item.y) <= crate::guards::MAX_COORD
-                        && owner_ok
                     {
+                        let input_key = crate::idempotency::IdempotencyTable::derive_key(
+                            item.key.as_deref(),
+                            &item.id,
+                            item.x,
+                            item.y,
+                            item.ts,
+                            &item.owner,
+                        );
+                        if let Some(ref k) = input_key {
+                            if let Some(disp) = self.state.idempotency.get(k) {
+                                if let Some(ref bid) = disp.batch_id {
+                                    dup_batch_id = Some(bid.clone());
+                                }
+                                continue;
+                            }
+                        }
+
+                        if is_new_entity {
+                            batch_new_ids.insert(item.id.clone());
+                        }
                         self.state.next_seq += 1;
                         let seq = self.state.next_seq;
                         let entry = compactor::QueueEntry {
@@ -296,9 +328,45 @@ impl PrimaryEngine {
                             target_tick: item.target_tick,
                             owner: item.owner,
                             ts: item.ts,
-                            key: None,
+                            key: input_key.clone(),
                         };
                         self.state.enqueue(entry, engine_ts, None, clock);
+                        if let Some(k) = input_key {
+                            self.state.idempotency.insert(
+                                k,
+                                InputDisposition {
+                                    seq,
+                                    batch_id: self.state.open_batch_id.clone(),
+                                },
+                            );
+                        }
+                        accepted_in_batch += 1;
+                    }
+                }
+
+                if accepted_in_batch == 0 && self.state.queue.is_empty() {
+                    if let Some(ref bid) = dup_batch_id {
+                        if let Some(committed_body) = self.quorum.committed.get(bid) {
+                            return (200, committed_body.clone(), None);
+                        }
+                        if let Some(p) = self.quorum.pending.get(bid) {
+                            let body = QuorumState::pending_body(p, &mut self.state, &suffix, "pending");
+                            return (202, body, None);
+                        }
+                    }
+                    if hit_entity_limit {
+                        let body = format!(
+                            r#"{{"status":"error_entity_limit_reached","ack":"none","tick":{},"state_root":"{}","active_entity_count":{},"max_entities":{}{}}}"#,
+                            self.state.tick, self.state.state_root, self.state.count_entities(), self.max_entities, suffix
+                        );
+                        return (409, body, None);
+                    }
+                    if skipped_unauthorized > 0 {
+                        let body = format!(
+                            r#"{{"status":"error_unauthorized_owner","ack":"none","tick":{},"state_root":"{}"{}}}"#,
+                            self.state.tick, self.state.state_root, suffix
+                        );
+                        return (403, body, None);
                     }
                 }
 
@@ -449,17 +517,65 @@ impl PrimaryEngine {
                 &suffix,
             ),
 
+            IngressAction::AckBatch { acks } => {
+                let mut combined_relays: Vec<(String, String)> = Vec::new();
+                let mut last_status: u16 = 200;
+                let mut last_body = format!(
+                    r#"{{"http_status":200,"status":"ok","ack":"replicated","tick":{},"state_root":"{}","batch_count":0{}}}"#,
+                    self.state.tick, self.state.state_root, suffix
+                );
+                let mut err_resp: Option<(u16, String, Option<Vec<(String, String)>>)> = None;
+                let mut processed = 0usize;
+                for ack in acks {
+                    let (st, body, relay_opt) = self.quorum.handle_ack(
+                        &ack.batch_id,
+                        ack.tick,
+                        ack.state_root.as_deref(),
+                        ack.epoch,
+                        &ack.role,
+                        &mut self.state,
+                        &suffix,
+                    );
+                    if let Some(relays) = relay_opt {
+                        combined_relays.extend(relays);
+                    }
+                    if st >= 400 {
+                        err_resp = Some((st, body, None));
+                        break;
+                    }
+                    processed += 1;
+                    last_status = st;
+                    last_body = body;
+                }
+                if let Some((st, body, _)) = err_resp {
+                    let relay_opt = if combined_relays.is_empty() { None } else { Some(combined_relays) };
+                    (st, body, relay_opt)
+                } else {
+                    let _ = processed;
+                    let relay_opt = if combined_relays.is_empty() { None } else { Some(combined_relays) };
+                    (last_status, last_body, relay_opt)
+                }
+            }
+
             IngressAction::Reject {
                 batch_id,
                 reason,
                 last_tick,
                 state_root: _,
                 sd_signer: _,
-                role: _,
+                role,
                 points,
             } => {
                 let mut retry_relays = Vec::new();
-                if reason == "replica_ahead" {
+                if reason == "replica_behind" {
+                    if let Some(sd_tick) = last_tick {
+                        retry_relays = self.quorum.relays_for_behind_replica(
+                            role.as_deref().unwrap_or(""),
+                            sd_tick,
+                            engine_ts,
+                        );
+                    }
+                } else if reason == "replica_ahead" {
                     if let Some(sd_tick) = last_tick {
                         if sd_tick > self.state.tick {
                             self.state.points.clear();
@@ -477,49 +593,59 @@ impl PrimaryEngine {
                             self.state.state_root = self.state.shards.root(sd_tick);
 
                             let epoch = self.quorum.topology.as_ref().map(|t| t.epoch).unwrap_or(1);
-                            let mut head_override: Option<(i64, String, BTreeMap<String, String>)> = None;
+                            let mut next_tick = sd_tick;
+                            let mut accum_delta: BTreeMap<String, String> = BTreeMap::new();
+                            let order_ids = self.quorum.pending_order.clone();
 
-                            if let Some(p) = self.quorum.pending.get_mut(&batch_id) {
-                                if !p.done {
-                                    let new_from = sd_tick;
-                                    let new_to = sd_tick + crate::optimistic_state::TICKS_PER_BATCH;
-                                    p.tick_from = new_from;
-                                    p.tick_to = new_to;
-                                    for val in p.delta.values_mut() {
-                                        if let Some(e) = unpack_entity(val) {
-                                            *val = crate::entity::pack_entity(e.x, e.y, new_to, &e.owner);
-                                        }
+                            for bid in order_ids {
+                                if let Some(p) = self.quorum.pending.get_mut(&bid) {
+                                    if p.done {
+                                        accum_delta.extend(p.delta.clone());
+                                        next_tick = p.tick_to;
+                                        continue;
                                     }
-                                    p.root = self.state.shards.candidate_root(&p.delta, new_to);
-                                    p.expired = false;
-                                    p.deadline = clock + crate::quorum::ACK_DEADLINE_REQUESTS;
-                                    p.last_sent = clock;
-                                    p.acked_by.clear();
-                                    head_override = Some((new_to, p.root.clone(), p.delta.clone()));
-
-                                    if let Some(ref topo) = self.quorum.topology {
-                                        let payload = QuorumState::commit_payload(
-                                            &p.batch_id,
-                                            p.tick_from,
-                                            p.tick_to,
-                                            &p.root,
-                                            &p.delta,
-                                            &p.order,
-                                            epoch,
-                                        );
-                                        for target in &topo.sd_targets {
-                                            let url = format!("{}/~node-process@1.0/{}/push", target.url, target.process);
-                                            retry_relays.push((url, payload.clone()));
+                                    if p.batch_id == batch_id || p.tick_from < next_tick {
+                                        let new_from = next_tick;
+                                        let new_to = new_from + crate::optimistic_state::TICKS_PER_BATCH;
+                                        p.tick_from = new_from;
+                                        p.tick_to = new_to;
+                                        for val in p.delta.values_mut() {
+                                            if let Some(e) = unpack_entity(val) {
+                                                *val = crate::entity::pack_entity(e.x, e.y, new_to, &e.owner);
+                                            }
                                         }
+                                        accum_delta.extend(p.delta.clone());
+                                        p.root = self.state.shards.candidate_root(&accum_delta, new_to);
+                                        p.expired = false;
+                                        p.early_acked_role = None;
+                                        p.deadline = clock + crate::quorum::ACK_DEADLINE_REQUESTS;
+                                        p.last_sent = clock;
+                                        p.acked_by.clear();
+                                        next_tick = new_to;
+
+                                        if let Some(ref topo) = self.quorum.topology {
+                                            let payload = QuorumState::commit_payload(
+                                                &p.batch_id,
+                                                p.tick_from,
+                                                p.tick_to,
+                                                &p.root,
+                                                &p.delta,
+                                                &p.order,
+                                                epoch,
+                                            );
+                                            for target in &topo.sd_targets {
+                                                let url = format!("{}/~node-process@1.0/{}/push", target.url, target.process);
+                                                retry_relays.push((url, payload.clone()));
+                                            }
+                                        }
+                                    } else {
+                                        accum_delta.extend(p.delta.clone());
+                                        next_tick = p.tick_to;
                                     }
                                 }
                             }
 
-                            if let Some((ht, hr, _delta_clone)) = head_override {
-                                self.state.recompute_head(Some(ht), Some(&hr));
-                            } else {
-                                self.state.recompute_head(None, None);
-                            }
+                            self.quorum.sync_head(&mut self.state);
                         }
                     }
                 }
@@ -898,8 +1024,9 @@ pub extern "C" fn handle(msg_ptr: *const u8, proc_ptr: *const u8) -> *const u8 {
     }
     wasm_free(proc_ptr as *mut u8);
 
+    let parsed_ts = parsed.timestamp;
     let (http_status, res_body, relay_opt) = engine.handle_request(parsed);
-    let repair_relays = engine.quorum.pump_repair(&engine.state);
+    let repair_relays = engine.quorum.pump_repair_with_ts(&engine.state, parsed_ts);
 
     // Format Messages array for outbox (commit delta broadcasts)
     let mut messages_json = Vec::new();
@@ -1114,5 +1241,91 @@ mod tests {
         assert_eq!(v2_ack["out_of_order_dropped"].as_i64(), Some(0));
         assert_eq!(v2_ack["point"]["x"].as_f64(), Some(180.0));
         assert_eq!(v2_ack["point"]["y"].as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn test_sliding_window_4_batches_and_early_ack_fifo_drain() {
+        let mut engine = PrimaryEngine::new();
+        let mut bids = Vec::new();
+        let mut roots = Vec::new();
+
+        for i in 1..=4 {
+            let req = format!(
+                r#"{{"action":"Input","id":"sw_1","x":{}.0,"y":{}.0,"client_signer":"alice","flush":true}}"#,
+                i * 10,
+                i * 20
+            );
+            let (st, body, relays) = engine.handle_request(parse_message(&req).unwrap());
+            assert_eq!(st, 202);
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            bids.push(v["batch_id"].as_str().unwrap().to_string());
+            roots.push(v["target_root"].as_str().unwrap().to_string());
+            assert_eq!(v["head_tick"].as_i64(), Some((i as i64) * 2));
+            if let Some(ref rs) = relays {
+                if let Some(first_relay) = rs.first() {
+                    assert!(first_relay.1.contains("\"packed_delta\":"));
+                }
+            }
+        }
+        assert_eq!(engine.quorum.pending.len(), 4);
+
+        // 5th flush respects MAX_INFLIGHT_BATCHES=4 (stays queued without opening a 5th inflight batch)
+        let req5 = r#"{"action":"Input","id":"sw_1","x":50.0,"y":100.0,"client_signer":"alice","flush":true}"#;
+        let (st5, body5, _) = engine.handle_request(parse_message(req5).unwrap());
+        assert_eq!(st5, 202);
+        assert!(body5.contains("\"status\":\"queued\""));
+        assert_eq!(engine.quorum.pending.len(), 4);
+        assert_eq!(engine.state.head_tick, 10);
+
+        // Early out-of-order ACKs for batch 2 & 3 stay queued (202 pending_earlier_batch)
+        for idx in [1usize, 2usize] {
+            let tick = (idx + 1) * 2;
+            let ack = format!(
+                r#"{{"action":"Ack","batch_id":"{}","tick":{},"state_root":"{}","role":"sd1","epoch":1}}"#,
+                bids[idx], tick, roots[idx]
+            );
+            let (ast, abody, _) = engine.handle_request(parse_message(&ack).unwrap());
+            assert_eq!(ast, 202);
+            assert!(abody.contains("pending_earlier_batch"));
+        }
+        assert_eq!(engine.state.tick, 0);
+
+        // Head batch 1 ACK drains batch 1 + early-acked batch 2 + batch 3 in FIFO order!
+        let ack0 = format!(
+            r#"{{"action":"Ack","batch_id":"{}","tick":2,"state_root":"{}","role":"sd1","epoch":1}}"#,
+            bids[0], roots[0]
+        );
+        let (ast0, _, _) = engine.handle_request(parse_message(&ack0).unwrap());
+        assert_eq!(ast0, 200);
+        assert_eq!(engine.state.tick, 6);
+        assert_eq!(engine.state.state_root, roots[2]);
+        assert_eq!(engine.quorum.pending.len(), 2);
+        assert!(engine.state.queue.is_empty());
+        assert_eq!(engine.state.head_tick, 10);
+    }
+
+    #[test]
+    fn test_ack_batch_and_packed_delta_payload() {
+        let mut engine = PrimaryEngine::new();
+        let w1 = r#"{"action":"Input","id":"ab_1","x":5.0,"y":6.0,"client_signer":"alice","flush":true}"#;
+        let (_, b1, _) = engine.handle_request(parse_message(w1).unwrap());
+        let v1: serde_json::Value = serde_json::from_str(&b1).unwrap();
+
+        let w2 = r#"{"action":"Input","id":"ab_1","x":7.0,"y":8.0,"client_signer":"alice","flush":true}"#;
+        let (_, b2, _) = engine.handle_request(parse_message(w2).unwrap());
+        let v2: serde_json::Value = serde_json::from_str(&b2).unwrap();
+
+        let ack_batch = format!(
+            r#"{{"action":"Ack-Batch","acks":[{{"action":"Ack","batch_id":"{}","tick":2,"state_root":"{}","role":"sd1","epoch":1}},{{"action":"Ack","batch_id":"{}","tick":4,"state_root":"{}","role":"sd1","epoch":1}}]}}"#,
+            v1["batch_id"].as_str().unwrap(),
+            v1["target_root"].as_str().unwrap(),
+            v2["batch_id"].as_str().unwrap(),
+            v2["target_root"].as_str().unwrap()
+        );
+        let (st, body, _) = engine.handle_request(parse_message(&ack_batch).unwrap());
+        assert_eq!(st, 200);
+        assert!(body.contains("\"ack\":\"replicated\""));
+        assert_eq!(engine.state.tick, 4);
+        assert_eq!(engine.quorum.pending.len(), 0);
     }
 }

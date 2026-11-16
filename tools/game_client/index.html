@@ -878,7 +878,24 @@
                 );
               }
             } else if (nowPerf - pw.t0 > 8000) {
-              // timeout fallback
+              if (!pw.checking) {
+                pw.checking = true;
+                fetch(`${discoveredPrimaryUrl}/~node-process@1.0/primary/push/output~message@1.0`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", "Accept": "application/json", ...NO_CACHE_HEADERS },
+                  cache: "no-store",
+                  body: JSON.stringify({ action: "Batch-Status", batch_id: pw.batchId })
+                }).then(async r => {
+                  const raw = await r.json().catch(() => ({}));
+                  const status = Number(raw.status || r.status || 503);
+                  if (status === 503 || status === 404) {
+                    setGateBadge("unavailable", unwrapBody(raw));
+                    rollbackFromSD(`Batch ${pw.batchId} unavailable (${status})`);
+                  }
+                }).catch(() => {
+                  rollbackFromSD("L1 confirmation timeout");
+                });
+              }
             } else {
               remainingPlayer.push(pw);
             }
@@ -1103,7 +1120,7 @@
     function pumpWorker(wName) {
       const wp = workerPipelines[wName];
       if (!wp) return;
-      const maxInflightPerWorker = 2; // Pipelined 2 in-flight writes
+      const maxInflightPerWorker = Math.max(1, Math.min(4, Number(swarm.maxInflight || 2))); // Bounded by Primary MAX_INFLIGHT_BATCHES=4 sliding window
       while (wp.inflight < maxInflightPerWorker && wp.queue.length > 0) {
         const batchItems = [];
         while (wp.queue.length > 0 && batchItems.length < 100) {
@@ -1239,7 +1256,7 @@
       const elQueue = document.getElementById("telQueue");
       if (elQueue) elQueue.textContent = `${totalQueued} queued`;
       const elInflight = document.getElementById("telInflight");
-      if (elInflight) elInflight.textContent = `${totalInflight} / 2`;
+      if (elInflight) elInflight.textContent = `${totalInflight} / ${Math.max(1, Math.min(4, Number(swarm.maxInflight || 2)))}`;
       const elLag = document.getElementById("telLag");
       if (elLag) elLag.textContent = `${lastNow.lag || 0} ticks`;
       const elComp = document.getElementById("telCompacted");
@@ -2060,7 +2077,10 @@
           appendLog(`<span class="err">Server backpressure (503):</span> Quorum busy or in-flight buffer full. Retrying write...`);
           return;
         }
-        if (http !== 202 && http !== 200) throw new Error(`Push HTTP ${http}`);
+        if (http !== 202 && http !== 200) {
+          const reason = (body && (body.status || body.error || body.reason)) || "";
+          throw new Error(`Push HTTP ${http}${reason ? ` (${reason})` : ""}`);
+        }
 
         const l0Rtt = Math.round(performance.now() - t0);
         const headTick = Number(body.head_tick != null ? body.head_tick : (body.tick_to != null ? body.tick_to : (body.tick != null ? body.tick : nextTargetTick)));

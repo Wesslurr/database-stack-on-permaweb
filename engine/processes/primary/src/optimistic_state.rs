@@ -34,6 +34,7 @@ pub struct OptimisticState {
 
     // Ingress queue
     pub queue: Vec<QueueEntry>,
+    pub queued_inputs: usize,
     pub open_batch_id: Option<String>,
     pub batch_opened_ts: Option<i64>,
     pub next_seq: u64,
@@ -71,6 +72,7 @@ impl OptimisticState {
             head_points: BTreeMap::new(),
 
             queue: Vec::new(),
+            queued_inputs: 0,
             open_batch_id: None,
             batch_opened_ts: None,
             next_seq: 0,
@@ -216,6 +218,7 @@ impl OptimisticState {
                 ));
             }
         }
+        self.queued_inputs += 1;
         enqueue_or_coalesce(&mut self.queue, entry, &mut self.compacted_count);
     }
 

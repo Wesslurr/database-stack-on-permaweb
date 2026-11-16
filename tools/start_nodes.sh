@@ -26,7 +26,7 @@ start_node() {
     echo "Starting $SNAME on port $PORT..."
     tmux kill-session -t "$SNAME" 2>/dev/null || true
     sleep 1
-    tmux new-session -d -s "$SNAME" "bash --noprofile --norc -c 'export PATH=\"$PATH\" ERL_FLAGS=\"+S 4:4 +A 4 +MBas aobf\" && cd \"$HB_SRC\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"$PORT\" HB_CONFIG=\"$CFG\" erl -sname $SNAME -config config/app.config -pa _build/default/lib/*/ebin -eval \"{ok, _} = application:ensure_all_started(hb).\"'"
+    tmux new-session -d -s "$SNAME" "bash --noprofile --norc -c 'export PATH=\"$PATH\" ERL_FLAGS=\"+S 4:4 +sbwt none +sbwtdcpu none +sbwtdio none +A 8 +MBas aobf\" && cd \"$HB_SRC\" && HB_PRINT=\"error,http_error,cron_error,hook_error,warning,compute_short\" HB_PORT=\"$PORT\" HB_CONFIG=\"$CFG\" erl -sname $SNAME -config config/app.config -pa _build/default/lib/*/ebin -eval \"{ok, _} = application:ensure_all_started(hb).\"'"
 }
 
 start_node hb-genesis 8733 "$PROJECT_ROOT/engine/config/genesis.json"
